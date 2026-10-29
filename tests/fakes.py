@@ -148,3 +148,19 @@ class _FakeDb:
 
     def query(self, query, params=None):
         return (self._conn.execute(query, params) if params else self._conn.execute(query)).fetchall()
+
+
+class _CorpManager:
+    def __init__(self, corporations):
+        self._corporations = corporations
+
+    def get_corporations(self):
+        return list(self._corporations)
+
+
+class _CharManager:
+    def __init__(self, characters):
+        self._characters = characters
+
+    def get_characters(self):
+        return list(self._characters)

@@ -2,62 +2,20 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from sqlalchemy import create_engine
-from sqlalchemy.orm import Session, sessionmaker
 
 from eve_online_industry_tracker.application.industry.service import IndustryService  # noqa: E402
-from eve_online_industry_tracker.db_models import (  # noqa: E402
-    BaseApp,
-    BaseSde,
+from eve_online_industry_tracker.db_models import (
     Blueprints,
     CharacterAssetHistoryModel,
     CharacterAssetsModel,
     CharacterIndustryJobsModel,
 )
+from fakes import _CorpManager, _CharManager
 
 
-class _SessionProvider:
-    def __init__(self, app_factory, sde_factory):
-        self._app_factory = app_factory
-        self._sde_factory = sde_factory
-
-    def app_session(self) -> Session:
-        return self._app_factory()
-
-    def sde_session(self) -> Session:
-        return self._sde_factory()
-
-    def oauth_session(self) -> Session:
-        raise RuntimeError("oauth session not needed in this test")
-
-
-class _CharManager:
-    def __init__(self, characters):
-        self._characters = characters
-
-    def get_characters(self):
-        return list(self._characters)
-
-
-class _CorpManager:
-    def __init__(self, corporations):
-        self._corporations = corporations
-
-    def get_corporations(self):
-        return list(self._corporations)
-
-
-def _make_sessions() -> tuple[sessionmaker, sessionmaker]:
-    app_engine = create_engine("sqlite:///:memory:")
-    sde_engine = create_engine("sqlite:///:memory:")
-    BaseApp.metadata.create_all(bind=app_engine)
-    BaseSde.metadata.create_all(bind=sde_engine)
-    return sessionmaker(bind=app_engine), sessionmaker(bind=sde_engine)
-
-
-def _build_service(*, app_factory, sde_factory, characters, corporations) -> IndustryService:
+def _build_service(*, sessions, characters, corporations) -> IndustryService:
     service = object.__new__(IndustryService)
-    service._sessions = _SessionProvider(app_factory, sde_factory)  # type: ignore[attr-defined]
+    service._sessions = sessions  # type: ignore[attr-defined]
     service._state = SimpleNamespace(  # type: ignore[attr-defined]
         esi_service=None,
         char_manager=_CharManager(characters),
@@ -66,10 +24,9 @@ def _build_service(*, app_factory, sde_factory, characters, corporations) -> Ind
     return service
 
 
-def test_get_owned_blueprint_assets_falls_back_to_historical_rows() -> None:
-    app_factory, sde_factory = _make_sessions()
+def test_get_owned_blueprint_assets_falls_back_to_historical_rows(session_provider) -> None:
 
-    app_session = app_factory()
+    app_session = session_provider.app_session()
     app_session.add(
         CharacterAssetHistoryModel(
             character_id=1,
@@ -102,14 +59,13 @@ def test_get_owned_blueprint_assets_falls_back_to_historical_rows() -> None:
     app_session.commit()
     app_session.close()
 
-    sde_session = sde_factory()
+    sde_session = session_provider.sde_session()
     sde_session.add(Blueprints(blueprintTypeID=5001, maxProductionLimit=1, activities={}))
     sde_session.commit()
     sde_session.close()
 
     service = _build_service(
-        app_factory=app_factory,
-        sde_factory=sde_factory,
+        sessions=session_provider,
         characters=[{"character_id": 1, "character_name": "Builder", "corporation_id": 10}],
         corporations=[],
     )
@@ -130,10 +86,9 @@ def test_get_owned_blueprint_assets_falls_back_to_historical_rows() -> None:
     assert float(asset.acquisition_total_cost or 0.0) == 88.0
 
 
-def test_get_owned_item_inventory_prefers_historical_cost_over_market_fallback() -> None:
-    app_factory, sde_factory = _make_sessions()
+def test_get_owned_item_inventory_prefers_historical_cost_over_market_fallback(session_provider) -> None:
 
-    app_session = app_factory()
+    app_session = session_provider.app_session()
     app_session.add(
         CharacterAssetsModel(
             character_id=1,
@@ -180,8 +135,7 @@ def test_get_owned_item_inventory_prefers_historical_cost_over_market_fallback()
     app_session.close()
 
     service = _build_service(
-        app_factory=app_factory,
-        sde_factory=sde_factory,
+        sessions=session_provider,
         characters=[{"character_id": 1, "character_name": "Builder", "corporation_id": 10}],
         corporations=[],
     )

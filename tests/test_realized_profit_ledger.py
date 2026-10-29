@@ -3,12 +3,8 @@ from __future__ import annotations
 import json
 
 import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.orm import Session, sessionmaker
 
-from eve_online_industry_tracker.infrastructure.models import (  # noqa: E402
-    BaseApp,
-    BaseSde,
+from eve_online_industry_tracker.infrastructure.models import (
     Blueprints,
     CharacterModel,
     CharacterIndustryJobsModel,
@@ -39,16 +35,8 @@ _MARKET_FEES = json.dumps({"jita_4_4": {
     "rates": {"sales_tax_fraction": 0.5, "broker_fee_fraction": 0.5}}})
 
 
-def _make_sessions() -> tuple[Session, Session]:
-    app_engine = create_engine("sqlite:///:memory:")
-    sde_engine = create_engine("sqlite:///:memory:")
-    BaseApp.metadata.create_all(bind=app_engine)
-    BaseSde.metadata.create_all(bind=sde_engine)
-    return sessionmaker(bind=app_engine)(), sessionmaker(bind=sde_engine)()
-
-
-def test_realized_profit_ledger_builds_from_completed_industry_jobs() -> None:
-    app_session, sde_session = _make_sessions()
+def test_realized_profit_ledger_builds_from_completed_industry_jobs(session_provider) -> None:
+    app_session, sde_session = session_provider.app_session(), session_provider.sde_session()
 
     app_session.add(
         CharacterModel(
@@ -143,8 +131,8 @@ def test_realized_profit_ledger_builds_from_completed_industry_jobs() -> None:
     assert len(persisted) == 1
 
 
-def test_realized_profit_ledger_prefers_persisted_job_cost_snapshot() -> None:
-    app_session, sde_session = _make_sessions()
+def test_realized_profit_ledger_prefers_persisted_job_cost_snapshot(session_provider) -> None:
+    app_session, sde_session = session_provider.app_session(), session_provider.sde_session()
 
     app_session.add(
         CharacterModel(
@@ -247,8 +235,8 @@ def test_build_market_price_map_prefers_lower_available_price() -> None:
     assert price_map[36] == 8.0
 
 
-def test_resolve_industry_job_cost_snapshot_applies_blueprint_material_efficiency() -> None:
-    _, sde_session = _make_sessions()
+def test_resolve_industry_job_cost_snapshot_applies_blueprint_material_efficiency(session_provider) -> None:
+    sde_session = session_provider.sde_session()
 
     sde_session.add(
         Blueprints(
@@ -290,8 +278,8 @@ def test_resolve_industry_job_cost_snapshot_applies_blueprint_material_efficienc
     assert snapshot["source"] == "market_snapshot_estimate"
 
 
-def test_realized_profit_ledger_marks_unpriced_sales_low_confidence() -> None:
-    app_session, sde_session = _make_sessions()
+def test_realized_profit_ledger_marks_unpriced_sales_low_confidence(session_provider) -> None:
+    app_session, sde_session = session_provider.app_session(), session_provider.sde_session()
 
     app_session.add(
         CharacterModel(
@@ -356,8 +344,8 @@ def test_a_stored_untracked_row_is_read_back_without_a_profit() -> None:
     assert row["realized_margin_fraction"] is None
 
 
-def test_realized_profit_ledger_seeds_opening_inventory_from_first_known_build_cost() -> None:
-    app_session, sde_session = _make_sessions()
+def test_realized_profit_ledger_seeds_opening_inventory_from_first_known_build_cost(session_provider) -> None:
+    app_session, sde_session = session_provider.app_session(), session_provider.sde_session()
 
     app_session.add(
         CharacterModel(
@@ -461,11 +449,11 @@ def test_realized_profit_ledger_seeds_opening_inventory_from_first_known_build_c
     assert second_row["source_mix"]["industry_build"]["quantity"] == 5
 
 
-def test_character_realized_profit_excludes_non_personal_sales() -> None:
+def test_character_realized_profit_excludes_non_personal_sales(session_provider) -> None:
     # Corp sell orders (is_personal=False) appear in CharacterWalletTransactionsModel
     # but belong to the corporation ledger, not the character ledger. They must be
     # excluded to prevent double-counting and Trade misclassification.
-    app_session, sde_session = _make_sessions()
+    app_session, sde_session = session_provider.app_session(), session_provider.sde_session()
 
     app_session.add(
         CharacterModel(
@@ -507,8 +495,8 @@ def test_character_realized_profit_excludes_non_personal_sales() -> None:
     assert len(persisted) == 0
 
 
-def test_character_realized_profit_estimates_market_fees_without_journal() -> None:
-    app_session, sde_session = _make_sessions()
+def test_character_realized_profit_estimates_market_fees_without_journal(session_provider) -> None:
+    app_session, sde_session = session_provider.app_session(), session_provider.sde_session()
 
     app_session.add(
         CharacterModel(
@@ -554,8 +542,8 @@ def test_character_realized_profit_estimates_market_fees_without_journal() -> No
     assert row["fee_capture_mode"] == "estimated_market_fees"
 
 
-def test_corporation_realized_profit_ledger_uses_gross_only_fee_capture() -> None:
-    app_session, sde_session = _make_sessions()
+def test_corporation_realized_profit_ledger_uses_gross_only_fee_capture(session_provider) -> None:
+    app_session, sde_session = session_provider.app_session(), session_provider.sde_session()
 
     sde_session.add(
         Blueprints(
@@ -628,9 +616,9 @@ def test_corporation_realized_profit_ledger_uses_gross_only_fee_capture() -> Non
     assert len(persisted) == 1
 
 
-def test_corporation_realized_profit_journal_matched_fee_capture() -> None:
+def test_corporation_realized_profit_journal_matched_fee_capture(session_provider) -> None:
     """Corp ledger row uses journal_matched mode when brokers_fee and transaction_tax entries exist within the time window."""
-    app_session, sde_session = _make_sessions()
+    app_session, sde_session = session_provider.app_session(), session_provider.sde_session()
 
     app_session.add(CorporationModel(corporation_id=20, corporation_name="Test Corp"))
     app_session.add(
@@ -695,9 +683,9 @@ def test_corporation_realized_profit_journal_matched_fee_capture() -> None:
     assert row["sales_tax_amount"] == 20.0
 
 
-def test_corporation_realized_profit_falls_back_gracefully_when_no_journal_match() -> None:
+def test_corporation_realized_profit_falls_back_gracefully_when_no_journal_match(session_provider) -> None:
     """Corp ledger row falls back to gross_only when no journal entries match."""
-    app_session, sde_session = _make_sessions()
+    app_session, sde_session = session_provider.app_session(), session_provider.sde_session()
 
     app_session.add(CorporationModel(corporation_id=21, corporation_name="No Journal Corp"))
     app_session.add(
@@ -735,7 +723,7 @@ def test_corporation_realized_profit_falls_back_gracefully_when_no_journal_match
     assert row["total_fees_amount"] == 0.0
 
 
-def test_corporation_realized_profit_classifies_char_job_as_manufacturing_when_corp_also_bought_same_type() -> None:
+def test_corporation_realized_profit_classifies_char_job_as_manufacturing_when_corp_also_bought_same_type(session_provider) -> None:
     """Corp sell order for a type that a character manufactured should show as Manufacturing
     even when the corporation also has market buy transactions for that same type.
 
@@ -743,7 +731,7 @@ def test_corporation_realized_profit_classifies_char_job_as_manufacturing_when_c
     dropped the supplemental character industry-job lots. The sell then matched only
     the corp market-buy lot and was classified as Trade.
     """
-    app_session, sde_session = _make_sessions()
+    app_session, sde_session = session_provider.app_session(), session_provider.sde_session()
 
     app_session.add(CorporationModel(corporation_id=30, corporation_name="Mixed Source Corp"))
 
@@ -821,7 +809,7 @@ def test_corporation_realized_profit_classifies_char_job_as_manufacturing_when_c
     assert row["source_mix"]["industry_build_transferred"]["quantity"] == 5
 
 
-def test_corporation_realized_profit_char_and_corp_job_same_type_both_manufacturing() -> None:
+def test_corporation_realized_profit_char_and_corp_job_same_type_both_manufacturing(session_provider) -> None:
     """When a corp industry job AND a character industry job both produce the same type,
     and all units are sold via a single corp sell order, every unit must be classified
     as Manufacturing — none should fall through to untracked/Trade.
@@ -829,7 +817,7 @@ def test_corporation_realized_profit_char_and_corp_job_same_type_both_manufactur
     Previously _covered_from_corp_jobs blocked the char job lots whenever the corp had
     its own manufacturing job for the same type_id, leaving the char-built units untracked.
     """
-    app_session, sde_session = _make_sessions()
+    app_session, sde_session = session_provider.app_session(), session_provider.sde_session()
 
     app_session.add(CorporationModel(corporation_id=40, corporation_name="Mixed Mfg Corp"))
 
@@ -906,7 +894,7 @@ def test_corporation_realized_profit_char_and_corp_job_same_type_both_manufactur
     assert abs(row["allocated_cost"] - 308.0) < 0.01
 
 
-def test_corporation_realized_profit_splits_multiunit_broker_fee_across_sells() -> None:
+def test_corporation_realized_profit_splits_multiunit_broker_fee_across_sells(session_provider) -> None:
     """A corp market order's lump-sum broker_fee is split equally across all units that sell.
 
     Before this fix three bugs caused the -7.5M Deluge profit to be wrong:
@@ -918,7 +906,7 @@ def test_corporation_realized_profit_splits_multiunit_broker_fee_across_sells() 
     transaction_tax = 30 ISK per unit (NULL context_id, date-proximity fallback).
     Expected per-unit net_revenue = 1000 − 30 (broker) − 30 (tax) = 940 ISK each.
     """
-    app_session, sde_session = _make_sessions()
+    app_session, sde_session = session_provider.app_session(), session_provider.sde_session()
     app_session.add(CorporationModel(corporation_id=50, corporation_name="Multi-Unit Corp"))
 
     # Three individual sell transactions for the same type at the same price,
