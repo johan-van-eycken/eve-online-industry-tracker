@@ -140,6 +140,17 @@ class FacilitiesMixin:
             decision = _industry_facility.Decision(False, f"needs {label}: {decision.reason}", decision.uncertain)
         return decision
 
+    @classmethod
+    def _stamp_facility_gate(cls, rows: list[dict[str, Any]], profile_payload: dict[str, Any] | None) -> None:
+        """Every row's facility_gate_reason: why the profile's facility cannot
+        build it (a shipyard hull without its shipyard), None when it can. The
+        Industry Builder still shows the row; the daily planner does not build it."""
+        for row in rows:
+            gate = cls._facility_gate(manufacturing_group=row.get("manufacturing_group"),
+                                      profile_payload=profile_payload, group_id=row.get("group_id"))
+            cls._warn_gate_once(FacilitiesMixin._facility_gate_warned, "Facility gate", gate)
+            row["facility_gate_reason"] = None if gate.allowed else gate.reason
+
     @staticmethod
     def _warn_gate_once(warned: set[str], prefix: str, decision: Any) -> None:
         if decision.uncertain and decision.reason and FacilitiesMixin._first_warning(warned, decision.reason):

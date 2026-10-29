@@ -83,12 +83,19 @@ def get_material_cost_total(row: dict[str, Any]) -> float | None:
     return _as_optional_float(get_manufacturing_job(row).get("material_cost"))
 
 
+def get_facility_gate_reason(row: dict[str, Any]) -> str | None:
+    """Why the overview's industry profile cannot build this row (e.g. "needs
+    Standup Capital Shipyard I: ..."), or None. None also for a row cached
+    before the gate was stamped: it is gated from the next refresh on."""
+    reason = row.get("facility_gate_reason")
+    return str(reason) if reason else None
+
+
 def get_profit_upper_bound_reason(row: dict[str, Any]) -> str | None:
     """"profit is an upper bound: job fees unknown for: ..." when the producer
     left unpriced job fees out of the row's total_cost (then
     profit, margin and ISK/h are upper bounds and total_cost a lower bound),
-    else None. The one wording of the planner, the decision reason and the
-    Portfolio warnings."""
+    else None. The one wording of the planner and the decision reason."""
     reasons = get_manufacturing_job(row).get("job_fee_unknown_reasons")
     if not reasons:
         return None

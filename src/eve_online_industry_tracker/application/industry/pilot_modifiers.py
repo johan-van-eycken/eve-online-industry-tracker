@@ -12,19 +12,15 @@ from collections.abc import Mapping
 from typing import Any
 
 from sqlalchemy import bindparam, text
-from eve_online_industry_tracker.db_models import Blueprints
 from eve_online_industry_tracker.application.errors import ServiceError
 from eve_online_industry_tracker.infrastructure.industry_adapter import get_type_data
 from eve_online_industry_tracker.application.industry.research_time import research_skill_reductions
 from eve_online_industry_tracker.application.industry.invention_model import CharacterSlotCapacity
 from eve_online_industry_tracker.application.industry.character_slots import (
-    activity_skill_requirements,
-    meets_skill_levels,
-    required_skill_levels,
     research_slot_capacity,
     skill_levels_by_name as _character_skill_levels_by_name,
 )
-from eve_online_industry_tracker.infrastructure.sde.blueprints import activity_skills, round_material_quantity
+from eve_online_industry_tracker.infrastructure.sde.blueprints import round_material_quantity
 from eve_online_industry_tracker.infrastructure.sde.skills import get_encryption_skill_type_ids
 
 
@@ -599,69 +595,3 @@ class PilotModifiersMixin:
 
         return capacities
 
-    def get_blueprint_skill_qualification(
-        self,
-        *,
-        blueprint_type_ids: list[int],
-    ) -> dict[int, dict[int, bool]]:
-        """
-        For each blueprint_type_id, whether each configured character meets
-        the SDE skills of its manufacturing activity (a reaction formula's
-        reaction): the shared job skill check (character_slots), the one the
-        daily planner assigns jobs by.
-
-        Never plan what cannot be executed: a blueprint not in the SDE, or
-        without a manufacturing / reaction activity, qualifies nobody, and a
-        character whose skills cannot be read does not qualify (both logged
-        at WARNING). The SDE keys activities by name; this used to read
-        activities["1"], found nothing, and let every character qualify.
-
-        Returns: {blueprint_type_id: {character_id: bool}}
-        """
-        if not blueprint_type_ids:
-            return {}
-
-        characters = self._state.char_manager.get_characters()
-        character_ids: list[int] = [int(c["character_id"]) for c in characters if c.get("character_id")]
-
-        # Trained skill levels per character; None: they cannot be read.
-        char_skill_levels: dict[int, dict[int, int] | None] = {}
-        for character_id in character_ids:
-            try:
-                char_skill_levels[character_id] = self._get_character_trained_skill_levels(
-                    character_id=character_id
-                )
-            except ServiceError as exc:
-                logger.warning("Blueprint skill qualification: the skills of character %s cannot be read (%s); it "
-                               "qualifies for no blueprint", character_id, exc)
-                char_skill_levels[character_id] = None
-
-        sde_session: Any = self._sessions.sde_session()
-        try:
-            blueprint_rows = (
-                sde_session.query(Blueprints)
-                .filter(Blueprints.blueprintTypeID.in_(blueprint_type_ids))
-                .all()
-            )
-        finally:
-            close = getattr(sde_session, "close", None)
-            if callable(close):
-                close()
-        blueprint_data = {int(bp.blueprintTypeID): {"activity_skills": activity_skills(bp.activities)}
-                          for bp in blueprint_rows}
-
-        result: dict[int, dict[int, bool]] = {}
-        for bp_type_id in blueprint_type_ids:
-            entries, unknown = activity_skill_requirements(blueprint_data, bp_type_id, "manufacturing")
-            if entries is None:
-                logger.warning("Blueprint skill qualification: %s; no character qualifies", unknown)
-                result[bp_type_id] = {cid: False for cid in character_ids}
-                continue
-            required_levels = required_skill_levels(entries)
-            result[bp_type_id] = {
-                cid: char_skill_levels.get(cid) is not None
-                and meets_skill_levels(required_levels, char_skill_levels[cid] or {})
-                for cid in character_ids
-            }
-
-        return result

@@ -83,16 +83,14 @@ _SUPERCARRIER = (659, "Supercarrier")
 
 
 def _can(hull, profile, category=(6, "Ship")):
-    """Whether the production path (the portfolio candidate filter) keeps a
-    row of this hull for the profile."""
+    """Whether the overview's facility gate lets the profile build this hull."""
     S = _producer()
     group_id, name = hull
     label = S._infer_manufacturing_group({"group_id": group_id, "group_name": name, "category_id": category[0],
                                          "category_name": category[1]})
     row = {"type_id": 1, "type_name": name, "group_id": group_id, "manufacturing_group": label}
-    if profile is None:
-        return S._facility_gate(manufacturing_group=label, profile_payload=None, group_id=group_id).allowed
-    return bool(S._filter_overview_rows_for_portfolio_candidates([row], industry_profile_payload=profile))
+    S._stamp_facility_gate([row], profile)
+    return row["facility_gate_reason"] is None
 
 
 # --- The hull groups come from CCP's assembly lines ----------------------------------
@@ -298,37 +296,6 @@ def test_the_wrapper_without_a_production_caller_is_gone():
     assert not hasattr(_producer(), "_facility_can_manufacture_group")
 
 
-def _portfolio_service(profile):
-    S = _producer()
-    service = S(state=SimpleNamespace(esi_service=None, admin_settings=None, db_sde=None))
-    rows = [{"type_id": 671, "type_name": "Erebus", "group_id": 30, "manufacturing_group": "All Ships"},
-            {"type_id": 19720, "type_name": "Revelation", "group_id": 485, "manufacturing_group": "Capital Ships"}]
-    service.industry_manufacturing_product_overview_payload = lambda **kw: {"rows": rows}
-    service._resolve_industry_profile_context = lambda **kw: profile
-    service._build_portfolio_candidates = lambda rows, **kw: []
-    return service
-
-
-def test_with_no_profile_the_response_says_the_gate_was_not_applied():
-    payload = _portfolio_service(None).industry_manufacturing_portfolio_candidates_payload()
-    summary = payload["summary"]
-    assert summary["facility_gate_applied"] is False
-    assert summary["facility_gate_not_applied_reason"] == "no industry profile"
-    # Facility-agnostic: the capitals stay.
-    assert [r["type_id"] for r in payload["rows"]] == [671, 19720]
-    assert payload["facility_gate_hidden"] == []
-
-
-def test_with_a_profile_the_response_says_the_gate_was_applied_and_what_it_hid():
-    payload = _portfolio_service(structure_profile("Azbel", "low")).industry_manufacturing_portfolio_candidates_payload()
-    summary = payload["summary"]
-    assert summary["facility_gate_applied"] is True
-    assert "facility_gate_not_applied_reason" not in summary
-    assert [r["type_id"] for r in payload["rows"]] == [19720]
-    assert [h["type_id"] for h in payload["facility_gate_hidden"]] == [671]
-    assert summary["facility_gate_hidden_count"] == 1
-
-
 # --- Supercapitals: NPC nullsec refused, the sovereignty upgrade is assumed -----------
 
 @pytest.mark.parametrize("hull", [_TITAN, _SUPERCARRIER])
@@ -365,23 +332,17 @@ def test_the_assumed_sovereignty_warning_is_logged_once(caplog):
     assert len([r for r in caplog.records if "sovereignty" in r.getMessage()]) == 1
 
 
-# --- The gate's reason reaches the response -----------------------------------------
+# --- The gate names the missing shipyard ----------------------------------------------
 
-def test_the_candidate_filter_reports_each_hidden_row_and_its_reason():
+def test_the_gate_names_the_missing_shipyard():
     S = _producer()
-    rows = [
-        {"type_id": 19720, "type_name": "Revelation", "group_id": 485, "manufacturing_group": "Capital Ships"},
-        {"type_id": 20185, "type_name": "Charon", "group_id": 513, "manufacturing_group": "Basic Large Ships"},
-        {"type_id": 671, "type_name": "Erebus", "group_id": 30, "manufacturing_group": "All Ships"},
-    ]
-    hidden: list[dict] = []
-    kept = S._filter_overview_rows_for_portfolio_candidates(
-        rows, industry_profile_payload=structure_profile("Raitaru", "low"), facility_gate_hidden=hidden)
-    assert [r["type_id"] for r in kept] == [20185]
-    assert [h["type_id"] for h in hidden] == [19720, 671]
-    assert all(h["reason"] for h in hidden)
-    assert "Capital Shipyard" in hidden[0]["reason"]
-    assert "Supercapital Shipyard" in hidden[1]["reason"]
+    profile = structure_profile("Raitaru", "low")
+    gates = {type_id: S._facility_gate(manufacturing_group=group, profile_payload=profile, group_id=group_id)
+             for type_id, group_id, group in ((19720, 485, "Capital Ships"), (20185, 513, "Basic Large Ships"),
+                                              (671, 30, "All Ships"))}
+    assert [t for t, gate in gates.items() if gate.allowed] == [20185]
+    assert "Capital Shipyard" in gates[19720].reason
+    assert "Supercapital Shipyard" in gates[671].reason
 
 
 # --- The reaction gate ---------------------------------------------------------------
@@ -656,3 +617,17 @@ def test_the_rig_catalog_lists_every_engineering_and_reactor_rig(sde_session):
         assert catalog[type_id]["name"]
     assert 48003 not in catalog  # Upwell outpost conversion rig
     assert any("Copy" in r["name"] for r in catalog.values())
+
+
+def test_the_overview_stamps_each_row_with_its_facility_gate_reason():
+    from industry_service_fakes import _blueprint_row, _build_service
+
+    service = _build_service(
+        blueprint_rows=[_blueprint_row()], profile=None, character_modifiers=None, trained_skill_levels={},
+        owned_assets=([], [], {}, {}, {}),
+        adjusted_price_map={34: {"adjusted_price": 5.0}, 5001: {"adjusted_price": 100.0}},
+    )
+    rows = service.industry_manufacturing_product_overview(
+        build_from_bpc=False, have_blueprint_source_only=False, maximize_bp_runs=False, character_id=1)
+    # No industry profile: facility-agnostic, every row buildable, but the field is set.
+    assert rows and [r["facility_gate_reason"] for r in rows] == [None] * len(rows)

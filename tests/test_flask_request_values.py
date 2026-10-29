@@ -73,66 +73,7 @@ def test_an_explicit_zero_is_kept_not_replaced_by_the_default():
     assert _number_param({"x": "0"}, "x", 5, int) == 0
 
 
-def test_candidate_override_rejects_infinity_with_a_400():
-    from flask_app.routes.industry import _candidate_directives_payload
-
-    with pytest.raises(ServiceError) as excinfo:
-        _candidate_directives_payload([{"overview_row_id": "r1", "target_units_override": math.inf}])
-    assert excinfo.value.status_code == 400
-    assert "target_units_override" in excinfo.value.message
-
-
-def test_candidate_override_rejects_a_fractional_value():
-    from flask_app.routes.industry import _candidate_directives_payload
-
-    with pytest.raises(ServiceError) as excinfo:
-        _candidate_directives_payload([{"overview_row_id": "r1", "max_batches_override": 2.5}])
-    assert excinfo.value.status_code == 400
-
-
 # --- planning_horizon_hours=0 ----------------------------------------------------------------
-
-
-@pytest.mark.parametrize("value", [0, "0", -5, 0.0])
-def test_portfolio_plan_request_rejects_a_non_positive_planning_horizon(value):
-    from flask_app.routes.industry import _portfolio_plan_request_from_payload
-
-    with pytest.raises(ServiceError) as excinfo:
-        _portfolio_plan_request_from_payload({"planning_horizon_hours": value})
-    assert excinfo.value.status_code == 400
-    assert "planning_horizon_hours" in excinfo.value.message
-
-
-def test_portfolio_plan_request_keeps_the_default_horizon_when_absent():
-    from flask_app.routes.industry import _portfolio_plan_request_from_payload
-
-    assert _portfolio_plan_request_from_payload({}).planning_horizon_hours == 24.0
-    assert _portfolio_plan_request_from_payload({"planning_horizon_hours": 48}).planning_horizon_hours == 48.0
-
-
-def test_portfolio_candidates_route_returns_400_for_a_zero_planning_horizon(industry_client):
-    resp = industry_client.get("/industry_products/1/portfolio_candidates?planning_horizon_hours=0")
-    assert resp.status_code == 400
-    assert "planning_horizon_hours" in resp.get_json()["message"]
-
-
-def test_portfolio_candidates_start_returns_400_for_a_zero_planning_horizon(industry_client):
-    resp = industry_client.post("/industry_products/1/portfolio_candidates/start", json={"planning_horizon_hours": 0})
-    assert resp.status_code == 400
-    assert "planning_horizon_hours" in resp.get_json()["message"]
-
-
-def test_portfolio_plan_route_returns_400_for_a_zero_planning_horizon(industry_client):
-    resp = industry_client.post("/industry_products/1/portfolio_plan", json={"planning_horizon_hours": 0})
-    assert resp.status_code == 400
-    assert "planning_horizon_hours" in resp.get_json()["message"]
-
-
-def test_portfolio_candidates_route_returns_400_for_an_infinite_capital_limit(industry_client):
-    resp = industry_client.post("/industry_products/1/portfolio_plan",
-                                data='{"capital_limit_isk": Infinity}', content_type="application/json")
-    assert resp.status_code == 400
-    assert "capital_limit_isk" in resp.get_json()["message"]
 
 
 # --- the industry profile context route ------------------------------------------------------

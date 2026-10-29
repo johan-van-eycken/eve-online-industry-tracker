@@ -386,7 +386,7 @@ class InventionPlanningMixin:
         # Parallel lanes: every qualifying corp inventor's research
         # slots, each at its own chance, sized by split_invention_attempts.
         # When they run in parallel the row's whole and expected
-        # attempts ARE the lanes', so the cost, the Portfolio procurement, the
+        # attempts ARE the lanes', so the cost, the procurement lines, the
         # whole-run copy budget and the elapsed time all assume one plan.
         # Unknown slots or skills: the best inventor in sequence, as before.
         lanes = (

@@ -1,4 +1,4 @@
-"""The overview and portfolio routes read their shared request values one way:
+"""The overview routes read their request values one way:
 a POST body with "false" strings means the same as a GET query with them
 (bool("false") used to be True), and absent values keep their defaults."""
 from __future__ import annotations
@@ -25,15 +25,7 @@ def calls(monkeypatch):
             seen.append(kw)
             return {}
 
-        def industry_manufacturing_portfolio_candidates_payload(self, **kw):
-            seen.append(kw)
-            return {}
-
         def start_industry_manufacturing_product_overview_refresh(self, **kw):
-            seen.append(kw)
-            return {}
-
-        def start_industry_manufacturing_portfolio_candidates_refresh(self, **kw):
             seen.append(kw)
             return {}
 
@@ -47,8 +39,6 @@ def calls(monkeypatch):
 @pytest.mark.parametrize("method, path", [
     ("get", "/industry_products/1"),
     ("post", "/industry_products/1/refresh"),
-    ("get", "/industry_products/1/portfolio_candidates"),
-    ("post", "/industry_products/1/portfolio_candidates/start"),
 ])
 def test_false_strings_are_false_on_every_route(calls, method, path):
     client, seen = calls

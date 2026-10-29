@@ -943,7 +943,9 @@ class DailyPlannerService:
         When the only free blueprints of its type are pilots' own (owner-bound
         in the ledger) only those owners count: "not built: owner X
         lacks the skills: ...". CharacterAssigner applies the same rule
-        (_SkillGate) to every job it assigns."""
+        (_SkillGate) to every job it assigns. A row the overview's industry
+        profile cannot host (orow.get_facility_gate_reason: a capital hull
+        without its shipyard) is skipped the same way, before the skills."""
         assigner = self._character_assigner
         gate = _SkillGate(phase1["blueprint_data"], assigner._compute_available_slots(
             assigner._get_characters(self._characters), [], _now(),
@@ -952,6 +954,13 @@ class DailyPlannerService:
         busy = {int(i) for i in phase1.get("busy_blueprint_item_ids") or ()}
         for decision in decisions:
             if decision.decision != "build":
+                continue
+            facility_blocked = orow.get_facility_gate_reason(decision.overview_row)
+            if facility_blocked is not None:
+                logger.info("DailyPlannerService: type_id=%s not built: %s", decision.type_id, facility_blocked)
+                decision.decision = "skip"
+                decision.pipeline_stage = NOT_BUILT_STAGE
+                decision.decision_reason = f"{decision.decision_reason}; not built: {facility_blocked}"
                 continue
             blueprint_type_id = orow.get_blueprint_type_id(decision.overview_row)
             owners = sole_blueprint_owners(blueprint_type_id, bpos, bpcs, busy)
