@@ -89,7 +89,7 @@ def test_refresh_market_history_returns_the_reasons_by_type(caplog):
 
 
 def test_the_price_anomaly_names_a_failed_history_fetch(tmp_path, monkeypatch):
-    from eve_online_industry_tracker.application.industry import service as service_module
+    from eve_online_industry_tracker.application.industry import market_enrichment
     from eve_online_industry_tracker.application.industry.service import IndustryService
 
     engine = create_engine(f"sqlite:///{tmp_path / 'app.db'}", future=True)   # the fetch runs on a worker thread
@@ -103,8 +103,8 @@ def test_the_price_anomaly_names_a_failed_history_fetch(tmp_path, monkeypatch):
             return {"region_id": REGION}
 
     history, _factory = _service(engine, _Esi({TYPE: [GOOD]}, failed={TYPE: REASON}))
-    monkeypatch.setattr(service_module, "MarketPricingService", _Pricing)
-    monkeypatch.setattr(service_module, "MarketHistoryService", lambda **kw: history)
+    monkeypatch.setattr(market_enrichment, "MarketPricingService", _Pricing)
+    monkeypatch.setattr(market_enrichment, "MarketHistoryService", lambda **kw: history)
     svc = IndustryService.__new__(IndustryService)
     svc._state = SimpleNamespace(esi_service=None, admin_settings=None)
     svc._sessions = None
@@ -116,7 +116,7 @@ def test_the_price_anomaly_names_a_failed_history_fetch(tmp_path, monkeypatch):
 
 
 def test_the_price_anomaly_with_a_history_has_no_unavailable_reason(tmp_path, monkeypatch):
-    from eve_online_industry_tracker.application.industry import service as service_module
+    from eve_online_industry_tracker.application.industry import market_enrichment
     from eve_online_industry_tracker.application.industry.service import IndustryService
 
     engine = create_engine(f"sqlite:///{tmp_path / 'app.db'}", future=True)
@@ -130,8 +130,8 @@ def test_the_price_anomaly_with_a_history_has_no_unavailable_reason(tmp_path, mo
             return {"region_id": REGION}
 
     history, _factory = _service(engine, _Esi({TYPE: [{**GOOD, "date": "2099-01-01"}]}))
-    monkeypatch.setattr(service_module, "MarketPricingService", _Pricing)
-    monkeypatch.setattr(service_module, "MarketHistoryService", lambda **kw: history)
+    monkeypatch.setattr(market_enrichment, "MarketPricingService", _Pricing)
+    monkeypatch.setattr(market_enrichment, "MarketHistoryService", lambda **kw: history)
     svc = IndustryService.__new__(IndustryService)
     svc._state = SimpleNamespace(esi_service=None, admin_settings=None)
     svc._sessions = None
@@ -184,7 +184,7 @@ def test_the_volume_map_still_works_without_an_unavailable_dict():
 
 
 def test_the_market_activity_shows_an_unknown_region_volume_as_unknown(monkeypatch):
-    from eve_online_industry_tracker.application.industry import service as service_module
+    from eve_online_industry_tracker.application.industry import market_enrichment
     from eve_online_industry_tracker.application.industry.service import IndustryService
 
     class _Pricing:
@@ -199,7 +199,7 @@ def test_the_market_activity_shows_an_unknown_region_volume_as_unknown(monkeypat
         def get_hub_liquidity_map(self, *, type_ids, hub):
             return {}
 
-    monkeypatch.setattr(service_module, "MarketPricingService", _Pricing)
+    monkeypatch.setattr(market_enrichment, "MarketPricingService", _Pricing)
     svc = IndustryService.__new__(IndustryService)
     svc._state = SimpleNamespace()
     svc._sessions = None

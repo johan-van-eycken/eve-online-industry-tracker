@@ -111,7 +111,7 @@ def test_an_unknown_index_makes_the_fee_unknown_with_its_reason():
 
 
 def _overview_row(monkeypatch, profile):
-    import test_industry_service_calculations as h
+    import industry_service_fakes as h
     import test_producer_review_fixes as prf
 
     rows = h._rows_with(probability_pct=30.0, bpc_runs=10, t2_limit=10)

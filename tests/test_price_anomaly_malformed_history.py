@@ -62,7 +62,7 @@ def test_clean_rows_log_nothing(app_engine, caplog):
 def test_the_price_anomaly_enrichment_survives_a_malformed_history(tmp_path, monkeypatch):
     from sqlalchemy import create_engine
 
-    from eve_online_industry_tracker.application.industry import service as service_module
+    from eve_online_industry_tracker.application.industry import market_enrichment
     from eve_online_industry_tracker.application.industry.service import IndustryService
     from eve_online_industry_tracker.infrastructure.models import BaseApp
 
@@ -78,8 +78,8 @@ def test_the_price_anomaly_enrichment_survives_a_malformed_history(tmp_path, mon
             return {"region_id": REGION}
 
     history, _factory = _history(app_engine, [None, {**GOOD, "highest": None}])
-    monkeypatch.setattr(service_module, "MarketPricingService", _Pricing)
-    monkeypatch.setattr(service_module, "MarketHistoryService", lambda **kw: history)
+    monkeypatch.setattr(market_enrichment, "MarketPricingService", _Pricing)
+    monkeypatch.setattr(market_enrichment, "MarketHistoryService", lambda **kw: history)
     svc = IndustryService.__new__(IndustryService)
     svc._state = SimpleNamespace(esi_service=None, admin_settings=None)
     svc._sessions = None

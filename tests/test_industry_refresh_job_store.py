@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from eve_online_industry_tracker.application.industry import service as service_module
+from eve_online_industry_tracker.application.industry import overview_jobs
 from eve_online_industry_tracker.application.industry.service import IndustryService
 from flask_app.state import IndustryOverviewRefreshJobState, IndustryPortfolioCandidatesJobState
 
@@ -26,8 +26,8 @@ def service(monkeypatch):
         def start(self):
             started.append(self.name)
 
-    monkeypatch.setattr(service_module.threading, "Thread", _NoThread)
-    monkeypatch.setattr(service_module, "register_thread", lambda state, name, thread: None)
+    monkeypatch.setattr(overview_jobs.threading, "Thread", _NoThread)
+    monkeypatch.setattr(overview_jobs, "register_thread", lambda state, name, thread: None)
     svc = object.__new__(IndustryService)
     svc._state = SimpleNamespace(jobs=SimpleNamespace(  # type: ignore[attr-defined]
         industry_overview_refresh=IndustryOverviewRefreshJobState(),

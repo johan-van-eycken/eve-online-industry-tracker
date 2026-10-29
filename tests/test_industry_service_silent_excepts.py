@@ -194,7 +194,7 @@ def test_unreadable_price_stats_for_trends_are_logged(app_session, caplog):
 
 
 def _anomaly_service(monkeypatch, history):
-    from eve_online_industry_tracker.application.industry import service as service_module
+    from eve_online_industry_tracker.application.industry import market_enrichment
 
     class _Pricing:
         def __init__(self, **kw):
@@ -203,8 +203,8 @@ def _anomaly_service(monkeypatch, history):
         def _market_hub_context(self, hub):
             return {"region_id": 10000002}
 
-    monkeypatch.setattr(service_module, "MarketPricingService", _Pricing)
-    monkeypatch.setattr(service_module, "MarketHistoryService", lambda **kw: history)
+    monkeypatch.setattr(market_enrichment, "MarketPricingService", _Pricing)
+    monkeypatch.setattr(market_enrichment, "MarketHistoryService", lambda **kw: history)
     return _service(esi_service=None, admin_settings=None)
 
 

@@ -100,7 +100,7 @@ def _industry():
 
 
 def test_the_market_activity_carries_unknown_liquidity_through(monkeypatch):
-    from eve_online_industry_tracker.application.industry import service as service_module
+    from eve_online_industry_tracker.application.industry import market_enrichment
 
     class _Pricing:
         def __init__(self, **kw):
@@ -113,7 +113,7 @@ def test_the_market_activity_carries_unknown_liquidity_through(monkeypatch):
             return {35: {"sell_volume_total": None, "sell_order_count": None, "buy_volume_total": 7,
                          "buy_order_count": 1, "liquidity_unavailable_reason": f"sell: {REASON}"}}
 
-    monkeypatch.setattr(service_module, "MarketPricingService", _Pricing)
+    monkeypatch.setattr(market_enrichment, "MarketPricingService", _Pricing)
     (row,) = _industry()._enrich_product_rows_with_market_activity(
         [{"type_id": 35, "manufacturing_job": {"runs": 1}}], market_hub="jita")
     assert row["hub_sell_liquidity"] is None and row["hub_sell_order_count"] is None
@@ -136,7 +136,7 @@ def test_unknown_liquidity_has_unknown_metrics():
 
 
 def test_the_reason_replaces_the_thin_market_note(monkeypatch, tmp_path):
-    from eve_online_industry_tracker.application.industry import service as service_module
+    from eve_online_industry_tracker.application.industry import market_enrichment
 
     class _Pricing:
         def __init__(self, **kw):
@@ -152,8 +152,8 @@ def test_the_reason_replaces_the_thin_market_note(monkeypatch, tmp_path):
         def fetch_and_store_history(self, **kw):
             return None
 
-    monkeypatch.setattr(service_module, "MarketPricingService", _Pricing)
-    monkeypatch.setattr(service_module, "MarketHistoryService", lambda **kw: _History())
+    monkeypatch.setattr(market_enrichment, "MarketPricingService", _Pricing)
+    monkeypatch.setattr(market_enrichment, "MarketHistoryService", lambda **kw: _History())
     (row,) = _industry()._enrich_product_rows_with_price_anomaly(
         [{"type_id": 35, "market_unit_price": 10.0, "hub_sell_order_count": None,
           "liquidity_unavailable_reason": REASON}], market_hub="jita")
