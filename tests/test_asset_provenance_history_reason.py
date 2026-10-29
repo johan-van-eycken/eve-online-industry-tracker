@@ -20,7 +20,6 @@ import pytest
 from sqlalchemy.exc import OperationalError
 
 from eve_online_industry_tracker.application.characters import asset_provenance as provenance
-from eve_online_industry_tracker.application.characters.realized_profit import CharacterRealizedProfitLedgerService
 from eve_online_industry_tracker.infrastructure.models import (
     CharacterIndustryJobsModel,
     CharacterModel,
@@ -30,6 +29,7 @@ from eve_online_industry_tracker.infrastructure.models import (
 )
 from eve_online_industry_tracker.infrastructure.schema_migrations import ensure_app_schema
 from eve_online_industry_tracker.infrastructure.esi_client import EsiRequestError
+from fakes import _ledger
 
 REGION = 10000002
 TRIT, PYE = 34, 35
@@ -272,10 +272,6 @@ def _seed_sale(session, *, materials_reason, invention_reason=None):
         is_personal=True, quantity=2, type_id=_PRODUCT, unit_price=200.0, total_price=400.0,
     ))
     session.commit()
-
-
-def _ledger(session):
-    return CharacterRealizedProfitLedgerService(app_session=session, sde_session=None, market_prices=[])
 
 
 def test_a_sale_of_a_lower_bound_build_names_the_materials_reason(app_session):

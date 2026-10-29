@@ -28,6 +28,7 @@ from eve_online_industry_tracker.infrastructure.sde.blueprints import (
 from planner_skill_fakes import NO_SKILL_REQUIREMENTS
 from eve_online_industry_tracker.application.daily_planner import character_assigner as ca
 from eve_online_industry_tracker.application.daily_planner.models import AssignedAction
+from fakes import _AdminStub
 
 BLUEPRINT_DATA = {
     999: {"manufacturing": {"products": [{"type_id": 12345, "quantity": 1}],
@@ -35,11 +36,6 @@ BLUEPRINT_DATA = {
     888: {"manufacturing": {"products": [{"type_id": 54321, "quantity": 10}],
                             "materials": []}},
 }
-
-
-class _AdminStub:
-    def get(self, section, key, default=None):
-        raise KeyError(key)  # forces ChainPlanner's own fallbacks
 
 
 def _planner(*, optimal_me=10, own_parent_blueprints=True):

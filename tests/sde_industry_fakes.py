@@ -15,7 +15,10 @@ local SDE (database/eve_sde.db) when it is present.
 from __future__ import annotations
 
 from functools import cache
+from types import SimpleNamespace
 from typing import Any, Callable
+
+from sqlalchemy.orm import sessionmaker
 
 TARGET_FILTERS: dict[int, dict[str, Any]] = {
     1: {"categoryIDs": [18, 87], "name": "Drones/Fighters"},
@@ -386,3 +389,14 @@ def local_industry_activities_or_skip():
     if isinstance(data, str):
         pytest.skip(data)
     return data
+
+
+def _state(engine):
+    return SimpleNamespace(db_sde=SimpleNamespace(Session=sessionmaker(bind=engine)), init_warnings=[],
+                           sde_warnings=[], init_state="Ready", init_error=None)
+
+
+def _producer():
+    from eve_online_industry_tracker.application.industry.service import IndustryService
+
+    return IndustryService

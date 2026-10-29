@@ -10,16 +10,12 @@ from unittest.mock import MagicMock
 
 import pytest
 import requests
-from sqlalchemy.exc import OperationalError
 
 from eve_online_industry_tracker.infrastructure import esi_client as esi_client_module
 from eve_online_industry_tracker.infrastructure import esi_service as esi_service_module
 from eve_online_industry_tracker.infrastructure.esi_client import ESI_REQUEST_ERRORS, EsiRequestError
 from eve_online_industry_tracker.infrastructure.esi_service import ESIService
-
-
-def _db_error():
-    return OperationalError("SELECT", {}, Exception("database is locked"))
+from fakes import _raiser, _db_error
 
 
 def _html_response(status: int = 200) -> requests.Response:
@@ -225,12 +221,6 @@ def test_parallel_calls_with_an_expired_token_refresh_it_once(client, monkeypatc
 # ESI_REQUEST_ERRORS is (EsiRequestError, requests.RequestException): a plain
 # ValueError or RuntimeError of our own code is no longer read as an ESI
 # failure by the catch sites, and propagates as itself. Fake values only.
-
-def _raiser(exc):
-    def _f(*a, **k):
-        raise exc
-    return _f
-
 
 def _svc(esi_client) -> ESIService:
     svc = ESIService.__new__(ESIService)

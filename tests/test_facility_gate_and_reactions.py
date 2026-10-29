@@ -26,14 +26,8 @@ from eve_online_industry_tracker.domain import industry_facility as fac
 from eve_online_industry_tracker.domain import security_band as sb
 from eve_online_industry_tracker.infrastructure.sde import industry
 
-from sde_industry_fakes import LOCAL_SDE as _LOCAL_SDE
+from sde_industry_fakes import LOCAL_SDE as _LOCAL_SDE, _producer
 _needs_sde = pytest.mark.needs_local_sde
-
-
-def _producer():
-    from eve_online_industry_tracker.application.industry.service import IndustryService
-
-    return IndustryService
 
 
 @pytest.fixture(autouse=True)

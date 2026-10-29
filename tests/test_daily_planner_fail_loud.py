@@ -10,6 +10,8 @@ from __future__ import annotations
 import ast
 import os
 
+from fakes import _AdminKeyError, _bare_service
+
 PACKAGE = os.path.join(
     os.path.dirname(__file__), "..", "src", "eve_online_industry_tracker",
     "application", "daily_planner",
@@ -239,11 +241,6 @@ def _sde_error():
     return OperationalError("SELECT 1", {}, Exception("database is locked"))
 
 
-class _AdminKeyError:
-    def get(self, section, key):
-        raise KeyError(key)
-
-
 def _decision(row, **overrides):
     base = dict(
         type_id=int(row["type_id"]), type_name="Thing", decision="build",
@@ -403,19 +400,6 @@ def test_a_manufacture_decision_without_runs_is_a_contract_violation():
 
 
 # --- DailyPlannerService: collaborator reads that used to swallow ---------------
-
-def _bare_service():
-    return DailyPlannerService(
-        industry_service=SimpleNamespace(get_cached_overview_rows=lambda: []),
-        corporations_service=SimpleNamespace(list_corporations=lambda: []),
-        characters_service=SimpleNamespace(list_characters=lambda: []),
-        sales_history_service=SimpleNamespace(),
-        market_pricing_service=SimpleNamespace(),
-        repo=SimpleNamespace(),
-        admin_settings=SimpleNamespace(),
-        session_provider=SimpleNamespace(),
-    )
-
 
 def test_corp_id_is_read_from_an_object_shaped_corporation_too():
     svc = _bare_service()

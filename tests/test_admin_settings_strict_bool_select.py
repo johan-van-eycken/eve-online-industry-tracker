@@ -15,23 +15,12 @@ Fake values throughout.
 """
 from __future__ import annotations
 
-import json
 import logging
 
 import pytest
 
-from eve_online_industry_tracker.config.admin_settings import (
-    ADMIN_SETTINGS_SCHEMA,
-    AdminSettingInvalid,
-    AdminSettingsManager,
-)
-
-
-def _manager(tmp_path, payload=None) -> AdminSettingsManager:
-    path = tmp_path / "admin_settings.json"
-    if payload is not None:
-        path.write_text(json.dumps(payload), encoding="utf-8")
-    return AdminSettingsManager(path)
+from eve_online_industry_tracker.config.admin_settings import ADMIN_SETTINGS_SCHEMA, AdminSettingInvalid
+from fakes import _manager
 
 
 def _settings_of_type(*types):

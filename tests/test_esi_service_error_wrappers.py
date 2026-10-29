@@ -14,12 +14,7 @@ import requests
 
 from eve_online_industry_tracker.infrastructure.esi_service import ESIService
 from eve_online_industry_tracker.infrastructure.esi_client import EsiRequestError
-
-
-def _raiser(exc):
-    def _f(*a, **k):
-        raise exc
-    return _f
+from fakes import _raiser
 
 
 def _svc(esi_client=None) -> ESIService:

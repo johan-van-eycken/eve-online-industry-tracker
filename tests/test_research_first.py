@@ -18,8 +18,8 @@ import pytest
 
 from eve_online_industry_tracker.application.daily_planner.chain_planner import ChainPlanner, _sizing_bonus_wording
 from eve_online_industry_tracker.application.daily_planner.character_assigner import CharacterAssigner
-from eve_online_industry_tracker.application.daily_planner.models import ItemDecision
 from planner_skill_fakes import NO_SKILL_REQUIREMENTS
+from fakes import _Admin, _AdminStub, _decision
 
 BLUEPRINT_DATA = {
     # Parent 999: 1 run of 12345 needs 100 x the component 54321.
@@ -32,16 +32,6 @@ BLUEPRINT_DATA = {
 }
 MARKET = {34: {"vwap_5d": 1.0}, 54321: {"vwap_5d": 1.0}, 12345: {"vwap_5d": 100.0}}
 SECONDS_TO_LEVEL = [0, 60, 180, 420, 900, 1860, 3780, 7620, 15300, 30660, 61380]
-
-
-class _AdminStub:
-    def get(self, section, key, default=None):
-        raise KeyError(key)
-
-
-class _Admin:
-    def get(self, section, key, default=None):
-        return default
 
 
 def _pilot(*skills, loaded=True):
@@ -94,15 +84,6 @@ BPO_ROW = dict(segments=[_segment(10, "owned_blueprint_original", 1000)])
 MIXED_ROW = dict(segments=[_segment(4, "owned_blueprint_copy", 400),
                            _segment(6, "copied_from_owned_blueprint_original", 600)],
                  kind="owned_blueprint_copy")
-
-
-def _decision(row) -> ItemDecision:
-    return ItemDecision(
-        type_id=12345, type_name="Thing", decision="build", decision_reason="test",
-        adjusted_score=1.0, absolute_profit_per_batch=1.0, isk_per_hour=1.0, margin_pct=1.0,
-        days_of_supply_current=1.0, effective_velocity=1.0, meta_group_id=1,
-        pipeline_stage="manufacturing", overview_row=row,
-    )
 
 
 def _plan(row, *, te=0, me=10, variants=None, bpo_count=1, bpos=None):

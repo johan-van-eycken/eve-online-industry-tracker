@@ -7,14 +7,7 @@ from eve_online_industry_tracker.application.daily_planner.models import Assigne
 from eve_online_industry_tracker.application.daily_planner.shopping_list_builder import (
     ShoppingListBuilder,
 )
-
-
-class _NoBlueprints:
-    def is_blueprint(self, type_id):
-        return False
-
-    def prefetch(self, type_ids):
-        return None
+from fakes import _Admin, _NoBlueprints
 
 
 class _BlueprintsAre:
@@ -26,11 +19,6 @@ class _BlueprintsAre:
 
     def prefetch(self, type_ids):
         return None
-
-
-class _Admin:
-    def get(self, section, key, default=None):
-        return default
 
 
 def _action(runs, type_id=12345, blueprint_type_id=999, materials=None):

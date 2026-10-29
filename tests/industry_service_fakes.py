@@ -443,3 +443,16 @@ def _owned_t2_bpc_me(*, runs: int, me: int, item_id: int = 97) -> SimpleNamespac
     bpc = _owned_t2_bpc(runs=runs, item_id=item_id)
     bpc.blueprint_material_efficiency = me
     return bpc
+
+
+def _profile_service(app_session, **profile):
+    from eve_online_industry_tracker.infrastructure.models import IndustryProfilesModel
+
+    row = IndustryProfilesModel(character_id=90000001, profile_name="Fake profile", is_default=True, **profile)
+    app_session.add(row)
+    app_session.commit()
+    sessions = SimpleNamespace(app_session=lambda: app_session, sde_session=lambda: None)
+    svc = IndustryService(state=SimpleNamespace(esi_service=None, admin_settings=None, db_sde=None),
+                          sessions=sessions)
+    svc.solar_systems = lambda: []
+    return svc, row.id

@@ -19,24 +19,11 @@ from eve_online_industry_tracker.application.daily_planner.action_plan_builder i
     ActionPlanBuilder,
 )
 from eve_online_industry_tracker.application.industry.type_metadata import TypeMetadataResolver
+from fakes import _RecordingLoader
 
 
 def _past(hours: int = 1) -> datetime:
     return (datetime.now(tz=timezone.utc) - timedelta(hours=hours)).replace(tzinfo=None)
-
-
-class _RecordingLoader:
-    """Mirrors tests/test_type_metadata.py's _FakeLoader: records every batch
-    of type_ids it was asked to load, so a test can assert it was invoked
-    exactly once (batched), not once per deliver row."""
-
-    def __init__(self, data):
-        self._data = data
-        self.calls: list[list[int]] = []
-
-    def __call__(self, session, language, type_ids):
-        self.calls.append(sorted(type_ids))
-        return {tid: self._data[tid] for tid in type_ids if tid in self._data}
 
 
 def _job(**kwargs):

@@ -23,7 +23,7 @@ from types import SimpleNamespace
 import pytest
 import yaml
 from sqlalchemy import create_engine, text
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import Session
 
 import sde_industry_fakes as fakes
 from eve_online_industry_tracker.domain import industry_activities as domain_activities
@@ -439,11 +439,6 @@ def test_the_rig_data_does_not_need_the_ore_or_activity_tables():
 
 # --- startup and /health ---------------------------------------------------------------
 
-def _state(engine):
-    return SimpleNamespace(db_sde=SimpleNamespace(Session=sessionmaker(bind=engine)), init_warnings=[],
-                           sde_warnings=[], init_state="Ready", init_error=None)
-
-
 def test_startup_without_the_tables_logs_errors_and_health_warnings(empty_sde, caplog):
     from eve_online_industry_tracker.application.admin.service import AdminService
     from flask_app.bootstrap import check_sde_industry_data
@@ -491,7 +486,7 @@ def test_startup_on_a_current_sde_loads_ore_data_and_activities(tmp_path):
 
 # --- the local SDE ---------------------------------------------------------------------
 
-from sde_industry_fakes import LOCAL_SDE as _LOCAL_SDE, skip_without_local_sde
+from sde_industry_fakes import LOCAL_SDE as _LOCAL_SDE, skip_without_local_sde, _state
 
 
 def _local_conn_or_skip(tables):

@@ -12,6 +12,7 @@ from eve_online_industry_tracker.application.daily_planner.service import (
     index_blueprint_assets,
 )
 from eve_online_industry_tracker.application.industry.type_metadata import TypeMetadataResolver
+from fakes import _RecordingLoader
 
 
 class _BlueprintsAre:
@@ -26,19 +27,6 @@ class _BlueprintsAre:
         loader, so there is nothing to warm. Real batching behavior is proved
         separately below against an actual TypeMetadataResolver."""
         return None
-
-
-class _RecordingLoader:
-    """Mirrors tests/test_type_metadata.py's _FakeLoader: records every batch of
-    type_ids it was asked to load, so callers can assert it was invoked once."""
-
-    def __init__(self, data):
-        self._data = data
-        self.calls: list[list[int]] = []
-
-    def __call__(self, session, language, type_ids):
-        self.calls.append(sorted(type_ids))
-        return {tid: self._data[tid] for tid in type_ids if tid in self._data}
 
 
 def test_bpos_and_bpcs_are_indexed_separately():

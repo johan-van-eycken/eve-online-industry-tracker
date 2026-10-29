@@ -19,7 +19,6 @@ Fake values throughout.
 from __future__ import annotations
 
 import copy
-import json
 import logging
 from types import SimpleNamespace
 
@@ -35,13 +34,7 @@ from eve_online_industry_tracker.config.admin_settings import (
 )
 from eve_online_industry_tracker.infrastructure.sde import ore
 from eve_online_industry_tracker.infrastructure.static_data import facility_repo
-
-
-def _manager(tmp_path, payload=None) -> AdminSettingsManager:
-    path = tmp_path / "admin_settings.json"
-    if payload is not None:
-        path.write_text(json.dumps(payload), encoding="utf-8")
-    return AdminSettingsManager(path)
+from fakes import _manager
 
 
 def _invalid_workers() -> AdminSettingInvalid:

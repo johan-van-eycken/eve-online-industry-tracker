@@ -29,6 +29,7 @@ from eve_online_industry_tracker.application.industry.invention_model import (
 )
 from eve_online_industry_tracker.application.industry.service import IndustryService
 from eve_online_industry_tracker.application.industry.shopping_list import aggregate_shopping_list
+from fakes import _fresh_once_warnings  # noqa: F401  (autouse fixture)
 
 PLUS_RUN = DecryptorOption(type_id=34203, type_name="PlusRun", probability_multiplier=0.6,
                            me_modifier=-2, te_modifier=2, max_run_modifier=9)
@@ -50,13 +51,6 @@ PROFILE = {
 }
 LV_STRONG = {11433: 5, 11454: 5, 21790: 4}
 LV_WEAK = {11433: 1, 11454: 1, 21790: 1}
-
-
-@pytest.fixture(autouse=True)
-def _fresh_once_warnings():
-    IndustryService._reset_once_warnings()
-    yield
-    IndustryService._reset_once_warnings()
 
 
 def _bpc(runs: int, me: int = 5, te: int = 10) -> SimpleNamespace:

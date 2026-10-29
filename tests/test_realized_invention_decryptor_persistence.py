@@ -52,6 +52,7 @@ from test_realized_invention_actual_jobs import (  # noqa: F401  (the sde fixtur
     _refresh,
     sde,
 )
+from fakes import _Db
 
 _SOURCE_BP = 990001
 _TARGET_BP = 990002
@@ -822,11 +823,6 @@ def test_a_bpc_moved_from_a_pilot_is_first_seen_in_the_pilots_history(app_sessio
 
 
 # --- the paths pass it -----------------------------------------------------------
-
-
-class _Db:
-    def __init__(self, session):
-        self.session = session
 
 
 class _Esi:

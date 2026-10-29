@@ -24,6 +24,7 @@ from eve_online_industry_tracker.application.daily_planner.character_assigner im
 from eve_online_industry_tracker.application.daily_planner.models import ChainPlan, ItemDecision
 from eve_online_industry_tracker.application.daily_planner.shopping_list_builder import ShoppingListBuilder
 from planner_skill_fakes import NO_SKILL_REQUIREMENTS
+from fakes import _NoBlueprints, _Chars
 
 SCIENCE_A, SCIENCE_B, ENCRYPTION = 11433, 11454, 21790
 DATACORE_A, DATACORE_B, DECRYPTOR = 20416, 20417, 34201
@@ -58,22 +59,6 @@ class _Admin:
         if (section, key) == ("industry", "invention_probability_floor") and self._floor is not None:
             return self._floor
         return default
-
-
-class _Chars:
-    def __init__(self, chars):
-        self._chars = chars
-
-    def list_characters(self):
-        return self._chars
-
-
-class _NoBlueprints:
-    def is_blueprint(self, type_id):
-        return False
-
-    def prefetch(self, type_ids):
-        return None
 
 
 def _skill(name, level, skill_id):

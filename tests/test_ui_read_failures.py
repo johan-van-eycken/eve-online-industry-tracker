@@ -7,6 +7,7 @@ import inspect
 from types import SimpleNamespace
 
 import pytest
+from fakes import industry_client
 
 
 @pytest.fixture
@@ -692,16 +693,6 @@ def test_the_table_has_the_cost_columns_only_when_the_payload_has_them():
 # =============================================================================================
 # 12. Routes: a malformed type_ids or a non-positive industry_profile_id is a 400
 # =============================================================================================
-
-
-@pytest.fixture
-def industry_client(monkeypatch):
-    from flask_app.app import create_app
-    import flask_app.routes.industry as routes
-
-    monkeypatch.setattr(routes, "require_ready", lambda s: None)
-    monkeypatch.setattr(routes, "require_sde_ready", lambda s: None)
-    return create_app().test_client()
 
 
 @pytest.mark.parametrize("path", [

@@ -18,12 +18,11 @@ import json
 import logging
 import os
 import sqlite3
-from types import SimpleNamespace
 
 import pytest
 import yaml
 from sqlalchemy import create_engine, text
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import Session
 
 import sde_industry_fakes as fakes
 from eve_online_industry_tracker.infrastructure.sde import industry
@@ -206,11 +205,6 @@ def test_the_producer_and_planner_raise_when_the_tables_are_missing():
 
 # --- startup ---------------------------------------------------------------------------
 
-def _state(engine):
-    return SimpleNamespace(db_sde=SimpleNamespace(Session=sessionmaker(bind=engine)), init_warnings=[],
-                           sde_warnings=[], init_state="Ready", init_error=None)
-
-
 def test_startup_on_an_old_sde_logs_an_error_and_a_health_warning(sde_without_industry_tables, caplog):
     from eve_online_industry_tracker.application.admin.service import AdminService
     from flask_app.bootstrap import check_sde_industry_data
@@ -311,7 +305,7 @@ def test_a_request_that_needs_the_tables_gets_a_503_and_no_traceback(caplog):
 
 # --- the local SDE ---------------------------------------------------------------------
 
-from sde_industry_fakes import LOCAL_SDE as _LOCAL_SDE, skip_without_local_sde
+from sde_industry_fakes import LOCAL_SDE as _LOCAL_SDE, skip_without_local_sde, _state
 
 
 def test_the_local_sde_tables_have_ccps_row_counts():

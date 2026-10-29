@@ -14,6 +14,7 @@ from sqlalchemy.exc import OperationalError
 
 from eve_online_industry_tracker.application.errors import ServiceError
 from eve_online_industry_tracker.application.industry.service import IndustryService
+from industry_service_fakes import _profile_service
 
 
 def _service(**state):
@@ -68,19 +69,6 @@ def test_a_non_numeric_preferred_value_quantity_is_logged(caplog):
 
 
 # --- the profile context ---------------------------------------------------------------------------
-
-def _profile_service(app_session, **profile):
-    from eve_online_industry_tracker.infrastructure.models import IndustryProfilesModel
-
-    row = IndustryProfilesModel(character_id=90000001, profile_name="Fake profile", is_default=True, **profile)
-    app_session.add(row)
-    app_session.commit()
-    sessions = SimpleNamespace(app_session=lambda: app_session, sde_session=lambda: None)
-    svc = IndustryService(state=SimpleNamespace(esi_service=None, admin_settings=None, db_sde=None),
-                          sessions=sessions)
-    svc.solar_systems = lambda: []
-    return svc, row.id
-
 
 def test_an_unavailable_cost_index_is_logged_and_named_in_the_profile(app_session, caplog):
     svc, profile_id = _profile_service(app_session, system_id=30000001)

@@ -17,17 +17,12 @@ import flask_app.bootstrap as bootstrap
 from flask_app.state import AppState
 from eve_online_industry_tracker.application.characters import asset_provenance as ap
 from eve_online_industry_tracker.application.characters import character as character_module
+from fakes import _raiser
 
 ESI_FAILURES = [requests.ConnectionError("reset"), requests.HTTPError("502"),
                 EsiRequestError("ESI GET failed after retries"), EsiRequestError("No refresh token")]
 BUGS = [AttributeError("'NoneType' object has no attribute 'get'"), NameError("name 'oops' is not defined"),
         TypeError("unsupported operand"), KeyError("name")]
-
-
-def _raiser(exc):
-    def _f(*a, **k):
-        raise exc
-    return _f
 
 
 def _svc(esi_client=None) -> ESIService:

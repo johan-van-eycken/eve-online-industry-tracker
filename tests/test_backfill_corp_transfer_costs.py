@@ -23,6 +23,7 @@ from eve_online_industry_tracker.application.characters.corp_transfer_costs impo
     recosted_product_type_ids,
     restamp_blended_corp_transfer_lots,
 )
+from fakes import _Db, _Esi
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
@@ -963,23 +964,6 @@ def test_the_decryptor_resnapshot_restamps_the_types_it_recosts(app_session, mon
     rows = _rows(app_session)
     assert rows[3].acquisition_unit_cost == pytest.approx(96.0)
     assert rows[4].acquisition_unit_cost == 10.0
-
-
-class _Db:
-    def __init__(self, session):
-        self.session = session
-
-
-class _Esi:
-    def __init__(self, jobs):
-        self._jobs = jobs
-
-    def esi_get(self, endpoint, params=None, paginate=False):
-        if endpoint.endswith("/industry/jobs"):
-            return list(self._jobs)
-        if endpoint.endswith("/markets/prices"):
-            return []
-        raise AssertionError(endpoint)
 
 
 def test_a_character_job_refresh_restamps_the_types_it_recosts(app_session, monkeypatch):

@@ -22,6 +22,7 @@ from eve_online_industry_tracker.application.daily_planner.character_assigner im
     _shape_copy_jobs,
     max_copies_per_job,
 )
+from fakes import _Chars
 
 
 def _now():
@@ -46,14 +47,6 @@ def _skill(skill_name, level, skill_id=0):
     """
     return {"skill_id": skill_id, "skill_name": skill_name,
             "group_name": "Production", "trained_skill_level": level}
-
-
-class _Chars:
-    def __init__(self, chars):
-        self._chars = chars
-
-    def list_characters(self):
-        return self._chars
 
 
 def _decision(**overrides):

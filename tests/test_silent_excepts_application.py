@@ -15,18 +15,13 @@ from eve_online_industry_tracker.application.market_analysis import pricing_sugg
 from eve_online_industry_tracker.infrastructure import esi_client as esi_client_module
 from eve_online_industry_tracker.application.industry import facilities
 from eve_online_industry_tracker.application.industry.service import IndustryService
+from fakes import _raiser, _db_error
 
 _ORDERS = [{"character_id": 1, "corporation_id": 2, "market_orders": [
     {"order_id": 1, "type_id": 34, "is_buy_order": True, "price": 4.0, "issued": "2026-10-01T00:00:00Z",
      "duration": 90},
     {"order_id": 2, "type_id": 35, "is_buy_order": False, "price": 9.0, "issued": "2026-10-01T00:00:00Z",
      "duration": 90}]}]
-
-
-def _raiser(exc):
-    def _f(*a, **k):
-        raise exc
-    return _f
 
 
 class _Esi:
@@ -210,10 +205,6 @@ def test_a_bug_in_the_structure_lookup_via_characters_propagates():
 # pricing_suggestion_service (hub sell/buy price, cached order book levels),
 # Character.refresh_market_fees, ESIClient.get_cached_data/save_to_cache and
 # the startup ESI cache prune. Fake values only.
-
-def _db_error():
-    return OperationalError("SELECT", {}, Exception("database is locked"))
-
 
 def _throw(exc):
     def _f(*a, **k):

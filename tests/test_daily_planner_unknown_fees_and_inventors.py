@@ -21,16 +21,10 @@ from eve_online_industry_tracker.application.industry.portfolio_service import (
 )
 from eve_online_industry_tracker.application.industry.service import IndustryService
 from planner_skill_fakes import NO_SKILL_REQUIREMENTS
+from fakes import _fresh_once_warnings  # noqa: F401  (autouse fixture)
 
 _F2 = 1 + 6 / 30 + 3 / 40  # pilot "Qual" 3/3/3: 0.30 x 1.275 = 0.3825
 _UPPER = "profit is an upper bound: job fees unknown for: invention (x)"
-
-
-@pytest.fixture(autouse=True)
-def _fresh_once_warnings():
-    IndustryService._reset_once_warnings()
-    yield
-    IndustryService._reset_once_warnings()
 
 
 def _pilot(cid, name, a, b, e):

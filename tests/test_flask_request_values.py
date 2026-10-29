@@ -13,6 +13,7 @@ from flask_app.app import create_app
 import flask_app.routes.characters as character_routes
 import flask_app.routes.corporations as corporation_routes
 import flask_app.routes.industry as industry_routes
+from fakes import industry_client
 
 
 # --- _number_param edge cases ----------------------------------------------------------------
@@ -106,16 +107,6 @@ def test_portfolio_plan_request_keeps_the_default_horizon_when_absent():
 
     assert _portfolio_plan_request_from_payload({}).planning_horizon_hours == 24.0
     assert _portfolio_plan_request_from_payload({"planning_horizon_hours": 48}).planning_horizon_hours == 48.0
-
-
-@pytest.fixture
-def industry_client(monkeypatch):
-    from flask_app.app import create_app
-    import flask_app.routes.industry as routes
-
-    monkeypatch.setattr(routes, "require_ready", lambda s: None)
-    monkeypatch.setattr(routes, "require_sde_ready", lambda s: None)
-    return create_app().test_client()
 
 
 def test_portfolio_candidates_route_returns_400_for_a_zero_planning_horizon(industry_client):

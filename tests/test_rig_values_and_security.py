@@ -24,7 +24,7 @@ import sde_industry_fakes as fakes
 from eve_online_industry_tracker.domain import rig_groups as rg
 from eve_online_industry_tracker.domain import security_band as sb
 
-from sde_industry_fakes import LOCAL_SDE as _LOCAL_SDE, skip_without_local_sde
+from sde_industry_fakes import LOCAL_SDE as _LOCAL_SDE, skip_without_local_sde, _producer
 _needs_sde = pytest.mark.needs_local_sde
 
 # Public SDE rig type ids.
@@ -36,12 +36,6 @@ _EQUIPMENT_ME_M_I, _EQUIPMENT_ME_M_II = 43920, 43921
 _STANDARD = {"high": 1.0, "low": 1.9, "null": 2.1, "wormhole": 2.1}
 _THUKKER = {"high": 0.1, "low": 1.9, "null": 0.1, "wormhole": 0.1}
 _REACTOR = {"high": None, "low": 1.0, "null": 1.1, "wormhole": 1.1}
-
-
-def _producer():
-    from eve_online_industry_tracker.application.industry.service import IndustryService
-
-    return IndustryService
 
 
 def _entry(group_id, group_name, category_id, category_name):

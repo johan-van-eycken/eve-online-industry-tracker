@@ -22,13 +22,9 @@ from eve_online_industry_tracker.application.daily_planner.character_assigner im
 from eve_online_industry_tracker.application.daily_planner.models import ChainPlan, ItemDecision
 from eve_online_industry_tracker.application.industry import overview_row as orow
 from planner_skill_fakes import NO_SKILL_REQUIREMENTS
+from fakes import _Admin
 
 PILOT = 1
-
-
-class _Admin:
-    def get(self, section, key, default=None):
-        return default
 
 
 class _Chars:

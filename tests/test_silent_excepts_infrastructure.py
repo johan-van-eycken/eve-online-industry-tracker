@@ -14,6 +14,7 @@ from sqlalchemy.exc import OperationalError
 from eve_online_industry_tracker.infrastructure import esi_client as esi_client_module
 from eve_online_industry_tracker.infrastructure.esi_service import ESIService
 from eve_online_industry_tracker.infrastructure.esi_client import EsiRequestError
+from fakes import _raiser
 
 
 def _svc(esi_client) -> ESIService:
@@ -21,12 +22,6 @@ def _svc(esi_client) -> ESIService:
     svc._esi_client = esi_client
     svc._public_structures_cache, svc._public_structures_cache_ttl_seconds = {}, 600
     return svc
-
-
-def _raiser(exc):
-    def _f(*a, **k):
-        raise exc
-    return _f
 
 
 # --- /universe/names/ -----------------------------------------------------------------------

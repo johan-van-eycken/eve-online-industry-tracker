@@ -11,6 +11,7 @@ import pytest
 
 from eve_online_industry_tracker.application.industry.job_cost import JobSurchargeRates, job_install_cost
 from eve_online_industry_tracker.application.industry.service import IndustryService
+from industry_service_fakes import _profile_service
 
 _RATES = JobSurchargeRates(facility_tax=0.01, scc=0.04, research_scc=0.02)
 SYSTEM = 30000001
@@ -174,19 +175,6 @@ def test_the_system_cost_index_payload_has_no_reason_when_the_index_is_there():
     svc = IndustryService.__new__(IndustryService)
     svc._state = SimpleNamespace(esi_service=_esi(systems))
     assert svc.industry_system_cost_index(system_id=SYSTEM)["cost_index_unknown_reason"] is None
-
-
-def _profile_service(app_session, **profile):
-    from eve_online_industry_tracker.infrastructure.models import IndustryProfilesModel
-
-    row = IndustryProfilesModel(character_id=90000001, profile_name="Fake profile", is_default=True, **profile)
-    app_session.add(row)
-    app_session.commit()
-    sessions = SimpleNamespace(app_session=lambda: app_session, sde_session=lambda: None)
-    svc = IndustryService(state=SimpleNamespace(esi_service=None, admin_settings=None, db_sde=None),
-                          sessions=sessions)
-    svc.solar_systems = lambda: []
-    return svc, row.id
 
 
 def test_the_profile_context_carries_the_cost_index_unknown_reason(app_session):

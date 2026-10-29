@@ -20,7 +20,7 @@ import sde_industry_fakes as fakes
 from eve_online_industry_tracker.domain import rig_groups as rg
 from eve_online_industry_tracker.infrastructure.sde import industry
 
-from sde_industry_fakes import LOCAL_SDE as _LOCAL_SDE
+from sde_industry_fakes import LOCAL_SDE as _LOCAL_SDE, _producer
 _needs_sde = pytest.mark.needs_local_sde
 
 
@@ -44,12 +44,6 @@ def _primary(entry):
 def _entry(group_id, group_name, category_id, category_name, **extra):
     return {"type_id": 1, "group_id": group_id, "group_name": group_name,
             "category_id": category_id, "category_name": category_name, **extra}
-
-
-def _producer():
-    from eve_online_industry_tracker.application.industry.service import IndustryService
-
-    return IndustryService
 
 
 def _profile(group, value=0.02, structure=0.01):
