@@ -43,7 +43,7 @@ GOOD_ROW = {
 }
 
 
-def _service(session_provider, overview_rows):
+def _service(session_provider, overview_rows, characters=()):
     """A service whose collaborators are inert stubs.
 
     Only the wiring is under test here, so every collaborator is a stub; match
@@ -54,7 +54,7 @@ def _service(session_provider, overview_rows):
             get_cached_overview_rows=lambda: overview_rows,
         ),
         corporations_service=SimpleNamespace(list_corporations=lambda: []),
-        characters_service=SimpleNamespace(list_characters=lambda: []),
+        characters_service=SimpleNamespace(list_characters=lambda: list(characters)),
         sales_history_service=SimpleNamespace(),
         market_pricing_service=SimpleNamespace(),
         repo=SimpleNamespace(),
@@ -236,7 +236,7 @@ def test_get_industry_jobs_excludes_only_terminal_statuses(session_provider):
     finally:
         session.close()
 
-    svc = _service(session_provider, [])
+    svc = _service(session_provider, [], characters=[{"character_id": 7, "corporation_id": 1}])
     jobs = svc._get_industry_jobs()
 
     job_ids = {job.job_id for job in jobs}
@@ -263,7 +263,7 @@ def test_get_industry_jobs_includes_character_jobs_not_only_corp_jobs(session_pr
     finally:
         session.close()
 
-    svc = _service(session_provider, [])
+    svc = _service(session_provider, [], characters=[{"character_id": 7, "corporation_id": 1}])
     jobs = svc._get_industry_jobs()
 
     job_ids = {job.job_id for job in jobs}

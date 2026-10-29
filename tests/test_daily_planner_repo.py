@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import create_engine
@@ -1029,5 +1030,7 @@ def test_a_job_with_a_null_status_holds_its_slot_and_blueprint(session_provider)
         session.commit()
     finally:
         session.close()
-    jobs = _service(session_provider)._get_industry_jobs()
+    service = _service(session_provider)
+    service._characters = SimpleNamespace(list_characters=lambda: [{"character_id": 7, "corporation_id": 1}])
+    jobs = service._get_industry_jobs()
     assert sorted(int(j.blueprint_item_id) for j in jobs) == [601]
