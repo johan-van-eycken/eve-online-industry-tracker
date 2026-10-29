@@ -869,7 +869,7 @@ class MarketEnrichmentMixin:
 
             job_fee_unknown_reasons = manufacturing_job.get("job_fee_unknown_reasons") or []
             if job_fee_unknown_reasons:
-                # I1: the cost leaves these fees out, so the profit is
+                # The cost leaves these fees out, so the profit is
                 # overstated: never High, whatever the market says.
                 if confidence == "High":
                     confidence = "Medium"
@@ -955,7 +955,7 @@ class MarketEnrichmentMixin:
             invention_cost_unknown_reason = manufacturing_job.get("invention_cost_unknown_reason")
             if invention_cost_unknown_reason:
                 material_confidence = "Low"
-                # Task 15 fix round 1 (minor 2): the T2 cost leaves the
+                # The T2 cost leaves the
                 # invention out, so the shown confidence is Low too.
                 manufacturing_job["pricing_confidence"] = "Low"
                 row["pricing_confidence"] = "Low"
@@ -979,12 +979,12 @@ class MarketEnrichmentMixin:
                     f"inventor skills would raise it, so the T2 cost is overstated."
                 )
             if isinstance(invention_chance, dict) and invention_chance.get("note"):
-                # Informational (A3): the chance is exact, confidence unchanged.
+                # Informational: the chance is exact, confidence unchanged.
                 reasons.append(f"Invention chance: {invention_chance['note']}.")
             for nested_note in manufacturing_job.get("invention_chance_notes") or []:
                 reasons.append(f"Invention chance: {nested_note}.")
             for lane_note in manufacturing_job.get("elapsed_lane_notes") or []:
-                # Informational (Task 12): the build time's parallel lanes.
+                # Informational: the build time's parallel lanes.
                 reasons.append(f"Build time: {lane_note}.")
             for later_batch_note in manufacturing_job.get("later_batch_notes") or []:
                 # Informational: the shopping list may over-buy, never under-buy.
@@ -1047,7 +1047,7 @@ class MarketEnrichmentMixin:
             else:
                 isk_per_hour_effective = None
 
-            # Task 15 fix round 1 (I2): a cost that leaves unknown job fees out
+            # A cost that leaves unknown job fees out
             # makes profit, margin and ISK/h upper bounds (orow.get_profit_upper_bound_reason).
             upper_bound = bool(manufacturing_job.get("job_fee_unknown_reasons"))
             manufacturing_job["profit_is_upper_bound"] = upper_bound
@@ -1249,7 +1249,7 @@ class MarketEnrichmentMixin:
         unknown_reasons: list[str] | None = None,
     ) -> tuple[float | None, int]:
         """(EIV, priced line count). The EIV is None when no line, or ANY line,
-        lacks a price or has a non-numeric quantity (fix round 1, F1): a
+        lacks a price or has a non-numeric quantity: a
         partial sum would price a job fee low and pass as exact, so the fee
         reads unknown instead."""
         total, priced_count, _line_count = cls._sum_estimated_item_value_counted(
@@ -1653,7 +1653,7 @@ class MarketEnrichmentMixin:
             manufacturing_job["priced_material_count"] = priced_material_count + invention_priced_count
             manufacturing_job["material_type_count"] = len(procurement_materials) + invention_line_count
             total_job_cost = manufacturing_job.get("total_job_cost")
-            # I1: with a fee unknown, total_job_cost / total_cost hold the
+            # With a fee unknown, total_job_cost / total_cost hold the
             # priced parts only. Kept (not None) so the row still ranks, but
             # flagged: the UI marks it and the confidence is capped.
             manufacturing_job["total_cost_excludes_unknown_job_fees"] = bool(

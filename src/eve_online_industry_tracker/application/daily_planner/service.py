@@ -57,7 +57,7 @@ _SCORED_WITHOUT_IT = "scored without it"
 
 
 def _db_read_unavailable(label: str, exc: BaseException, effect: str) -> str:
-    """The reason a read that failed with a DB error records (RM-35), e.g.
+    """The reason a read that failed with a DB error records, e.g.
     "margin correlation unavailable (DB error: OperationalError): scored
     without it". A read that succeeded with no rows records nothing."""
     return f"{label} unavailable (DB error: {type(exc).__name__}): {effect}"
@@ -403,7 +403,7 @@ class DailyPlannerService:
             # that visible in the response instead of only in a log line.
             "freshness_comparable_items": comparable_items,
             "freshness_total_items": total_items,
-            # RM-35: scoring inputs whose read failed this compute, {input:
+            # Scoring inputs whose read failed this compute, {input:
             # reason}. Empty when every read succeeded (even with no rows).
             "unavailable_inputs": _plan_unavailable_inputs(plan),
         }
@@ -446,7 +446,7 @@ class DailyPlannerService:
         weights = self._repo.get_weights(type_ids)
         invention_rates = self._repo.get_invention_success_rates(type_ids)
 
-        # A read that fails is named here (RM-35), so the tab does not show
+        # A read that fails is named here, so the tab does not show
         # "no data yet" for a DB error. An empty successful read adds nothing.
         unavailable: dict[str, str] = {}
 
@@ -723,7 +723,7 @@ class DailyPlannerService:
 
         # Tritanium 7d price trend (for squeeze penalty gate)
         trit_trend_7d, trend_unavailable = self._get_trit_trend_7d()
-        # RM-35: scoring modifiers whose read failed. Recorded on the plan
+        # Scoring modifiers whose read failed. Recorded on the plan
         # (Phase 9) and on the affected rows' reason (Phase 4).
         unavailable_inputs = {
             name: reason
@@ -739,7 +739,7 @@ class DailyPlannerService:
 
         with _ComputeStep(self, "indexing corp blueprints"):
             corp_index = self._index_blueprint_assets(corp_assets)
-        # Task A item 1: the pilots' own blueprints, from the producer's
+        # The pilots' own blueprints, from the producer's
         # source (owned_blueprints_scope "all_characters", its default). The
         # ledger binds each to its owner (its character_id): only that pilot
         # can install a job from it.
@@ -751,7 +751,7 @@ class DailyPlannerService:
             )
         bpo_assets_by_type_id, bpc_assets_by_type_id = merge_blueprint_indexes(corp_index, character_index)
         # Blueprints installed in an active job: chain planning neither
-        # researches nor builds from them (Task 8c fix round 5).
+        # researches nor builds from them.
         busy_item_ids = busy_blueprint_item_ids(industry_jobs)
         if busy_item_ids:
             owned = {
@@ -941,7 +941,7 @@ class DailyPlannerService:
         play no part here. So it does not count as a build, and chain
         planning neither sub-builds, researches, invents nor buys for it.
         When the only free blueprints of its type are pilots' own (owner-bound
-        in the ledger, Task A) only those owners count: "not built: owner X
+        in the ledger) only those owners count: "not built: owner X
         lacks the skills: ...". CharacterAssigner applies the same rule
         (_SkillGate) to every job it assigns."""
         assigner = self._character_assigner
@@ -985,7 +985,7 @@ class DailyPlannerService:
             industry_jobs=phase1["industry_jobs"],
             characters_service=self._characters,
             admin_settings=self._admin,
-            # The invent action prices a weaker pilot's extra inputs with it (A4).
+            # The invent action prices a weaker pilot's extra inputs with it.
             price_map=phase1.get("price_map", phase1["market_depth_cache"]),
             # The SDE skills each job's activity requires: a job goes only to
             # a pilot who has them.
@@ -1066,7 +1066,7 @@ class DailyPlannerService:
             corp_wallet_snapshot=corp_wallet,
             market_snapshot_hash=snapshot_hash,
             freshness_score=1.0,
-            # RM-35: the scoring inputs whose read failed, NULL when none did.
+            # The scoring inputs whose read failed, NULL when none did.
             plan_summary_json=(
                 json.dumps({"unavailable_inputs": unavailable_inputs}, sort_keys=True)
                 if unavailable_inputs else None
@@ -1317,7 +1317,7 @@ class DailyPlannerService:
 
         The reason is None when the read succeeded, also with no rows. A DB
         error returns ({}, reason): the plan scores without the mineral-squeeze
-        penalty and says so (RM-35).
+        penalty and says so.
         """
         if not type_ids:
             return {}, None
@@ -1340,7 +1340,7 @@ class DailyPlannerService:
         history (type_id=34, Jita region).
 
         Too little history is a successful read: (None, None), as before. A
-        DB error is (None, reason) (RM-35).
+        DB error is (None, reason).
         """
         try:
             from eve_online_industry_tracker.infrastructure.models import MarketHistoryModel
@@ -1672,7 +1672,7 @@ def merge_blueprint_indexes(
     """One (BPOs, BPCs) index, keyed by blueprint type_id: the corp's
     assets, then the pilots'.
 
-    One item_id in both (Task A fix round 1, I1: a blueprint moved between
+    One item_id in both (a blueprint moved between
     a pilot's and the corp hangar while one snapshot is stale) is one
     blueprint: the pilot's entry is kept, as it is owner-bound (only that
     pilot can install it: the conservative reading), and a WARNING names

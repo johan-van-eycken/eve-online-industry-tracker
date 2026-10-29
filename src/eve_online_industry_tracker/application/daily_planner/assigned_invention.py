@@ -128,8 +128,8 @@ class _Sizing:
     #: Sized from invention_bpc_plan (I1 case A): one full batch, no fee.
     later_batch: bool = False
     #: The expected attempts the row's fee and expected input lines are
-    #: priced at: the producer's lanes' when they run in parallel (Task 12
-    #: fix round 2), else the best inventor's. None: best_expected.
+    #: priced at: the producer's lanes' when they run in parallel,
+    #: else the best inventor's. None: best_expected.
     basis_expected: float | None = None
 
     @property
@@ -146,7 +146,7 @@ def _sizing(row: dict[str, Any], best_probability: float | None) -> tuple[_Sizin
         invented_runs = _positive_int(costs.get("invented_runs"))
         runs_per_bpc = _positive_int(costs.get("runs_per_invented_blueprint"))
         basis_expected = _positive_float(costs.get("runs"))
-        # The best inventor alone (Task 12 fix round 2); a row from before it
+        # The best inventor alone; a row from before it
         # carries only the row's attempts, which were the best inventor's.
         best_expected = _positive_float(costs.get("best_inventor_expected_attempts")) or basis_expected
         best_whole = _positive_int(costs.get("best_inventor_whole_attempts")) or _positive_int(costs.get("whole_attempts"))
@@ -223,7 +223,7 @@ def _pilot_chance(
     character_id: int, skill_levels_by_id: Mapping[int, int] | None, probability_floor: float,
 ) -> _PilotChance:
     """The A4 rule for one pilot (the single copy: the single invent action
-    and every parallel lane, Task 12, use it)."""
+    and every parallel lane use it)."""
     type_id = row.get("type_id")
     inventor = chance.get("inventor_character_id")
     if inventor is not None and int(inventor) == int(character_id):
@@ -373,7 +373,7 @@ def assigned_invention_lanes(
     probability_floor: float,
     price_map: Mapping[int, Any],
 ) -> list[tuple[int, AssignedInvention]]:
-    """The row's invention split over parallel lanes (Task 12 fix round 1):
+    """The row's invention split over parallel lanes:
     `lanes` holds one (character_id, skill levels by id) per free research
     slot of a qualifying pilot. Each lane runs at its OWN pilot's chance
     (_pilot_chance, the A4 rule), best chance first, and the attempts per lane
@@ -383,7 +383,7 @@ def assigned_invention_lanes(
 
     Each lane's expected attempts are its share of the expected BPCs over its
     chance: E x a_i / sum(a_j x p_j). The lanes' total expected attempts are
-    priced once (fix round 2: the held stock's discount counts once) and each
+    priced once (the held stock's discount counts once) and each
     lane carries its share of that cost. The whole attempts (what is
     bought) add up to at least what one pilot would buy. One lane: exactly assigned_invention. Unknown odds: one
     action, as assigned_invention."""
@@ -416,7 +416,7 @@ def assigned_invention_lanes(
     covered = sum(a * p for a, p in zip(attempts, probabilities))
     expected_blueprints = float(sizing.invented_runs) / float(sizing.runs_per_bpc)
     used = [(cid, a) for cid, a in zip(ordered, attempts) if a > 0]
-    # Fix round 2: the lanes' expected attempts are priced ONCE (the row's
+    # The lanes' expected attempts are priced ONCE (the row's
     # held stock discount counts once), then each lane takes its share.
     total_expected = expected_blueprints * sum(a for _, a in used) / covered
     total_cost, cost_why = sized.cost(total_expected)

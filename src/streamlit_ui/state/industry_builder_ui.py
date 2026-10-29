@@ -314,7 +314,7 @@ def flatten_overview_job_tree_rows(overview_rows: list[dict[str, Any]]) -> list[
         total_cost = node.get("total_cost")
         if total_cost is None:
             total_cost = job_cost
-        # The row's own total_cost leaves unknown job fees out (Task 15): the
+        # The row's own total_cost leaves unknown job fees out: the
         # grid's formatter shows it as "≥".
         total_cost_lower_bound = False
         market_unit_price = node.get("unit_price")

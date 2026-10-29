@@ -134,7 +134,7 @@ NO_ENCRYPTION_SKILL_NOTE = (
 @dataclass(frozen=True)
 class InventionSkillSet:
     """The skills EVE's invention chance reads for one blueprint: two science
-    skills and an encryption skill (None when the SDE lists none, A3)."""
+    skills and an encryption skill (None when the SDE lists none)."""
 
     science_skill_type_ids: tuple[int, int]
     encryption_skill_type_id: int | None
@@ -146,7 +146,7 @@ def invention_skill_set(
     """(skill set, None), or (None, why) when the SDE entries are not two
     science skills plus at most one encryption skill. Science = a group-270
     entry that is not an encryption skill (verified against the SDE). Two
-    science skills and no encryption skill is a valid set (A3)."""
+    science skills and no encryption skill is a valid set."""
     if not encryption_skill_type_ids:
         return None, _NO_ENCRYPTION_SKILLS
     pairs: list[tuple[int, int]] = []
@@ -178,7 +178,7 @@ def invention_skill_factor(skill_set: InventionSkillSet, levels_by_skill_type_id
 
     The single copy of the formula: the producer's best inventor and the
     daily planner's pilot ranking both call it. No encryption skill in the
-    set (A3): no encryption term. `levels_by_skill_type_id` is one
+    set: no encryption term. `levels_by_skill_type_id` is one
     character's loaded skill list, so an absent skill is level 0, not
     unknown."""
     science = sum(int(levels_by_skill_type_id.get(type_id, 0) or 0) for type_id in skill_set.science_skill_type_ids)
@@ -258,7 +258,7 @@ class InventionChance:
     inventor_character_id: int | None
     skill_set: InventionSkillSet | None
     skills_unknown_reason: str | None
-    #: A row note that does not lower confidence (A3: no encryption skill).
+    #: A row note that does not lower confidence (no encryption skill).
     note: str | None = None
 
 
@@ -280,7 +280,7 @@ class InventionContext:
     #: Why inventor_skill_levels_by_character_id is empty, when it is.
     no_inventor_reason: str = NO_CHARACTER_SKILLS
     #: {character_id: total research slots and skill levels by name} for every
-    #: industry-enabled corp character (Task 12, the daily planner's slot
+    #: industry-enabled corp character (the daily planner's slot
     #: model). None: no slot data was supplied, so elapsed times stay sequential.
     slot_capacity_by_character_id: Mapping[int, "CharacterSlotCapacity"] | None = None
     #: The producer's selected character: its lane uses the producer's own
@@ -375,7 +375,7 @@ def invention_chance_payload(chance: InventionChance, effective_probability: flo
     }
 
 
-# --- parallel lanes (Task 12) ----------------------------------------------
+# --- parallel lanes ----------------------------------------------
 
 #: Shown with every parallel elapsed time.
 PARALLEL_CAPACITY_NOTE = (
@@ -594,7 +594,7 @@ def source_copy_lanes(context: InventionContext, source_blueprint_type_id: int) 
 
 def elapsed_lane_note(parallel: Mapping[str, Any] | None, *, label: str = "invention") -> str | None:
     """The row note for an elapsed time over more than one lane, or for an
-    invention timed in one slot because nobody qualifies (Task 12)."""
+    invention timed in one slot because nobody qualifies."""
     if not isinstance(parallel, Mapping):
         return None
     if parallel.get("sequential_reason") == NO_QUALIFYING_INVENTOR_REASON:
@@ -610,7 +610,7 @@ def elapsed_lane_note(parallel: Mapping[str, Any] | None, *, label: str = "inven
     return None
 
 
-# --- decryptor selection (amendment A1) -----------------------------------
+# --- decryptor selection --------------------------------------------------
 
 #: Differences below this (ISK per cycle, or ISK per unit in the fallback)
 #: are ties, and ties go to no decryptor.
@@ -656,7 +656,7 @@ class DecryptorChoice:
     baseline_profit_per_cycle: float | None = None
     #: PROFIT_PER_CYCLE_CRITERION or COST_PER_UNIT_CRITERION; None when nothing was compared.
     criterion: str | None = None
-    #: Set when the cost-per-unit fallback was used (A1).
+    #: Set when the cost-per-unit fallback was used.
     fallback_reason: str | None = None
 
 
@@ -684,7 +684,7 @@ def _pick(
 
 def select_best_decryptor(evaluations: Iterable[DecryptorEvaluation]) -> DecryptorChoice:
     """THE decryptor selection criterion, kept in this one function so it can
-    be switched later (round-5 amendment A1).
+    be switched later.
 
     Highest profit per invention cycle. One cycle is the expected attempts
     for one successful BPC plus the manufacturing runs that BPC yields;

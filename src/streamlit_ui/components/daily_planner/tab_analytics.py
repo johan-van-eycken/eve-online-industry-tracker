@@ -8,7 +8,7 @@ from streamlit_ui.state.daily_planner_page import DailyPlannerPageState
 
 
 def analytics_unavailable_caption(analytics: dict | None) -> str | None:
-    """Caption naming the analytics reads that failed (RM-35), or None.
+    """Caption naming the analytics reads that failed, or None.
 
     Without it a DB error reads as the sections' "no data yet" messages."""
     unavailable = (analytics or {}).get("unavailable") or {}
@@ -21,7 +21,7 @@ def section_empty_message(analytics: dict | None, key: str, default: str) -> tup
     """(message, read failed) for an Analytics section with no rows.
 
     A failed read gives its reason instead of the "no data yet" default, so
-    the section does not name a false cause for a DB error (RM-35)."""
+    the section does not name a false cause for a DB error."""
     unavailable = (analytics or {}).get("unavailable") or {}
     reason = unavailable.get(key) if isinstance(unavailable, dict) else None
     return (str(reason), True) if reason else (default, False)

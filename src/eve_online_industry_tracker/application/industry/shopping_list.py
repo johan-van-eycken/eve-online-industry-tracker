@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 #: (manufacturing_job.later_batch_plan_version) since batches 2..N got their
 #: own plans (extra_batch_schedule). A row without it comes from an older
 #: overview whose later batches repeat batch 1.
-#: 2 (Task 10 fix round 3): rows also publish the nested and top-level BPC
+#: 2: rows also publish the nested and top-level BPC
 #: runs batch 1 spent (shared-BPC netting); a version-1 row lacks them.
 LATER_BATCH_PLAN_VERSION = 2
 
@@ -30,11 +30,11 @@ LATER_BATCH_PLAN_BUY_LIST_KEYS = (PROCUREMENT_KEY, INVENTION_KEY, PLAN_NESTED_IN
 BPC_PLAN_KEY = "invention_bpc_plan"
 BPC_PLAN_LINES_KEY = "per_attempt_materials"
 EXTRA_BATCH_SCHEDULE_KEY = "extra_batch_schedule"
-#: I3: the nested inventions of batch 1 (row) and of each later plan, and the
+#: The nested inventions of batch 1 (row) and of each later plan, and the
 #: owned BPC runs each nested blueprint has left after batch 1.
 NESTED_BPC_PLANS_KEY = "nested_invention_bpc_plans"
 NESTED_RUNS_LEFT_KEY = "nested_blueprint_runs_left"
-#: Fix round 2, item 4: the nested BPC runs batch 1 spent, and the owned runs
+#: The nested BPC runs batch 1 spent, and the owned runs
 #: it was planned against (each row plans on its own copy of the pool).
 NESTED_RUNS_USED_KEY = "nested_blueprint_runs_used"
 NESTED_RUNS_OWNED_KEY = "nested_blueprint_runs_owned"
@@ -113,7 +113,7 @@ def aggregate_shopping_list_with_stale(
     # Keyless rows' types whose take may understate the stock (see above).
     take_bound_type_names: dict[int, str] = {}
 
-    # The same row selected twice is one row (fix round 3).
+    # The same row selected twice is one row.
     selected_rows = _distinct_rows(selected_rows)
     selected_jobs = [
         mj for mj in (row.get("manufacturing_job") if isinstance(row, dict) else None for row in selected_rows)
@@ -337,8 +337,8 @@ def _row_lines_with_batch_counts(
     ``_later_batch_plan_counts``). Without it every later batch repeats batch
     1's procurement_materials.
 
-    The row's own invention for batches 2..N, with an ``invention_bpc_plan``
-    (I2): later batches share invented BPC runs, so it is sized over all
+    The row's own invention for batches 2..N, with an ``invention_bpc_plan``:
+    later batches share invented BPC runs, so it is sized over all
     batches (``_later_batch_invention_lines``), and only the nested
     sub-builds' inputs come per batch (a plan's
     ``invention_procurement_materials_nested``, or the row's
@@ -349,7 +349,7 @@ def _row_lines_with_batch_counts(
     before that list existed lacks the key, and batch 1's invention list then
     counts for every batch. Every later-batch line takes nothing from stock.
 
-    Nested inventions (I3), on a row that publishes ``nested_invention_bpc_plans``:
+    Nested inventions, on a row that publishes ``nested_invention_bpc_plans``:
     their later-batch inputs are not taken per batch but sized over all
     batches (``_later_batch_nested_invention_lines``), like the row's own.
     `exclusive_blueprint(bp)` says whether the row may count blueprint bp's
@@ -467,7 +467,7 @@ def _entries_for(plans: Any, bp: int) -> list[dict[str, Any]]:
 
 def _shared_bpc_plan(rows: list[tuple[dict[str, Any], int]]) -> _SharedBpcPlan:
     """BPC runs that several selected rows spend, sized once over all of
-    them and all their batches (Task 10 fix round 2 item 4, fix round 3).
+    them and all their batches.
 
     Every row is planned against its own copy of the owned BPC runs, so two
     rows can both spend the same owned run: two parents of one component,
@@ -611,7 +611,7 @@ def _later_batch_nested_invention_lines(
     mj: dict[str, Any], later_nested: list[tuple[int, Any]], exclusive_blueprint: Any,
     *, skip: Any = frozenset(),
 ) -> list[dict[str, Any]]:
-    """The nested inventions' inputs for batches 2..N, sized over all batches (I3).
+    """The nested inventions' inputs for batches 2..N, sized over all batches.
 
     Per nested blueprint: the runs batches 2..N invent (each later plan
     assumes no owned BPC run of it is left), less what is already there:

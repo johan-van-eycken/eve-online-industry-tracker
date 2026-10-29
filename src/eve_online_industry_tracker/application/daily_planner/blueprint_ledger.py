@@ -1,4 +1,4 @@
-"""One plan-wide blueprint reservation (round 5 Task 14).
+"""One plan-wide blueprint reservation.
 
 EVE runs one job per blueprint: a BPO is in one research, copy or
 manufacturing job at a time, and a BPC in one manufacturing or invention
@@ -21,7 +21,7 @@ blueprint). ChainPlanner claims in this order:
 An asset without an item_id (a hand-built fixture) is keyed by its type
 and position, so two such assets of one type stay two blueprints.
 
-A pilot's own blueprint (Task A item 1, a character asset) is booked like a
+A pilot's own blueprint (a character asset) is booked like a
 corp one but bound to its owner (owner_of): only that pilot can install a
 job from it, which CharacterAssigner enforces. Sub-builds use corp BPOs only.
 """
@@ -34,7 +34,7 @@ from eve_online_industry_tracker.application.daily_planner import research_first
 
 def owner_character_id(asset: Any) -> int | None:
     """The pilot a blueprint belongs to (a character asset carries its
-    character_id), or None for a corp blueprint (Task A item 1). Only that
+    character_id), or None for a corp blueprint. Only that
     pilot can install a job from a character's blueprint."""
     value = asset.get("character_id") if isinstance(asset, dict) else getattr(asset, "character_id", None)
     try:
@@ -56,7 +56,7 @@ class BlueprintLedger:
     """The free BPOs and BPCs of one plan, and who has claimed each."""
 
     def __init__(self, bpo_assets_by_type_id: dict[int, list], bpc_assets_by_type_id: dict[int, list]) -> None:
-        # One entry per key (Task A fix round 1, I1): an item listed twice (a
+        # One entry per key: an item listed twice (a
         # stale corp + pilot snapshot) is one blueprint, the pilot's
         # (owner-bound) entry wins. {key: (kind, type_id, asset)}.
         self._index: dict[Hashable, tuple[str, int, Any]] = {}
@@ -165,7 +165,7 @@ class BlueprintLedger:
 
     def transfer(self, key: Hashable, owner_type_id: int, label: str) -> None:
         """Book `key` for `owner_type_id`, whoever held it: the assigner
-        gave a released blueprint to that row's job (Task A items 2-3)."""
+        gave a released blueprint to that row's job."""
         self._claims[key] = (int(owner_type_id), label)
 
     def claims_of(self, owner_type_id: int) -> list[tuple[Hashable, str]]:

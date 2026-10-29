@@ -32,7 +32,7 @@ class ItemDecisionEngine:
         meta_group_id: int | None = None,
     ) -> ItemDecision:
         """_decide's decision; when the row's profit is an upper bound (job
-        fees unknown, Task 15 fix round 1 I2) its reason says so. The scores
+        fees unknown) its reason says so. The scores
         stay on that bound, labelled."""
         decision = self._decide(scored, pipeline, overview_row, admin_settings, meta_group_id)
         upper_bound = orow.get_profit_upper_bound_reason(overview_row)

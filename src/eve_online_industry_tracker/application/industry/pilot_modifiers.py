@@ -294,7 +294,7 @@ class PilotModifiersMixin:
         (character_slots.research_slot_capacity, as in
         CharacterAssigner._compute_available_slots) before it deducts active
         jobs. Total slots, not free ones: the parallel invention lanes are
-        steady-state capacity (Task 12)."""
+        steady-state capacity."""
         out: dict[int, CharacterSlotCapacity] = {}
         for char in self._corp_characters():
             if not char.get("industry_enabled", True):
@@ -313,7 +313,7 @@ class PilotModifiersMixin:
 
     def _pilot_industry_payload(self, character_id: int) -> dict[str, Any] | None:
         """A corp pilot's own industry payload (skills and implants), the
-        one convention for "another pilot" (Task 12 fix round 1). None, with
+        one convention for "another pilot". None, with
         a WARNING, when the character cannot be read: its lane is then timed
         at its skills without implants (longer, never understated)."""
         try:

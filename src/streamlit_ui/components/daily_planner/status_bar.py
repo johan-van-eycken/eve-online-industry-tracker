@@ -32,7 +32,7 @@ CORP_LEVEL_ACTION_TYPES: frozenset[str] = frozenset({"buy_materials", "buy_bpo"}
 
 #: Action types that spend ISK on the market: the shopping list.
 _CAPITAL_ACTION_TYPES: frozenset[str] = frozenset({"buy_materials", "buy_bpo"})
-#: Action types that install a job and so pay an install fee (D4, A2).
+#: Action types that install a job and so pay an install fee.
 _JOB_ACTION_TYPES: frozenset[str] = frozenset(
     {"manufacture", "sub_manufacture", "invent", "copy", "me_research", "te_research"}
 )
@@ -69,7 +69,7 @@ class CapitalReserved:
 
 
 def compute_capital_reserved(actions: list[dict[str, Any]]) -> CapitalReserved:
-    """ISK needed to execute the plan (D4): the pending shopping list plus the
+    """ISK needed to execute the plan: the pending shopping list plus the
     pending jobs' estimated install fees.
 
     manufacture / sub_manufacture / invent actions also carry the cost of the
@@ -124,7 +124,7 @@ STALE_FEE_HINT = (
 
 
 def capital_reserved_display(reserved: CapitalReserved) -> tuple[str, str | None]:
-    """(metric value, caption or None) for the Capital Reserved metric. A2:
+    """(metric value, caption or None) for the Capital Reserved metric:
     one exact amount, or "unknown" with what is missing -- never a partial
     sum or a lower bound."""
     missing: list[str] = []
@@ -158,11 +158,11 @@ def queued_te_status(
 
     Startable when the ME action on the same BPO (type_id) for the same
     pilot was skipped, or was marked started (done) and its job has ended.
-    A pending ME was never started, so the TE waits (carry 14). The end is
+    A pending ME was never started, so the TE waits. The end is
     the later of the planner's estimate and the latest active ME-research
     job's end_date on that blueprint type, from `jobs` (the action rows do
     not name the BPO's item, so an earlier job may be a sibling BPO's and
-    must not start it early; fix round 2). Without such a job only the
+    must not start it early). Without such a job only the
     estimate is used, and the note says so. With no such ME action
     nothing says it must wait. (False, None) for an action that is not
     queued."""
@@ -342,8 +342,8 @@ def freshness_summary(plan_data: dict[str, Any] | None,
 
 
 def unavailable_inputs_caption(plan_data: dict[str, Any] | None) -> str | None:
-    """Caption naming the scoring inputs whose read failed in the last compute
-    (RM-35), or None when every read succeeded. The plan was still scored;
+    """Caption naming the scoring inputs whose read failed in the last compute,
+    or None when every read succeeded. The plan was still scored;
     each reason says it was scored without that input."""
     unavailable = (plan_data or {}).get("unavailable_inputs") or {}
     if not isinstance(unavailable, dict) or not unavailable:

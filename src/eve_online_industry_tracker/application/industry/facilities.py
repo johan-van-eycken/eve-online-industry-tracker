@@ -689,8 +689,8 @@ class FacilitiesMixin:
         # No per-effect rig covers this product: no rig bonus. The aggregate
         # structure_rig_*_bonus is no fallback. With per-effect rigs it
         # combines those same rigs (an under-buy); alone it names no rig, so
-        # neither its groups nor its security multiplier is known (Task 15 M1,
-        # superseding Task 11 I1 / 11b M2): no rig bonus, the same as the
+        # neither its groups nor its security multiplier is known:
+        # no rig bonus, the same as the
         # daily planner's facility_bonus (an over-buy, never an under-buy),
         # with a WARNING here and a row reason (_aggregate_only_rig_reason).
         if activity == "manufacturing" and metric in cls._aggregate_only_rig_metrics(profile_payload):
@@ -702,7 +702,7 @@ class FacilitiesMixin:
                 )
         return 0.0
 
-    #: What leaving each aggregate rig metric out does to a row (Task 15 fix round 1).
+    #: What leaving each aggregate rig metric out does to a row.
     _AGGREGATE_RIG_IMPACT = {
         "material": "the material quantities and cost are overstated",
         "time": "the build time is overstated",

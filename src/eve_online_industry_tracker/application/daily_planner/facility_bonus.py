@@ -13,7 +13,7 @@ _profile_rig_reduction, so the planner gets it with no code of its own.
 
 A profile with only the aggregate structure_rig_material_bonus (no
 per-effect rig entries) names no rig: neither the producer nor this module
-applies it (Task 15 M1). When the component cannot be classified, only "All"
+applies it. When the component cannot be classified, only "All"
 rigs apply: an over-buy is recoverable, an under-buy stalls the job.
 """
 from __future__ import annotations

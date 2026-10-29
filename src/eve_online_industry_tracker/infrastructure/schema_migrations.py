@@ -969,21 +969,21 @@ def ensure_app_schema(db_app: DatabaseManager) -> None:
     _ensure_column(db_app, table="build_plan_item", column="bpo_market_price", ddl_type="REAL")
     _ensure_column(db_app, table="build_plan_item", column="break_even_days", ddl_type="REAL")
     _ensure_column(db_app, table="build_plan_item", column="projected_annual_savings", ddl_type="REAL")
-    # Task 15 fix round 2: an upper-bound isk_per_hour (job fees unknown).
+    # An upper-bound isk_per_hour (job fees unknown).
     _ensure_column(db_app, table="build_plan_item", column="isk_per_hour_is_upper_bound", ddl_type="INTEGER")
     _ensure_column(db_app, table="daily_action_log", column="shopping_category", ddl_type="TEXT")
     _ensure_column(db_app, table="daily_action_log", column="processed_for_feedback", ddl_type="INTEGER")
     _ensure_column(db_app, table="daily_action_log", column="estimated_build_cost_isk", ddl_type="REAL")
-    # A4: the invent action's chance figures and Task 3's decryptor.
+    # The invent action's chance figures and the decryptor.
     _ensure_column(db_app, table="daily_action_log", column="invention_probability", ddl_type="REAL")
     _ensure_column(db_app, table="daily_action_log", column="invention_best_probability", ddl_type="REAL")
     _ensure_column(db_app, table="daily_action_log", column="invention_expected_attempts", ddl_type="REAL")
     _ensure_column(db_app, table="daily_action_log", column="decryptor_type_id", ddl_type="INTEGER")
     _ensure_column(db_app, table="daily_action_log", column="decryptor_type_name", ddl_type="TEXT")
-    # D4 / A2: the job action's estimated install fee (Capital Reserved).
+    # The job action's estimated install fee (Capital Reserved).
     _ensure_column(db_app, table="daily_action_log", column="estimated_job_fee_isk", ddl_type="REAL")
     _ensure_column(db_app, table="daily_action_log", column="estimated_job_fee_unknown_reason", ddl_type="TEXT")
-    # Task 8c fix round 4: a TE research queued behind the ME job on its BPO.
+    # A TE research queued behind the ME job on its BPO.
     _ensure_column(db_app, table="daily_action_log", column="queued_after_me", ddl_type="INTEGER NOT NULL DEFAULT 0")
     _ensure_column(db_app, table="build_plan_item", column="snapshot_sell_price", ddl_type="REAL")
     _ensure_column(db_app, table="build_plan_item", column="bpo_analysis_skip_reason", ddl_type="TEXT")

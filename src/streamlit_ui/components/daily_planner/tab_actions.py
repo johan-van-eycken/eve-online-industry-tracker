@@ -108,8 +108,8 @@ def _character_level_actions(actions: list[dict[str, Any]]) -> list[dict[str, An
 
 
 def _is_queued(action: dict[str, Any]) -> bool:
-    """A TE research queued behind the ME research on the same BPO (Task 8c
-    fix round 4): EVE runs one job per blueprint, so it cannot start today
+    """A TE research queued behind the ME research on the same BPO:
+    EVE runs one job per blueprint, so it cannot start today
     and does not count as today's work."""
     return bool(action.get("queued_after_me"))
 
@@ -118,7 +118,7 @@ def _todays(
     actions: list[dict[str, Any]], now: datetime | None = None, *, jobs: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """The actions that can be done today: every action but a queued one
-    whose ME research has not ended yet (fix round 5: once it has, the
+    whose ME research has not ended yet (once it has, the
     queued TE is today's work, with a "Mark started" button). `jobs`: the
     active industry jobs, whose ME job end_date decides (status_bar.queued_te_status)."""
     return [a for a in actions if not is_waiting(a, actions, now, jobs=jobs)]
@@ -151,7 +151,7 @@ def _reload_plan(page_state: DailyPlannerPageState) -> None:
 # ---------------------------------------------------------------------------
 
 def action_quantity_label(action: dict[str, Any]) -> str:
-    """The row's quantity label. A copy (Task 14 M6) is one job of
+    """The row's quantity label. A copy is one job of
     `quantity` copies whose `runs` are the copied runs in all, so it reads
     "N copies × M runs" (M runs per copy)."""
     quantity = action.get("quantity")

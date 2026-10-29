@@ -136,7 +136,7 @@ class PortfolioCandidatesMixin:
             is_optimal = not uses_contended
             row["inventory_allocation_optimal"] = is_optimal
             row["inventory_priority_rank"] = rank_by_row_index.get(row_index)
-            # Task 15 fix round 1 (I2): the rank orders ISK/h, an upper bound
+            # The rank orders ISK/h, an upper bound
             # on a row whose job fees are partly unknown; flagged, not changed.
             uses_upper_bound = bool(row.get("profit_is_upper_bound"))
             row["inventory_priority_uses_upper_bound"] = uses_upper_bound
@@ -342,7 +342,7 @@ class PortfolioCandidatesMixin:
             ),
             "pricing_confidence": row.get("pricing_confidence"),
             "pricing_confidence_reasons": row.get("pricing_confidence_reasons") or [],
-            # Task 15 fix round 1: its profit is an upper bound (job fees unknown).
+            # Its profit is an upper bound (job fees unknown).
             "profit_is_upper_bound": bool(row.get("profit_is_upper_bound")),
             "market_price_age_minutes": cls._as_float(row.get("market_price_age_minutes")),
             "estimated_market_absorption_units": estimated_market_absorption_units,

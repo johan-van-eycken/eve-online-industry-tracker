@@ -69,8 +69,8 @@ class ShoppingListBuilder:
         # buy_materials and buy_bpo are generated here, not from Phase 6
 
         # Units of each component that sub_manufacture actions will build. A
-        # parent's batch needs these too, but must not ALSO buy them: that was
-        # the double-buy in final-review finding F4. Consumed parent by parent,
+        # parent's batch needs these too, but must not ALSO buy them (a double-buy).
+        # Consumed parent by parent,
         # in action order, so one merged sub-manufacture request covering
         # several parents is subtracted once in total.
         sub_built: dict[int, int] = {}
@@ -115,8 +115,8 @@ class ShoppingListBuilder:
         # Invention inputs: the datacores, plus the decryptor the producer chose
         # (one per attempt, AssignedAction.decryptor_type_id).
         for action in invention_actions:
-            # runs = the assigned pilot's whole attempts (CharacterAssigner,
-            # A4). None: the datacore need is unknown (unknown odds). Nothing
+            # runs = the assigned pilot's whole attempts (CharacterAssigner).
+            # None: the datacore need is unknown (unknown odds). Nothing
             # is bought for it, never a guessed attempt count; the reason is
             # on the action, as on the Portfolio shopping list.
             attempts = _positive_int(action.runs)
@@ -379,7 +379,7 @@ def _priced_line(
     """A shopping line, priced from the market depth cache. Without a price
     the line is still emitted with its quantity and an unknown (None) cost:
     dropping it under-bought the material and made Capital Reserved look
-    exact (Task 8 fix round 1)."""
+    exact."""
     unit_price, is_vwap = get_price(type_id, market_depth_cache)
     if unit_price is None or unit_price <= 0:
         logger.warning(

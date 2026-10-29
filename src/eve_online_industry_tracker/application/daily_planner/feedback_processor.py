@@ -313,7 +313,7 @@ class FeedbackProcessor:
             accuracy_unknown_reason = _isk_per_hour_unknown_reason(
                 predicted_isk_per_hour, actual_isk_per_hour
             )
-            # Task 15 fix round 2: an upper-bound prediction (job fees unknown)
+            # An upper-bound prediction (job fees unknown)
             # is no ISK/h to learn accuracy from. `is True`: a plan item from
             # before the column has NULL.
             if accuracy_unknown_reason is None and getattr(matching_item, "isk_per_hour_is_upper_bound", None) is True:
@@ -543,7 +543,7 @@ def _predicted_velocity_unknown_reason(plan_item: Any) -> str | None:
         return "no plan item for this type in the action's plan"
     vel = getattr(plan_item, "effective_velocity", None)
     if vel is None:
-        # Task 4: an unknown velocity is persisted as NULL.
+        # An unknown velocity is persisted as NULL.
         return "effective_velocity is unknown (NULL)"
     if isinstance(vel, bool) or not isinstance(vel, (int, float)):
         return f"effective_velocity is not a number: {vel!r}"

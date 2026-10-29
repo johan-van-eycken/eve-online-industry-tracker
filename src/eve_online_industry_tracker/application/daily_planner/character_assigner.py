@@ -9,7 +9,7 @@ names the missing skills with the best pilot's level.
 Priority rules, among the qualifying pilots:
   1. Manufacturing / sub-manufacture → character with most free manufacturing slots
   2. Invention → free research slot + highest invention skill factor for the
-     item's own skills (the producer's invention_chance, D2); a row without
+     item's own skills (the producer's invention_chance); a row without
      them falls back to the generic science skill sum
   3. Copy → character with most free research slots
   4. ME/TE research → character with most free research slots
@@ -36,7 +36,7 @@ from eve_online_industry_tracker.application.daily_planner.models import Assigne
 from eve_online_industry_tracker.application.industry import overview_row as orow
 from eve_online_industry_tracker.application.industry.research_time import research_skill_time_multiplier
 # The slot model and skill readers are shared with the producer's parallel
-# invention lanes (Task 12), so both count the same slots.
+# invention lanes, so both count the same slots.
 from eve_online_industry_tracker.application.industry.character_slots import (
     MFG_SLOT_SKILLS,
     activity_skill_requirements,
@@ -60,7 +60,7 @@ logger = logging.getLogger(__name__)
 
 #: On the copy / invent actions of a row that cannot manufacture yet.
 NO_MANUFACTURE_NOTE = "no manufacture until a T2 BPC exists"
-#: Task 15 fix rounds 1-2 (I1, B): why a row gets no invent action today.
+#: Why a row gets no invent action today.
 NO_FREE_RESEARCH_SLOT_REASON = "no free research slot today"
 NO_FREE_SKILLED_INVENTOR_REASON = "no free pilot with the invention skills"
 
@@ -96,7 +96,7 @@ class CharacterAssigner:
         """Return list of AssignedAction for all planned jobs.
 
         price_map: phase 1's merged price map, the market price of the extra
-        invention inputs a weaker assigned inventor needs (A4).
+        invention inputs a weaker assigned inventor needs.
         blueprint_data: phase 1's SDE blueprint map
         (get_blueprint_manufacturing_data): the skills each job's activity
         requires (_SkillGate). Required: no caller may skip the check."""
@@ -129,12 +129,12 @@ class CharacterAssigner:
         # their kept BPO row instead (filled by _assign_decision).
         fell_back: set[int] = set()
         # The T1 BPCs ("bpcs") and T1 BPOs ("bpos") already given to an
-        # invent / copy job, across rows (fix round 3, Task 14): one job per
+        # invent / copy job, across rows: one job per
         # blueprint, so each is used once, in assignment order. "released":
         # {T1 blueprint type_id: BPCs} a row could not invent from today,
-        # offered to the lower rows of that source (Task 15 fix round 4).
+        # offered to the lower rows of that source.
         bpc_pool: dict[str, Any] = {}
-        # The actions of each top-level row (Task A): which claims they use.
+        # The actions of each top-level row: which claims they use.
         emitted: dict[int, list[AssignedAction]] = {}
 
         def _assign_one(decision: ItemDecision) -> list[AssignedAction]:
@@ -154,7 +154,7 @@ class CharacterAssigner:
 
         for pass_decisions in (top_level, None):
             if pass_decisions is None:
-                # Task A items 2, 3 and 6: blueprints claimed for a job that
+                # Blueprints claimed for a job that
                 # got no action go back; rows not built for them are planned
                 # again, before any sub-component takes a slot.
                 replan = getattr(chain_plan, "replan_released", None)
@@ -171,7 +171,7 @@ class CharacterAssigner:
                         actions = _assign_one(decision)
                         if not actions and callable(undo):
                             # Still nothing to do today: back to its
-                            # not-built plan, saying why (fix round 1, I3).
+                            # not-built plan, saying why.
                             undo(decision, _replan_cause(decision, char_slots))
                             bpc_pool["releases"] = [e for e in bpc_pool.get("releases") or [] if e[0] is not decision]
                             continue
@@ -182,17 +182,17 @@ class CharacterAssigner:
                     if callable(replan):
                         # The last pass may have undone a re-plan: reword
                         # the rows still not built from the final ledger,
-                        # once the BPCs rows took from the pool are booked
-                        # (fix round 2), so a taken BPC is not called free.
+                        # once the BPCs rows took from the pool are booked,
+                        # so a taken BPC is not called free.
                         _release, used_by = _unused_claims(top_level, emitted, bpc_pool)
                         replan({}, used_by, set())
-                # Task A fix round 1 (I2): a parent with no manufacture action
+                # A parent with no manufacture action
                 # (owner binding, no slot) gets no sub-builds either: a
                 # component's quantity is its parents' need.
                 # Every parent with sub-manufacture requests (the plan's
                 # requests_by_parent), not only those a current sub decision
                 # names: a later re-size would otherwise revive the
-                # sub-builds of a parent not built today (H1).
+                # sub-builds of a parent not built today.
                 requesters = {
                     int(p) for d in sub_components for p in d.overview_row.get("requested_by_type_ids") or []
                 } | {int(p) for p in getattr(chain_plan, "sub_request_parent_type_ids", None) or ()}
@@ -203,12 +203,12 @@ class CharacterAssigner:
                 }
                 if (fell_back or no_build) and callable(resize):
                     # Their components were sized for the research-first
-                    # batch: re-plan them for the batch actually built (fix
-                    # round 5), before any sub-component takes a slot.
+                    # batch: re-plan them for the batch actually built,
+                    # before any sub-component takes a slot.
                     resized = resize(set(fell_back), dropped=no_build) if no_build else resize(set(fell_back))
                     sub_components = [d for d in resized if d.decision in ("build", "pause")]
                     rebuild = getattr(chain_plan, "rebuild_decisions", None)
-                    # One ItemDecision per type_id (Task 14): the planner's own merge.
+                    # One ItemDecision per type_id: the planner's own merge.
                     chain_plan.decisions[:] = rebuild(resized) if callable(rebuild) else [
                         *(d for d in chain_plan.decisions if not d.is_sub_component), *sub_components,
                     ]
@@ -275,7 +275,7 @@ class CharacterAssigner:
         if decision.decision != "build":
             return actions
 
-        # Task A item 1: a pilot's own blueprint takes jobs from that pilot
+        # A pilot's own blueprint takes jobs from that pilot
         # only. Pooled across rows: a BPC a higher row released keeps its owner.
         owner_by_item = _owner_by_item(decision)
         if bpc_pool is not None:
@@ -380,18 +380,18 @@ class CharacterAssigner:
                 if not me_scheduled:
                     self._take_slot(char_slots, char_id, "te_research")
 
-        # Invention and the T1 copies feeding it (Task 12). Invention runs over
+        # Invention and the T1 copies feeding it. Invention runs over
         # parallel lanes: one invent action per free research slot of every
         # qualifying pilot that runs at least one attempt, each at its own
         # chance, sized by the formula the producer's elapsed time uses; one
-        # lane or none qualifying: the single best free pilot (A4).
+        # lane or none qualifying: the single best free pilot.
         #
-        # Fix round 2: in the copying stage (an owned T1 BPO) the copy comes
+        # In the copying stage (an owned T1 BPO) the copy comes
         # FIRST, for the attempts the T1 BPC runs on hand do not cover. With
         # none on hand only the copy is planned, so the invention can never
         # take every research slot while no BPC exists to invent from.
         #
-        # Task 14: one invention job per T1 BPC, of at most its runs, so the
+        # One invention job per T1 BPC, of at most its runs, so the
         # lanes come from the row's list of BPCs (t1_bpc_runs_by_item, each
         # BPC used once across rows), and one copy job per T1 BPO, each BPO
         # used once across rows. A copy states copies x runs per copy.
@@ -427,13 +427,13 @@ class CharacterAssigner:
             # None: a row without BPC data (not from ChainPlanner): uncapped.
             bpcs = _row_bpcs(row, t1_blueprint_type_id, used_bpcs, carries_bpcs=wants_copy)
             own_bpcs = list(bpcs or [])
-            # Task 15 fix round 4: T1 BPCs a higher row of the same source
+            # T1 BPCs a higher row of the same source
             # could not invent from today (no qualifying pilot free) are
             # this row's too; used_bpcs keeps each in one job.
             released: dict[int, list[Any]] = pools.setdefault("released", {})
             if bpcs is not None and released.get(t1_blueprint_type_id):
                 own = {e[0] for e in bpcs}
-                # Task A fix round 2: unique by key (one invention job per BPC).
+                # Unique by key (one invention job per BPC).
                 pooled = {
                     e[0]: e for e in released[t1_blueprint_type_id] if e[0] not in used_bpcs and e[0] not in own
                 }
@@ -470,7 +470,7 @@ class CharacterAssigner:
                         # The copying stage words it as its no-manufacture reason.
                         _append_reason(decision, stage_reason)
                 # 2. Sized for the invent lanes actually free after the copy
-                #    took its slots (fix round 3); none free: the weakest
+                #    took its slots; none free: the weakest
                 #    qualifying pilot alone (the most attempts).
                 max_runs_per_copy = _max_runs_per_copy(row, type_id) if copy_bpos else None
                 jobs, needed, lane_sizes = self._copy_jobs_for(
@@ -479,7 +479,7 @@ class CharacterAssigner:
                 )
                 # 3. Give back the slots no copy job needs; a returned slot can
                 #    free an invent lane, so the lanes AND the copies are re-sized
-                #    (fix round 4) until no further slot comes back.
+                #    until no further slot comes back.
                 while jobs is not None and len(jobs) < len(reserved):
                     for char_id, _name in reserved[len(jobs):]:
                         self._release_slot(char_slots, char_id, "copy")
@@ -503,7 +503,7 @@ class CharacterAssigner:
                         max_runs_per_copy=max_runs_per_copy, lane_sizes=lane_sizes,
                     ))
                     used_bpos.update(reserved_bpos)
-                    # Which T1 BPOs this row's copies use (Task A item 6).
+                    # Which T1 BPOs this row's copies use.
                     pools.setdefault("copy_used", {}).setdefault(int(type_id), []).extend(reserved_bpos)
                 if on_hand <= 0:
                     logger.info(
@@ -523,7 +523,7 @@ class CharacterAssigner:
                     else _lanes_on_bpcs(results, bpcs, owner_by_item)
                 )
                 if bpcs is not None:
-                    # The lanes kept after the cap (fix round 4), not the free ones.
+                    # The lanes kept after the cap, not the free ones.
                     free_lanes = min(free_lanes, len(lanes))
                     used_bpcs.update(bpc[0] for _cid, _inv, bpc in lanes if bpc is not None)
                     # Who invents from each BPC, for a releasing row's reason.
@@ -533,7 +533,7 @@ class CharacterAssigner:
                             takers.setdefault(bpc[0], decision)
                 notes = _fewer_lanes_note(row, free_lanes)
                 if results and bpcs is not None:
-                    # Task A item 3: fewer lanes than the BPCs this row
+                    # Fewer lanes than the BPCs this row
                     # claimed: the rest go to the lower rows of the source,
                     # as when the row invents nothing (worded after the loop).
                     in_lanes = {bpc[0] for _cid, _inv, bpc in lanes if bpc is not None}
@@ -556,9 +556,9 @@ class CharacterAssigner:
                             f"{decision.decision_reason}; fewer invent lanes than T1 BPCs today: {placeholder}"
                         )
                 if not results:
-                    # I1 (Task 15 fix round 1): never an unqualified pilot,
+                    # Never an unqualified pilot,
                     # whose chance and attempts would be another pilot's.
-                    # Fix round 2 (B): no research slot free at all, or free
+                    # No research slot free at all, or free
                     # slots only on pilots without the skills.
                     why = (
                         NO_FREE_SKILLED_INVENTOR_REASON
@@ -580,10 +580,10 @@ class CharacterAssigner:
                             )
                     logger.info("CharacterAssigner: type_id=%s: no invention today: %s", type_id, why)
                     if bpcs:
-                        # Task 15 fix round 4: the BPCs ChainPlanner claimed
+                        # The BPCs ChainPlanner claimed
                         # for it would sit idle all day; a lower row of the
                         # same T1 source may invent from them instead.
-                        # Fix round 5: what became of each BPC is worded after
+                        # What became of each BPC is worded after
                         # every row is assigned (_reword_released_bpcs).
                         _pool_bpcs(released, t1_blueprint_type_id, bpcs)
                         placeholder = _released_placeholder(type_id)
@@ -625,7 +625,7 @@ class CharacterAssigner:
             for index, job in enumerate(jobs):
                 after = job.get("after_job")
                 queued = isinstance(after, int) and 1 <= after <= len(pilots)
-                # Minor 4: a job beyond the free BPOs waits for an earlier job
+                # A job beyond the free BPOs waits for an earlier job
                 # on the same BPO; it goes to that job's pilot and takes no
                 # slot of its own (the earlier job's slot frees first).
                 char_id, char_name = (
@@ -701,7 +701,7 @@ class CharacterAssigner:
                     _no_manufacture_today(decision, str(first["note"]).split(": not built")[0])
                     return actions
 
-        # No T2 BPC yet (fix round 3): a row still copying or inventing gets
+        # No T2 BPC yet: a row still copying or inventing gets
         # no manufacture, so its batch materials are not bought and its fee
         # not reserved before invented BPCs exist. Gated on the stage: an
         # invention-stage row carries no needs_invention.
@@ -719,7 +719,7 @@ class CharacterAssigner:
             ))
             return actions
 
-        # Manufacturing. Task A item 1: the batch's own blueprints decide
+        # Manufacturing. The batch's own blueprints decide
         # who may install it; the research BPO counts unless it is in the lab.
         researching = any(a.action_type in ("me_research", "te_research") for a in actions)
         mfg_owners = _claim_owners(
@@ -795,7 +795,7 @@ class CharacterAssigner:
             estimated_cost = orow.get_material_cost_total(row)
             estimated_profit = decision.absolute_profit_per_batch
             notes = f"Build: {decision.decision_reason}"
-            # Task 15 fix round 1 (I2): a lower-bound total cost is no build
+            # A lower-bound total cost is no build
             # cost to learn cost_multiplier from (FeedbackProcessor skips None).
             upper_bound = orow.get_profit_upper_bound_reason(row)
             build_cost = None if upper_bound is not None else orow.get_total_cost(row)
@@ -954,7 +954,7 @@ class CharacterAssigner:
                     # conservative choice -- it keeps its slot).
                     pass
 
-            # activity_id is now a real column on both job ORM models (Task 13),
+            # activity_id is now a real column on both job ORM models,
             # backfilled from `raw` for pre-existing rows and set directly on new
             # syncs. The `raw` fallback below stays anyway: a database that has
             # not yet run that migration still has activity_id NULL/0 on every
@@ -982,7 +982,7 @@ class CharacterAssigner:
     ) -> tuple[int | None, str | None]:
         """Among the pilots with the job's skills (`qualified`, _SkillGate),
         the one with most free manufacturing slots; tie-break by fewest
-        total active jobs. `only`: the blueprint owner(s) allowed (Task A)."""
+        total active jobs. `only`: the blueprint owner(s) allowed."""
         candidates = [(s["free_mfg"], s["total_active_jobs"], s["character_id"], s["character_name"])
                       for s in char_slots.values() if s["free_mfg"] > 0
                       and s["character_id"] in qualified
@@ -1016,7 +1016,7 @@ class CharacterAssigner:
     ) -> tuple[int | None, str | None]:
         """Among the pilots with the research's skills (`qualified`), the one
         with most free research slots; tie-break by fewest active jobs.
-        `only`: the blueprint owner(s) allowed (Task A)."""
+        `only`: the blueprint owner(s) allowed."""
         candidates = [(s["free_research"], s["total_active_jobs"], s["character_id"], s["character_name"])
                       for s in char_slots.values() if s["free_research"] > 0
                       and s["character_id"] in qualified
@@ -1034,8 +1034,8 @@ class CharacterAssigner:
     ) -> tuple[list[tuple[int, Any]], int]:
         """(the invent actions' (pilot, figures), the free lanes today): over
         the free qualifying lanes when there is more than one, else the single
-        best free pilot (A4). `max_lanes` (Task 14: one lane per T1 BPC)
-        keeps the best pilots' lanes only. `bpc_owners` (Task A item 1): the
+        best free pilot. `max_lanes` (one lane per T1 BPC)
+        keeps the best pilots' lanes only. `bpc_owners`: the
         owner of each BPC (None: corp); every BPC a pilot's own limits the
         lanes to their owners, and an owner keeps a lane per own BPC. No
         slot is taken here."""
@@ -1054,7 +1054,7 @@ class CharacterAssigner:
                 row, lanes=[(cid, char_slots[cid].get("skills_by_id")) for cid in lanes],
                 probability_floor=probability_floor, price_map=price_map,
             ), len(lanes)
-        # One lane or none: the single best free pilot (A4) with the SDE
+        # One lane or none: the single best free pilot with the SDE
         # invention skills, among the owners when every BPC is a pilot's own.
         # A pilot whose skills are not loaded never qualifies.
         char_id, _name = self._best_invention_char(char_slots, characters, row, only=only, qualified=qualified)
@@ -1073,7 +1073,7 @@ class CharacterAssigner:
         owner_need: list[int] | None = None,
     ) -> list[int]:
         """The `count` lanes of the pilots with the highest invention skill
-        factor for this item (ties: the lower id). `owner_need` (Task A):
+        factor for this item (ties: the lower id). `owner_need`:
         one pilot id per owner-bound BPC; those owners' lanes come first,
         one per own BPC, as only they can invent from them."""
         skills = orow.get_invention_skill_set(row)
@@ -1135,7 +1135,7 @@ class CharacterAssigner:
     ) -> tuple[list[tuple[int, str | None]], list[Any], list[int], list[int]]:
         """(pilots, the BPO each copies, owners with no free slot, owners
         without the copying skills): a pilot's own T1 BPO is copied by that
-        pilot only (Task A item 1), first; the corp BPOs then go to the
+        pilot only, first; the corp BPOs then go to the
         pilots with the copying skills (`qualified`) _reserve_copy_pilots
         steers to."""
         reserved: list[tuple[int, str | None]] = []
@@ -1165,8 +1165,8 @@ class CharacterAssigner:
         self, char_slots: dict[int, dict], row: dict[str, Any], count: int, qualified: frozenset[int],
     ) -> list[tuple[int, str | None]]:
         """Take up to `count` research slots for copy jobs on pilots with the
-        copying skills (`qualified`), steered away from the inventors (fix
-        round 3): pilots who cannot run this invention first (most free
+        copying skills (`qualified`), steered away from the inventors:
+        pilots who cannot run this invention first (most free
         slots first), then the inventors weakest first, so the best inventor
         copies only when nobody else can."""
         skills = orow.get_invention_skill_set(row)
@@ -1323,7 +1323,7 @@ class CharacterAssigner:
         invention: Any, decryptor: tuple[int, str] | None,
     ) -> AssignedAction:
         """One invent action: its pilot's chance, whole attempts (runs, read
-        by the shopping list; None buys nothing) and cost (A4), and the fee of
+        by the shopping list; None buys nothing) and cost, and the fee of
         the attempts it launches (Capital Reserved)."""
         return AssignedAction(
             type_id=type_id,
@@ -1364,14 +1364,14 @@ class CharacterAssigner:
         only: list[int] | None = None, *, qualified: frozenset[int] | None = None,
     ) -> tuple[int | None, str | None]:
         """The free pilot with the highest invention skill factor for this
-        item: the producer's invention_chance skills (D2, the same rule as the
+        item: the producer's invention_chance skills (the same rule as the
         chance it assumed). A row without them ranks by the generic
         SCIENCE_SKILLS sum (logged at INFO). Pilots excluded from industry
         have no slot (see _compute_available_slots). Ties break toward the
         fewest active jobs.
 
         Only a pilot who can run the invention (every required skill level,
-        _required_levels) is ranked (Task 15 fix round 1, I1): an unqualified
+        _required_levels) is ranked: an unqualified
         pilot's chance would size another pilot's attempts (an under-buy). A
         pilot whose skills are not loaded never qualifies, nor one outside
         `qualified` (the SDE invention skills, _SkillGate; None only for a
@@ -1390,7 +1390,7 @@ class CharacterAssigner:
             if slot.get("free_research", 0) <= 0:
                 continue
             if only is not None and slot["character_id"] not in only:
-                continue  # Task A: a pilot's own BPC is that pilot's job
+                continue  # a pilot's own BPC is that pilot's job
             loaded = slot.get("skills_by_id")
             if loaded is None or (qualified is not None and slot["character_id"] not in qualified):
                 continue
@@ -1445,7 +1445,7 @@ class _SkillGate:
         self, blueprint_type_id: int, activity: str, owners: list[int],
     ) -> tuple[frozenset[int], str | None]:
         """check(), and when the job is bound to its blueprint's owner(s)
-        (Task A) and none of them qualifies, what they lack."""
+        and none of them qualifies, what they lack."""
         qualified, blocked = self.check(blueprint_type_id, activity)
         if blocked is None and owners and not set(owners) & qualified:
             blocked = "; ".join(self.pilot_lacks(blueprint_type_id, activity, o, prefix="owner") for o in owners)
@@ -1488,7 +1488,7 @@ def sole_blueprint_owners(
     from (sorted), or None when a corp blueprint is free (any pilot may
     install it) or none is owned at all (the producer priced it without one:
     no owner binding). The same index and owner binding as ChainPlanner's
-    BlueprintLedger (Task A item 1: only its owner installs a pilot's
+    BlueprintLedger (only its owner installs a pilot's
     blueprint); a blueprint in an active job does not count."""
     if not blueprint_type_id:
         return None
@@ -1533,7 +1533,7 @@ def _mark_not_built(decision: ItemDecision, reason: str) -> None:
 
 _LANE_WORDING = re.compile(r"lane \d+ of \d+")
 
-#: Task A: release-and-re-plan passes after the top-level rows (bounded:
+#: Release-and-re-plan passes after the top-level rows (bounded:
 #: each pass only re-plans rows that had no action yet).
 MAX_REPLAN_PASSES = 3
 
@@ -1575,8 +1575,8 @@ def _unused_claims(
 
 
 def _pool_bpcs(released: dict[int, list[Any]], t1_blueprint_type_id: int, entries: list[Any]) -> None:
-    """Offer T1 BPCs to the lower rows of the source, each key once (Task A
-    fix round 2): a row that took pooled BPCs and invents nothing gives
+    """Offer T1 BPCs to the lower rows of the source, each key once:
+    a row that took pooled BPCs and invents nothing gives
     back the same BPCs, which must not become a second lane on one BPC."""
     pool = released.setdefault(t1_blueprint_type_id, [])
     pooled = {e[0] for e in pool}
@@ -1590,7 +1590,7 @@ _OWNER_NO_SLOT = re.compile(r"owner [^;]+? has no free slot")
 
 
 def _replan_cause(decision: ItemDecision, char_slots: dict[int, dict[str, Any]]) -> str:
-    """Why a re-planned row still got no action (fix round 1, I3), for its
+    """Why a re-planned row still got no action, for its
     reason once the re-plan is undone: the skill reason the assigner wrote
     when that was it (manufacture, copy, invention), else the slots."""
     skill_block = decision.overview_row.get(SKILL_BLOCK_KEY)
@@ -1610,7 +1610,7 @@ def _replan_cause(decision: ItemDecision, char_slots: dict[int, dict[str, Any]])
 
 def _owner_by_item(decision: ItemDecision) -> dict[int, int]:
     """{blueprint item_id: owning pilot} of the row's owner-bound claims
-    (ChainPlanner's blueprint_owner_by_item; Task A item 1)."""
+    (ChainPlanner's blueprint_owner_by_item)."""
     value = decision.overview_row.get("blueprint_owner_by_item")
     return {int(k): int(v) for k, v in value.items()} if isinstance(value, dict) else {}
 
@@ -1636,7 +1636,7 @@ def _pilot_names(characters: list[dict[str, Any]], ids: list[int]) -> str:
 
 
 def _component_buy_reasons(decision: ItemDecision, action: AssignedAction) -> None:
-    """M8: ChainPlanner's "component X bought: ..." reasons, added to the
+    """ChainPlanner's "component X bought: ..." reasons, added to the
     persisted reason and the action's note only for a component this
     manufacture actually buys (it is in the action's materials)."""
     reasons = decision.overview_row.get("component_buy_reasons")
@@ -1652,11 +1652,11 @@ def _component_buy_reasons(decision: ItemDecision, action: AssignedAction) -> No
 
 
 def _reword_unused_research_claims(decisions: list[ItemDecision], actions: list[AssignedAction], fell_back: set[int]) -> None:
-    """M10: a research claim whose research got no slot did not happen.
+    """A research claim whose research got no slot did not happen.
     When its row's fallback manufacture was emitted, reasons and notes that
     name the research claim (e.g. "used by TE research for Thing (12345)
     today") name that manufacture instead; when nothing was emitted (no
-    manufacturing slot either, fix round 2), they say the BPO was kept for
+    manufacturing slot either), they say the BPO was kept for
     a research that got no slot."""
     for decision in decisions:
         if int(decision.type_id) not in fell_back or decision.is_sub_component:
@@ -1665,7 +1665,7 @@ def _reword_unused_research_claims(decisions: list[ItemDecision], actions: list[
         if not isinstance(label, str) or not label:
             continue
         built = any(a.action_type == "manufacture" and int(a.type_id) == int(decision.type_id) for a in actions)
-        # Fix round 3: reworded per holder, so a reason naming several jobs
+        # Reworded per holder, so a reason naming several jobs
         # ("used by copy for X (1), TE research for Thing (2) today") too.
         if built:
             rewords = [(label, f"manufacture of {decision.type_name} ({decision.type_id})")]
@@ -1696,7 +1696,7 @@ def _count(n: int, one: str, many: str) -> str:
 
 
 def _no_manufacture_today(decision: ItemDecision, reason: str) -> None:
-    """Minor 2 (Task 14): a build row that gets no manufacture today says why
+    """A build row that gets no manufacture today says why
     in its persisted decision_reason, once, and not on top of a "not built:"."""
     current = decision.decision_reason or ""
     if "not built:" in current or "no manufacture today:" in current:
@@ -1706,12 +1706,12 @@ def _no_manufacture_today(decision: ItemDecision, reason: str) -> None:
 
 def _released_placeholder(type_id: int) -> str:
     """A unique marker in a releasing row's reason, replaced once every row
-    is assigned (Task 15 fix round 5)."""
+    is assigned."""
     return f"\x00released-bpcs-{int(type_id)}\x00"
 
 
 def _reword_released_bpcs(decisions: list[ItemDecision], bpc_pool: dict[str, Any]) -> None:
-    """Task 15 fix rounds 4-5: a row that invents nothing today released its
+    """A row that invents nothing today released its
     T1 BPCs. Its reason names the row that invents from each BPC ("go to
     <row>") or says it stays unused today. A row ChainPlanner marked not
     built because that row's invention held the BPCs is told that row does
@@ -1811,7 +1811,7 @@ MAX_JOB_SECONDS = 30 * 24 * 3600
 
 
 def max_copies_per_job(runs_per_copy: int, copy_seconds_per_run: int | None, max_runs_per_copy: int | None) -> int | None:
-    """The most copies one copy job may make (Task A item 5).
+    """The most copies one copy job may make.
 
     EVE's rule, verified as far as the sources go:
     - runs per copy: at most the "maximum production runs" of the
@@ -1911,9 +1911,9 @@ def _lanes_on_bpcs(
     results: list[tuple[int, Any]], bpcs: list[tuple[Any, int | None, int]],
     owner_by_item: dict[int, int] | None = None,
 ) -> list[tuple[int, Any, tuple[Any, int | None, int]]]:
-    """Today's invent lanes, each on its own T1 BPC (I2): one invention job
+    """Today's invent lanes, each on its own T1 BPC: one invention job
     per BPC, of at most its runs. Largest lane first, each takes the
-    smallest free BPC with enough runs (best fit, M7), else the largest
+    smallest free BPC with enough runs (best fit), else the largest
     left (and is capped at its runs); a lane of unknown size takes the
     largest. Lanes beyond the BPCs are dropped. Kept lanes are renumbered
     "lane k of n" when some were dropped."""
@@ -1928,7 +1928,7 @@ def _lanes_on_bpcs(
     for char_id, invention in ordered:
         if not left:
             break
-        # Task A item 1: a pilot's own BPC only for its owner, who uses
+        # A pilot's own BPC only for its owner, who uses
         # its own BPCs before the corp's.
         allowed = [e for e in left if _owner(e) in (None, char_id)]
         if not allowed:
@@ -1951,7 +1951,7 @@ def _lanes_on_bpcs(
 
 def _fewer_lanes_note(row: dict[str, Any], free_lanes: int) -> str | None:
     """Said on the invent actions when today has fewer free lanes than the
-    producer's Build time assumes (Task 12 fix round 2)."""
+    producer's Build time assumes."""
     costs = orow.get_invention_costs(row) or {}
     parallel = costs.get("elapsed_parallel")
     used = int(parallel.get("lanes_used") or 0) if isinstance(parallel, dict) and parallel.get("sequential_reason") is None else 0
@@ -2036,7 +2036,7 @@ def _research_seconds(
     """(seconds, basis note, structure/implants note) of the research job
     over `levels`.
 
-    The one convention for another pilot (Task 12 fix round 1): the
+    The one convention for another pilot: the
     producer's skill- and implant-free duration x the assigned pilot's
     research-skill multiplier x its own implant multiplier (none applied
     when the producer published none for it: longer, never understated).
@@ -2107,7 +2107,7 @@ def _te_research_note(row: dict[str, Any]) -> str:
 
 def _research_fee(row: dict[str, Any], activity: str, current_key: str, target_key: str) -> tuple[float | None, str | None]:
     """(fee, None), or (None, why), for the research job from the row's
-    current level to its target (A2), via the producer's cumulative fee
+    current level to its target, via the producer's cumulative fee
     table. ME is stored as the level (0..10). TE is stored as EVE's
     percentage (2 % per level, 0..20): the current level is the one held
     (te // 2), the target the lowest level that reaches the target

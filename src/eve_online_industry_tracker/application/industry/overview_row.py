@@ -85,7 +85,7 @@ def get_material_cost_total(row: dict[str, Any]) -> float | None:
 
 def get_profit_upper_bound_reason(row: dict[str, Any]) -> str | None:
     """"profit is an upper bound: job fees unknown for: ..." when the producer
-    left unpriced job fees out of the row's total_cost (Task 15 I1/I2: then
+    left unpriced job fees out of the row's total_cost (then
     profit, margin and ISK/h are upper bounds and total_cost a lower bound),
     else None. The one wording of the planner, the decision reason and the
     Portfolio warnings."""
@@ -237,9 +237,9 @@ def get_blueprint_type_id(row: dict[str, Any]) -> int | None:
 
 def get_invention_required_skill_levels(row: dict[str, Any]) -> dict[int, int] | None:
     """{skill type_id: required level} of the row's invention skills
-    (manufacturing_job.invention_chance.required_skill_levels, Task 12), or
-    None when the producer published none: a row from before Task 12 fix
-    round 1 (callers then require level 1 of every skill in the set)."""
+    (manufacturing_job.invention_chance.required_skill_levels), or
+    None when the producer published none: an older row
+    (callers then require level 1 of every skill in the set)."""
     chance = get_manufacturing_job(row).get("invention_chance")
     levels = chance.get("required_skill_levels") if isinstance(chance, dict) else None
     if not isinstance(levels, dict) or not levels:
@@ -259,7 +259,7 @@ def get_invention_skill_set(row: dict[str, Any]) -> tuple[tuple[int, int], int |
     when the row carries none or the skills could not be identified.
 
     The encryption id is None for a blueprint whose SDE entry lists no
-    encryption skill (amendment A3, `encryption_skill_type_id: None` with two
+    encryption skill (`encryption_skill_type_id: None` with two
     science ids): ranked by the science skills only."""
     chance = get_manufacturing_job(row).get("invention_chance")
     if not isinstance(chance, dict):
@@ -392,7 +392,7 @@ def get_research_fee(row: dict[str, Any], activity: str, from_level: int, to_lev
     """The install fee of researching the row's owned BPO from `from_level`
     to `to_level` (activity 'research_material' or 'research_time', levels
     0..10): the producer's cumulative fee to `to_level` minus that to
-    `from_level` (manufacturing_job.research_job_cost_by_level, A2). None
+    `from_level` (manufacturing_job.research_job_cost_by_level). None
     when the table is absent or unpriced, or the levels are out of range."""
     tables = get_manufacturing_job(row).get("research_job_cost_by_level")
     table = tables.get(activity) if isinstance(tables, dict) else None
@@ -412,7 +412,7 @@ def get_research_duration_seconds(
     (manufacturing_job.research_duration_seconds_by_level, with the
     producer character's research skills; `unskilled=True` reads the
     _unskilled table, without them; `base=True` the _base table, without
-    skills or implants: structure and rigs only, Task 12 fix round 1). None
+    skills or implants: structure and rigs only). None
     when the table is absent, or the levels are out of range."""
     key = "research_duration_seconds_by_level" + ("_base" if base else "_unskilled" if unskilled else "")
     tables = get_manufacturing_job(row).get(key)
@@ -445,7 +445,7 @@ def _published_reason(value: Any) -> str | None:
 def get_manufacturing_fee_unknown_reason(row: dict[str, Any]) -> str | None:
     """Why the producer could not price the manufacturing fee (a missing
     index, an unpriced material, an unknown facility tax), or None when it
-    published no reason: a row from before fix round 1, which a product
+    published no reason: an older row, which a product
     overview refresh fixes."""
     return _published_reason(get_manufacturing_job(row).get("manufacturing_job_cost_unknown_reason"))
 

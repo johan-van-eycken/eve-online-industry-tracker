@@ -18,8 +18,7 @@ from streamlit_ui.components.daily_planner.status_bar import (
 
 @dataclass(frozen=True)
 class ShoppingBudget:
-    """What the Shopping tab compares the wallet with (Task 14 minor 1, fix
-    round 1 M5): the pending material lines, the pending BPO purchases and
+    """What the Shopping tab compares the wallet with: the pending material lines, the pending BPO purchases and
     the pending jobs' install fees, the total Capital Reserved counts.
     unpriced_lines / unknown_fee_jobs are not in the sums, so with either
     the total is a lower bound."""
@@ -75,7 +74,7 @@ def shopping_budget(actions: list[dict[str, Any]]) -> ShoppingBudget:
 
 
 def section_subtotal(rows: list[dict[str, Any]]) -> float:
-    """A materials section's subtotal: its pending lines only (M5)."""
+    """A materials section's subtotal: its pending lines only."""
     return sum(r["Est. Total"] or 0.0 for r in rows if r.get("_status", "pending") == "pending")
 
 
@@ -117,7 +116,7 @@ def budget_metric(
     """(label, value, caption) of the budget metric: an exact Remaining or
     Deficit when every line is priced and every fee known; otherwise a
     deficit is a lower bound ("at least") and a remainder is unknown, both
-    captioned. Unpriced lines and unknown install fees are named apart (M5)."""
+    captioned. Unpriced lines and unknown install fees are named apart."""
     if corp_wallet is None:
         return "Remaining", _fmt_isk(None), None
     remaining = corp_wallet - total_isk
@@ -174,7 +173,7 @@ def _build_shopping_rows(
 
 def unpriced_total_caption(rows: list[dict[str, Any]]) -> str | None:
     """A caption for a total over `rows` when some lines have no price: they
-    are still bought, but the total cannot include them (Task 8 fix round 1)."""
+    are still bought, but the total cannot include them."""
     unpriced = sum(1 for r in rows if r.get("Est. Total") is None)
     if not unpriced:
         return None
@@ -234,7 +233,7 @@ def _build_clipboard_text(
             a for a in actions
             if str(a.get("action_type") or "") == "buy_materials"
             and str(a.get("shopping_category") or "") == cat
-            and _pending(a)  # done / skipped lines are not to be bought (M5)
+            and _pending(a)  # done / skipped lines are not to be bought
         ]
         if not cat_actions:
             continue
@@ -336,8 +335,8 @@ def render_tab_shopping(page_state: DailyPlannerPageState) -> None:
     current_rows = _build_shopping_rows(actions, "current_job")
     invention_rows = _build_shopping_rows(actions, "invention_input")
 
-    # Pending lines only, plus the pending jobs' install fees (Task 14 minor
-    # 1): the same total Capital Reserved counts for them.
+    # Pending lines only, plus the pending jobs' install fees:
+    # the same total Capital Reserved counts for them.
     budget = shopping_budget(actions)
     total_isk = budget.purchases
     all_rows = [r for r in (*current_rows, *invention_rows) if r["_status"] == "pending"]
@@ -421,7 +420,7 @@ def render_tab_shopping(page_state: DailyPlannerPageState) -> None:
         for row in bpo_rows:
             cumul_isk += row["Market Price"]
             row["Cumul. ISK Needed"] = cumul_isk
-            # After the materials and the install fees (M5), not materials alone.
+            # After the materials and the install fees, not materials alone.
             row["Fits Budget?"] = budget_fit(corp_wallet, budget.materials_and_fees, cumul_isk)
 
         bpo_display = pd.DataFrame([
