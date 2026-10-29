@@ -110,30 +110,6 @@ def test_an_unavailable_facility_is_logged_and_named_in_the_profile(app_session,
 
 # --- skills and slots ------------------------------------------------------------------------------
 
-def test_skill_qualification_logs_a_character_whose_skills_cannot_be_read(caplog):
-    svc = _service(char_manager=SimpleNamespace(get_characters=lambda: [{"character_id": 90000001}]))
-
-    def _raise(**kw):
-        raise ServiceError("Character ID 90000001 not found", status_code=400)
-
-    svc._get_character_trained_skill_levels = _raise
-    svc._sessions = SimpleNamespace(sde_session=lambda: SimpleNamespace(
-        query=lambda *a: SimpleNamespace(filter=lambda *a: SimpleNamespace(all=lambda: []))))
-    with caplog.at_level(logging.WARNING):
-        svc.get_blueprint_skill_qualification(blueprint_type_ids=[1])
-    assert "90000001" in caplog.text and "not found" in caplog.text
-
-
-def test_skill_qualification_propagates_a_programming_error():
-    svc = _service(char_manager=SimpleNamespace(get_characters=lambda: [{"character_id": 90000001}]))
-
-    def _raise(**kw):
-        raise KeyError("fake bug")
-
-    svc._get_character_trained_skill_levels = _raise
-    with pytest.raises(KeyError):
-        svc.get_blueprint_skill_qualification(blueprint_type_ids=[1])
-
 
 def test_slot_capacities_without_characters_are_empty():
     def _none():

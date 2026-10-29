@@ -11,7 +11,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from eve_online_industry_tracker.application.errors import ServiceError
 
 
 @pytest.fixture
@@ -26,49 +25,6 @@ def st_messages(monkeypatch):
 
 
 # --- flask_app: invalid request values give a 400 with the reason ----------------------------
-
-
-def test_portfolio_plan_request_rejects_a_non_numeric_capital_limit():
-    from flask_app.routes.industry import _portfolio_plan_request_from_payload
-
-    with pytest.raises(ServiceError) as excinfo:
-        _portfolio_plan_request_from_payload({"capital_limit_isk": "lots"})
-    assert excinfo.value.status_code == 400
-    assert "capital_limit_isk" in excinfo.value.message
-
-
-def test_portfolio_plan_request_keeps_defaults_for_absent_values():
-    from flask_app.routes.industry import _portfolio_plan_request_from_payload
-
-    req = _portfolio_plan_request_from_payload({"capital_limit_isk": 5e9, "manufacturing_slots_available": 3})
-    assert req.capital_limit_isk == 5e9
-    assert req.manufacturing_slots_available == 3
-    assert req.planning_horizon_hours == 24.0
-    assert req.research_slots_available == 0
-
-
-def test_candidate_directive_rejects_a_non_integer_override():
-    from flask_app.routes.industry import _candidate_directives_payload
-
-    with pytest.raises(ServiceError) as excinfo:
-        _candidate_directives_payload([{"overview_row_id": "r1", "max_batches_override": "many"}])
-    assert excinfo.value.status_code == 400
-    assert "max_batches_override" in excinfo.value.message
-    # Absent overrides stay None.
-    [directive] = _candidate_directives_payload([{"overview_row_id": "r1"}])
-    assert directive.max_batches_override is None
-
-
-def test_portfolio_candidates_route_returns_400_for_a_bad_planning_horizon(monkeypatch):
-    from flask_app.app import create_app
-    import flask_app.routes.industry as routes
-
-    monkeypatch.setattr(routes, "require_ready", lambda s: None)
-    monkeypatch.setattr(routes, "require_sde_ready", lambda s: None)
-    client = create_app().test_client()
-    resp = client.get("/industry_products/1/portfolio_candidates?planning_horizon_hours=soon")
-    assert resp.status_code == 400
-    assert "planning_horizon_hours" in resp.get_json()["message"]
 
 
 # --- flask_app: programming errors are no longer swallowed -----------------------------------
@@ -115,7 +71,7 @@ def test_market_orders_warns_when_director_corporations_fail(monkeypatch, st_mes
     assert any(kind == "warning" and "HTTP 503" in body for kind, body in st_messages)
 
 
-@pytest.mark.parametrize("fetch_name", ["fetch_blueprint_skill_qualification", "fetch_reorder_alerts", "fetch_type_track_record"])
+@pytest.mark.parametrize("fetch_name", ["fetch_reorder_alerts", "fetch_type_track_record"])
 def test_industry_builder_optional_fetches_raise_on_api_failure(monkeypatch, fetch_name):
     import streamlit_ui.api.client as client
     import streamlit_ui.api.industry_builder as api
@@ -125,39 +81,6 @@ def test_industry_builder_optional_fetches_raise_on_api_failure(monkeypatch, fet
     fn.clear()
     with pytest.raises(RuntimeError, match="backend down"):
         fn((34,))
-
-
-def test_portfolio_planner_warns_when_active_jobs_fail(monkeypatch, st_messages):
-    from streamlit_ui.pages import portfolio_planner as page
-
-    def boom():
-        raise RuntimeError("Failed to load active industry jobs")
-
-    monkeypatch.setattr(page, "fetch_active_industry_jobs", boom)
-    # The user ruled: the page stops with an error (tests/test_final_f3_ui.py).
-    assert page._fetch_jobs_data() is None
-    assert any(kind == "error" and "active industry jobs" in body.lower() for kind, body in st_messages)
-
-
-def test_portfolio_planner_optional_fetch_warns_with_the_reason(st_messages):
-    from streamlit_ui.pages import portfolio_planner as page
-
-    def boom(_ids):
-        raise RuntimeError("backend down")
-
-    assert page._fetch_optional(boom, (1,), what="skill qualification") == {}
-    assert any(kind == "warning" and "skill qualification" in body and "backend down" in body
-               for kind, body in st_messages)
-
-
-def test_portfolio_planner_optional_fetch_lets_programming_errors_through():
-    from streamlit_ui.pages import portfolio_planner as page
-
-    def broken(_ids):
-        raise TypeError("bug")
-
-    with pytest.raises(TypeError):
-        page._fetch_optional(broken, (1,), what="track record")
 
 
 def test_realized_profit_warns_when_wallet_owners_fail(monkeypatch, st_messages):

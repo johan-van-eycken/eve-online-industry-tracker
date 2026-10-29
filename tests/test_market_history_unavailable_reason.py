@@ -236,10 +236,3 @@ def test_the_pricing_confidence_names_an_unknown_region_volume_not_an_absent_one
     assert not any("absent" in r for r in reasons)
 
 
-def test_the_portfolio_candidate_keeps_an_unknown_region_volume_unknown():
-    from eve_online_industry_tracker.application.industry.service import IndustryService
-
-    candidate = IndustryService._build_portfolio_candidate(_unknown_volume_row(), planning_horizon_hours=24.0)
-    assert candidate["region_daily_volume"] is None
-    assert candidate["region_daily_volume_unavailable_reason"] == REASON
-    assert candidate["estimated_market_absorption_units"] == 0   # no volume known: nothing assumed sellable

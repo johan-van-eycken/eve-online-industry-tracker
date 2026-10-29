@@ -8,7 +8,6 @@ A local-first EVE Online helper app for industry and market analysis. Combines a
 - **Characters / Corporations** — wallet journal and transactions, assets and market orders per pilot; director-level access to the corp wallets, assets and industry jobs
 - **Industry Builder** — manufacturing cost calculator with invention (decryptors, copies), sub-build chains, FIFO inventory cost basis, job fees, and market prices, liquidity, trends and price-anomaly checks per product
 - **Industry Slots** — the pilots' manufacturing, research and reaction slots and their running jobs
-- **Portfolio Planner** — ranks what to build with the pilots' skills and owned blueprints
 - **Daily Planner** — a daily action plan: what to build, research, copy, invent, sell or deliver, assigned to the pilot with the skills and a free slot
 - **Realized Profit** — FIFO ledger of the sales per character and corporation: net revenue, fees and allocated cost
 - **Market Orders** — the open orders with pricing advice

@@ -1,4 +1,4 @@
-"""The overview and portfolio refresh jobs: an identical start while one is
+"""The overview refresh jobs: an identical start while one is
 active joins it instead of starting a second recompute, even when two starts
 race; finished jobs are pruned so a long session does not keep every result."""
 from __future__ import annotations
@@ -10,7 +10,7 @@ import pytest
 
 from eve_online_industry_tracker.application.industry import overview_jobs
 from eve_online_industry_tracker.application.industry.service import IndustryService
-from flask_app.state import IndustryOverviewRefreshJobState, IndustryPortfolioCandidatesJobState
+from flask_app.state import IndustryOverviewRefreshJobState
 
 _RealThread = threading.Thread  # the fixture replaces the service's Thread; the test's own threads stay real
 
@@ -31,7 +31,6 @@ def service(monkeypatch):
     svc = IndustryService(
         state=SimpleNamespace(jobs=SimpleNamespace(
             industry_overview_refresh=IndustryOverviewRefreshJobState(),
-            industry_portfolio_candidates=IndustryPortfolioCandidatesJobState(),
         )),
     )
     svc.started = started  # type: ignore[attr-defined]
@@ -40,7 +39,6 @@ def service(monkeypatch):
 
 @pytest.mark.parametrize("start, store_name", [
     ("start_industry_manufacturing_product_overview_refresh", "industry_overview_refresh"),
-    ("start_industry_manufacturing_portfolio_candidates_refresh", "industry_portfolio_candidates"),
 ])
 def test_racing_identical_starts_run_one_job(service, start, store_name):
     barrier = threading.Barrier(8)
@@ -75,16 +73,3 @@ def test_finished_jobs_are_pruned_to_the_newest_few(service):
     assert "running" in store.jobs and new_id in store.jobs  # active jobs are never pruned
 
 
-def test_the_runner_passes_the_normalized_params_through(service):
-    params = IndustryService._normalize_portfolio_candidates_params(include_reactions=True, planning_horizon_hours=6)
-    job, _ = service._claim_job(service._state.jobs.industry_portfolio_candidates, params, step_count=11)
-    seen: dict = {}
-
-    def payload(**kw):
-        seen.update(kw)
-        return {"candidates": [{"id": 1}]}
-
-    service.industry_manufacturing_portfolio_candidates_payload = payload
-    service._run_portfolio_candidates_refresh_job(job["job_id"], params)
-    assert {k: v for k, v in seen.items() if k != "progress_callback"} == params
-    assert service.industry_manufacturing_portfolio_candidates_refresh_status(job_id=job["job_id"])["status"] == "completed"

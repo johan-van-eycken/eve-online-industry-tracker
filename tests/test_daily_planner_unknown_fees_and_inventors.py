@@ -14,11 +14,6 @@ import test_industry_unknown_fees_and_inventors as r0
 from eve_online_industry_tracker.application.daily_planner import character_assigner as ca
 from eve_online_industry_tracker.application.daily_planner.item_decision_engine import ItemDecisionEngine
 from eve_online_industry_tracker.application.industry import overview_row as orow
-from eve_online_industry_tracker.application.industry.portfolio_service import (
-    PortfolioCandidateScope,
-    PortfolioPlanRequest,
-    IndustryPortfolioService,
-)
 from eve_online_industry_tracker.application.industry.service import IndustryService
 from planner_skill_fakes import NO_SKILL_REQUIREMENTS
 from fakes import _fresh_once_warnings  # noqa: F401  (autouse fixture)
@@ -118,14 +113,6 @@ def test_the_decision_reason_names_the_upper_bound():
     assert "upper bound" not in plain.decision_reason
 
 
-def test_portfolio_warnings_name_the_upper_bound():
-    from streamlit_ui.pages import portfolio_planner as page
-
-    row = {"manufacturing_job": {"job_fee_unknown_reasons": ["invention (x)"], "profit_is_upper_bound": True}}
-    assert _UPPER in page._warnings(row)
-    assert not any("upper bound" in w for w in page._warnings({"manufacturing_job": {}}))
-
-
 def test_the_inventory_priority_rank_says_it_ranks_an_upper_bound(monkeypatch):
     service = r0._service(monkeypatch)
     rows = [
@@ -196,35 +183,6 @@ def test_net_proceeds_unknown_is_a_confidence_reason(monkeypatch):
     row["manufacturing_job"]["net_proceeds_unknown_reason"] = IndustryService._BROKER_FEE_UNKNOWN_REASON
     service._enrich_product_rows_with_pricing_confidence([row], product_price_side="sell")
     assert f"Net proceeds unknown: {IndustryService._BROKER_FEE_UNKNOWN_REASON}." in row["pricing_confidence_reasons"]
-
-
-# --- Portfolio says when the confidence cap emptied it --------------------------------
-
-def _candidate(row_id, confidence, capped):
-    return {"overview_row_id": row_id, "type_id": 1, "type_name": "Fake", "pricing_confidence": confidence,
-            "profit_is_upper_bound": capped, "is_portfolio_candidate": True, "profit_amount": 10.0,
-            "profit_margin_fraction": 0.5, "isk_per_hour": 10.0, "region_daily_volume": 10}
-
-
-def test_portfolio_hint_when_a_high_filter_drops_capped_rows():
-    request = PortfolioPlanRequest(minimum_pricing_confidence="high", candidate_scope=PortfolioCandidateScope())
-    out = IndustryPortfolioService.optimize_manufacturing_portfolio(
-        candidates=[_candidate("a", "Medium", True), _candidate("b", "Medium", True), _candidate("c", "Low", False)],
-        plan_request=request,
-    )
-    assert out["selected_count"] == 0
-    assert out["confidence_capped_hint"] == "2 rows capped: job fees unknown"
-    reasons = {s["overview_row_id"]: s["reason"] for s in out["skipped_items"]}
-    assert reasons["a"] == "Below minimum pricing confidence (capped: job fees unknown)"
-    assert reasons["c"] == "Below minimum pricing confidence"
-
-
-def test_no_portfolio_hint_without_capped_rows():
-    request = PortfolioPlanRequest(minimum_pricing_confidence="high", candidate_scope=PortfolioCandidateScope())
-    out = IndustryPortfolioService.optimize_manufacturing_portfolio(
-        candidates=[_candidate("c", "Low", False)], plan_request=request,
-    )
-    assert out["confidence_capped_hint"] is None
 
 
 # --- The grid's Total Cost shows the lower bound -------------------------------------
@@ -339,8 +297,6 @@ def test_first_warning_is_thread_safe():
         t.join()
     assert hits.count(True) == 1
     assert isinstance(IndustryService._ONCE_WARNING_LOCK, type(threading.Lock()))
-
-
 
 
 def _actions_with_jobs(row, chars, jobs):

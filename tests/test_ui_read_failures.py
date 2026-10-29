@@ -433,7 +433,7 @@ def test_the_hidden_columns_include_the_product_row_flag():
 
 
 # =============================================================================================
-# 6. Portfolio and the overview filters: unknown is not unprofitable, not 0, and never hidden silently
+# 6. The overview filters: unknown is not unprofitable, not 0, and never hidden silently
 # =============================================================================================
 
 
@@ -442,49 +442,6 @@ def _candidate(type_id, *, profit=1_000_000.0, isk=2_000_000.0, roc=0.5, margin=
             "profit_amount": profit, "isk_per_hour": isk, "return_on_capital": roc,
             "profit_margin_fraction": margin, "region_daily_volume": volume,
             "liquidity_indicator": "High", "pricing_confidence": "High", "manufacturing_job": {}, **extra}
-
-
-def test_an_unknown_profit_is_disqualified_as_unknown_not_unprofitable():
-    from streamlit_ui.pages import portfolio_planner as page
-
-    eligible, disqualified = page._apply_hard_disqualifiers(
-        [_candidate(1, profit=None), _candidate(2, profit=-5.0), _candidate(3)])
-    assert [r["type_id"] for r in eligible] == [3]
-    assert [(r["type_id"], reason) for r, reason in disqualified] == [(1, "Profit unknown"), (2, "Unprofitable")]
-
-
-def test_scoring_ignores_unknown_values_in_the_normalisation():
-    from streamlit_ui.pages import portfolio_planner as page
-
-    ctx = page._compute_normalization_context([_candidate(1, isk=None), _candidate(2, isk=5.0), _candidate(3, isk=9.0)])
-    assert ctx["isk_min"] == 5.0 and ctx["isk_max"] == 9.0
-
-
-def test_a_row_with_an_unknown_score_input_is_unknown_and_ranked_last():
-    from streamlit_ui.pages import portfolio_planner as page
-
-    rows = [_candidate(1, isk=None), _candidate(2, isk=1_000_000.0), _candidate(3, isk=3_000_000.0)]
-    ranked = page._rank_candidates(rows, objective="Balanced")
-    assert [r["type_id"] for r, _ in ranked] == [3, 2, 1]
-    assert ranked[-1][1] is None and all(isinstance(score, float) for _r, score in ranked[:2])
-    by_isk = page._rank_candidates(rows, objective="Max ISK/hr")
-    assert [r["type_id"] for r, _ in by_isk] == [3, 2, 1] and by_isk[-1][1] is None
-    assert page._apply_track_record_multiplier(None, rows[0], {"1": {"status": "proven"}}) is None
-    assert any("ISK/hour unknown" in w for w in page._warnings(rows[0]))
-
-
-def test_the_recommendations_table_does_not_show_an_unknown_as_zero(monkeypatch):
-    import streamlit as st
-    from streamlit_ui.pages import portfolio_planner as page
-
-    frames = []
-    monkeypatch.setattr(st, "dataframe", lambda df, *a, **k: frames.append(df))
-    monkeypatch.setattr(st, "expander", lambda *a, **k: _NullContext())
-    monkeypatch.setattr(st, "columns", lambda spec, *a, **k: [_NullContext() for _ in range(spec if isinstance(spec, int) else len(spec))])
-    page._render_recommendations_table([(_candidate(1, isk=None, roc=None), None)])
-    row = frames[0].iloc[0]
-    assert row["ISK/Hr (M)"] is None or row["ISK/Hr (M)"] != row["ISK/Hr (M)"]  # None or NaN, not 0
-    assert row["ROC %"] is None or row["ROC %"] != row["ROC %"]
 
 
 class _NullContext:
@@ -578,11 +535,10 @@ def test_the_sell_stats_box_renders_the_unknown_counts(monkeypatch):
     assert by_label["Est. Profit (Advised)"] == "unknown (2)"
 
 
-def test_the_builder_and_portfolio_pages_show_every_hidden_note():
-    from streamlit_ui.pages import industry_builder, portfolio_planner
+def test_the_builder_page_shows_every_hidden_note():
+    from streamlit_ui.pages import industry_builder
 
-    for page in (industry_builder, portfolio_planner):
-        assert "unknown_value_hidden_notes(" in inspect.getsource(page)
+    assert "unknown_value_hidden_notes(" in inspect.getsource(industry_builder)
 
 
 # =============================================================================================
@@ -696,7 +652,6 @@ def test_the_table_has_the_cost_columns_only_when_the_payload_has_them():
 
 
 @pytest.mark.parametrize("path", [
-    "/industry/blueprint_skill_qualification?blueprint_type_ids=1,x",
     "/industry/reorder_alerts?type_ids=34,,abc",
     "/industry/track_record?type_ids=1.5",
 ])
@@ -732,7 +687,7 @@ def test_a_non_positive_or_malformed_industry_profile_id_query_is_a_400(industry
     assert "industry_profile_id" in resp.get_json()["message"]
 
 
-@pytest.mark.parametrize("path", ["/industry_products/1/refresh", "/industry_products/1/portfolio_candidates/start"])
+@pytest.mark.parametrize("path", ["/industry_products/1/refresh"])
 @pytest.mark.parametrize("value", [0, -1, True, "x", 2.5])
 def test_a_non_positive_or_malformed_industry_profile_id_payload_is_a_400(industry_client, path, value):
     resp = industry_client.post(path, json={"industry_profile_id": value})
@@ -764,8 +719,7 @@ def test_the_ui_sends_no_industry_profile_id_for_none_selected(monkeypatch):
                   material_price_side="sell", product_price_side="sell", owned_blueprints_scope="all_characters",
                   character_id=1)
     api.start_product_overview_refresh(industry_profile_id=0, **common)
-    api.start_portfolio_candidates_refresh(industry_profile_id=0, planning_horizon_hours=24.0, **common)
-    assert [payload["industry_profile_id"] for payload in sent] == [None, None]
+    assert [payload["industry_profile_id"] for payload in sent] == [None]
 
 
 # =============================================================================================

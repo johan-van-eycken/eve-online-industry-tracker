@@ -351,7 +351,7 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
                 "default": 100,
                 "min": 1,
                 "max": 10000,
-                "label": "Portfolio liquidity threshold (units)",
+                "label": "Healthy liquidity threshold (units)",
                 "help": "Minimum hub volume (units) for a product to score 'healthy liquidity'.",
             },
             "portfolio_order_count_threshold": {
@@ -359,7 +359,7 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
                 "default": 5,
                 "min": 1,
                 "max": 100,
-                "label": "Portfolio order count threshold",
+                "label": "Healthy liquidity order count threshold",
                 "help": "Minimum number of hub orders for a product to score 'healthy liquidity'.",
             },
             "industry_hangar_flag": {

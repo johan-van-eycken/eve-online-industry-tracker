@@ -567,17 +567,3 @@ def test_the_pricing_confidence_names_unknown_liquidity():
     assert not any("No sell-side hub liquidity" in r for r in reasons)
 
 
-def test_the_portfolio_candidate_keeps_unknown_liquidity_unknown():
-    from eve_online_industry_tracker.application.industry.service import IndustryService
-
-    candidate = IndustryService._build_portfolio_candidate({
-        "type_id": 35, "type_name": "Unknown Liquidity", "market_unit_price": 1_500_000.0,
-        "market_price_sample_size": 5, "market_price_fetched_at": 4102444800.0,
-        "hub_sell_liquidity": None, "hub_buy_liquidity": None, "hub_sell_order_count": None,
-        "liquidity_unavailable_reason": REASON,
-        "region_daily_volume": 100, "region_daily_volume_7d_avg": 100.0, "manufacturing_job": {"runs": 1},
-    }, planning_horizon_hours=24.0)
-    assert candidate["hub_sell_liquidity"] is None
-    assert candidate["liquidity_unavailable_reason"] == REASON
-    assert candidate["days_of_supply"] is None
-    assert candidate["liquidity_score"] is None

@@ -5,12 +5,6 @@ import math
 from flask import Blueprint, request
 
 from eve_online_industry_tracker.application.errors import ServiceError
-from eve_online_industry_tracker.application.industry.portfolio_service import (
-    IndustryPortfolioService,
-    PortfolioCandidateDirective,
-    PortfolioCandidateScope,
-    PortfolioPlanRequest,
-)
 from eve_online_industry_tracker.application.industry.service import IndustryService
 from flask_app.bootstrap import require_ready, require_sde_ready
 from flask_app.deps import get_state
@@ -61,18 +55,6 @@ def _number_param(params, key: str, default, cast):
         raise ServiceError(f"Invalid {key}: must be {kind}, got {raw!r}.", status_code=400) from None
 
 
-def _planning_horizon_param(params) -> float:
-    """planning_horizon_hours: 24 when absent; an explicit value must be > 0
-    (0 hours would plan nothing, and used to become 24 silently)."""
-    hours = _number_param(params, "planning_horizon_hours", 24.0, float)
-    if hours <= 0:
-        raise ServiceError(
-            f"Invalid planning_horizon_hours: must be greater than 0, got {params.get('planning_horizon_hours')!r}.",
-            status_code=400,
-        )
-    return hours
-
-
 def _industry_profile_id_param(params) -> int | None:
     """industry_profile_id: None when absent or blank; otherwise a positive
     integer. A malformed, fractional, boolean, 0 or negative id is a 400
@@ -98,7 +80,7 @@ def _flag(params, key: str, default: bool) -> bool:
 
 
 def _overview_params(params, character_id: int) -> dict[str, object]:
-    """The request values the overview and portfolio routes share, GET or POST."""
+    """The request values of the overview routes, GET or POST."""
     return {
         "maximize_bp_runs": _flag(params, "maximize_bp_runs", False),
         "group_identical_bpcs": _flag(params, "group_identical_bpcs", True),
@@ -128,87 +110,6 @@ def _type_ids_param(key: str) -> list[int]:
             raise ServiceError(f"Invalid {key}: must be comma-separated type ids, got {raw!r}.", status_code=400)
         ids.append(int(part))
     return ids
-
-
-def _string_list_payload(value: object) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    normalized: list[str] = []
-    for item in value:
-        item_value = str(item or "").strip()
-        if item_value:
-            normalized.append(item_value)
-    return normalized
-
-
-def _candidate_directives_payload(value: object) -> list[PortfolioCandidateDirective]:
-    if not isinstance(value, list):
-        return []
-    directives: list[PortfolioCandidateDirective] = []
-    for entry in value:
-        if not isinstance(entry, dict):
-            continue
-        overview_row_id = str(entry.get("overview_row_id") or "").strip()
-        if not overview_row_id:
-            continue
-
-        def _optional_int(raw_value: object, field_name: str) -> int | None:
-            try:
-                parsed = _strict_number(raw_value, int) if raw_value is not None else None
-            except ValueError:
-                raise ServiceError(
-                    f"Invalid {field_name} for candidate {overview_row_id}: must be an integer, got {raw_value!r}.",
-                    status_code=400,
-                ) from None
-            return parsed if parsed is not None and parsed > 0 else None
-
-        directives.append(
-            PortfolioCandidateDirective(
-                overview_row_id=overview_row_id,
-                force_include=bool(entry.get("force_include", False)),
-                exclude=bool(entry.get("exclude", False)),
-                lock_required=bool(entry.get("lock_required", False)),
-                max_batches_override=_optional_int(entry.get("max_batches_override"), "max_batches_override"),
-                target_batches_override=_optional_int(entry.get("target_batches_override"), "target_batches_override"),
-                target_units_override=_optional_int(entry.get("target_units_override"), "target_units_override"),
-            )
-        )
-    return directives
-
-
-def _portfolio_plan_request_from_payload(payload: dict[str, object]) -> PortfolioPlanRequest:
-    planning_horizon_hours = _planning_horizon_param(payload)
-    capital_limit_isk = _number_param(payload, "capital_limit_isk", 0.0, float)
-    manufacturing_slots_available = _number_param(payload, "manufacturing_slots_available", 0, int)
-    research_slots_available = _number_param(payload, "research_slots_available", 0, int)
-    reaction_slots_available = _number_param(payload, "reaction_slots_available", 0, int)
-    min_margin_pct = _number_param(payload, "min_margin_pct", 0.0, float)
-    min_isk_per_hour = _number_param(payload, "min_isk_per_hour", 0.0, float)
-    min_region_daily_volume = _number_param(payload, "min_region_daily_volume", 0, int)
-    min_owned_input_coverage_pct = _number_param(payload, "min_owned_input_coverage_pct", 0.0, float)
-
-    return PortfolioPlanRequest(
-        candidate_snapshot_id=str(payload.get("candidate_snapshot_id") or "").strip(),
-        capital_limit_isk=capital_limit_isk,
-        manufacturing_slots_available=manufacturing_slots_available,
-        research_slots_available=research_slots_available,
-        reaction_slots_available=reaction_slots_available,
-        planning_horizon_hours=planning_horizon_hours,
-        objective=str(payload.get("objective") or "balanced"),
-        minimum_pricing_confidence=str(payload.get("minimum_pricing_confidence") or "low"),
-        candidate_directives=_candidate_directives_payload(payload.get("candidate_directives")),
-        candidate_scope=PortfolioCandidateScope(
-            categories=_string_list_payload(payload.get("candidate_categories")),
-            meta_groups=_string_list_payload(payload.get("candidate_meta_groups")),
-            pricing_confidences=_string_list_payload(payload.get("candidate_pricing_confidences")),
-            blueprint_sources=_string_list_payload(payload.get("candidate_blueprint_sources")),
-            positive_profit_only=bool(payload.get("positive_profit_only", False)),
-            min_margin_pct=min_margin_pct,
-            min_isk_per_hour=min_isk_per_hour,
-            min_region_daily_volume=min_region_daily_volume,
-            min_owned_input_coverage_pct=min_owned_input_coverage_pct,
-        ),
-    )
 
 
 @industry_bp.get("/structure_type_bonuses/<int:type_id>")
@@ -299,146 +200,8 @@ def industry_products_refresh_status(job_id: str):
     return ok(data=svc.industry_manufacturing_product_overview_refresh_status(job_id=job_id))
 
 
-@industry_bp.post("/industry_products/<int:character_id>/portfolio_candidates/start")
-def industry_portfolio_candidates_start(character_id: int):
-    require_ready(get_state())
-    require_sde_ready(get_state())
-    payload = request.get_json(silent=True) or {}
-    params = _overview_params(payload, character_id)
-    planning_horizon_hours = _planning_horizon_param(payload)
-    svc = IndustryService(state=get_state())
-    refresh_job = svc.start_industry_manufacturing_portfolio_candidates_refresh(
-        **params,
-        planning_horizon_hours=planning_horizon_hours,
-        have_skills_only=_flag(payload, "have_skills_only", True),
-    )
-    return ok(data=refresh_job, status_code=202)
-
-
-@industry_bp.get("/industry_products/portfolio_candidates/<job_id>")
-def industry_portfolio_candidates_status(job_id: str):
-    require_ready(get_state())
-    if not job_id or not job_id.strip():
-        return error(message="job_id is required.", status_code=400)
-    svc = IndustryService(state=get_state())
-    return ok(data=svc.industry_manufacturing_portfolio_candidates_refresh_status(job_id=job_id))
-
-
-@industry_bp.get("/industry_products/<int:character_id>/portfolio_candidates")
-def industry_portfolio_candidates(character_id: int):
-    require_ready(get_state())
-    require_sde_ready(get_state())
-    params = _overview_params(request.args, character_id)
-    planning_horizon_hours = _planning_horizon_param(request.args)
-    svc = IndustryService(state=get_state())
-    payload = svc.industry_manufacturing_portfolio_candidates_payload(
-        **params,
-        planning_horizon_hours=planning_horizon_hours,
-    )
-    return ok(
-        data=payload.get("candidates") or [],
-        meta={
-            "summary": payload.get("summary") or {},
-            "pricing_batch": payload.get("pricing_batch") or {},
-        },
-    )
-
-
 _VALID_OBJECTIVES = {"balanced", "max_isk_per_hour"}
 _VALID_PRICING_CONFIDENCES = {"low", "medium", "high"}
-
-
-@industry_bp.post("/industry_products/<int:character_id>/portfolio_plan")
-def industry_portfolio_plan(character_id: int):
-    require_ready(get_state())
-    require_sde_ready(get_state())
-    payload = request.get_json(silent=True) or {}
-
-    raw_objective = str(payload.get("objective") or "").strip().lower()
-    if raw_objective and raw_objective not in _VALID_OBJECTIVES:
-        return error(
-            message=f"Invalid objective '{raw_objective}'. Must be one of: {sorted(_VALID_OBJECTIVES)}.",
-            status_code=400,
-        )
-    raw_confidence = str(payload.get("minimum_pricing_confidence") or "").strip().lower()
-    if raw_confidence and raw_confidence not in _VALID_PRICING_CONFIDENCES:
-        return error(
-            message=f"Invalid minimum_pricing_confidence '{raw_confidence}'. Must be one of: {sorted(_VALID_PRICING_CONFIDENCES)}.",
-            status_code=400,
-        )
-
-    plan_request = _portfolio_plan_request_from_payload(payload)
-
-    svc = IndustryService(state=get_state())
-    if plan_request.candidate_snapshot_id:
-        candidate_snapshot = svc.industry_manufacturing_portfolio_candidate_snapshot(
-            snapshot_id=plan_request.candidate_snapshot_id,
-            character_id=int(character_id),
-        )
-    else:
-        maximize_bp_runs = bool(payload.get("maximize_bp_runs", False))
-        group_identical_bpcs = bool(payload.get("group_identical_bpcs", True))
-        build_from_bpc = bool(payload.get("build_from_bpc", True))
-        have_blueprint_source_only = bool(payload.get("have_blueprint_source_only", True))
-        include_reactions = bool(payload.get("include_reactions", False))
-        market_hub = str(payload.get("market_hub") or "jita").strip().lower() or "jita"
-        material_price_side = str(payload.get("material_price_side") or "sell").strip().lower() or "sell"
-        product_price_side = str(payload.get("product_price_side") or "sell").strip().lower() or "sell"
-        owned_blueprints_scope = str(payload.get("owned_blueprints_scope") or "all_characters").strip() or "all_characters"
-        industry_profile_id = _industry_profile_id_param(payload)
-
-        candidate_payload = svc.industry_manufacturing_portfolio_candidates_payload(
-            maximize_bp_runs=maximize_bp_runs,
-            group_identical_bpcs=group_identical_bpcs,
-            build_from_bpc=build_from_bpc,
-            have_blueprint_source_only=have_blueprint_source_only,
-            include_reactions=include_reactions,
-            market_hub=market_hub,
-            material_price_side=material_price_side,
-            product_price_side=product_price_side,
-            industry_profile_id=industry_profile_id,
-            owned_blueprints_scope=owned_blueprints_scope,
-            character_id=int(character_id),
-            planning_horizon_hours=float(plan_request.planning_horizon_hours),
-        )
-        candidate_snapshot = {
-            "snapshot_id": "",
-            "created_at": None,
-            "updated_at": None,
-            "request_params": {
-                "maximize_bp_runs": maximize_bp_runs,
-                "group_identical_bpcs": group_identical_bpcs,
-                "build_from_bpc": build_from_bpc,
-                "have_blueprint_source_only": have_blueprint_source_only,
-                "include_reactions": include_reactions,
-                "market_hub": market_hub,
-                "material_price_side": material_price_side,
-                "product_price_side": product_price_side,
-                "industry_profile_id": industry_profile_id,
-                "owned_blueprints_scope": owned_blueprints_scope,
-                "character_id": int(character_id),
-            },
-            "candidates": list(candidate_payload.get("candidates") or []),
-            "summary": candidate_payload.get("summary") or {},
-            "pricing_batch": candidate_payload.get("pricing_batch") or {},
-        }
-
-    planner = IndustryPortfolioService()
-    plan = planner.optimize_manufacturing_portfolio(
-        candidates=list(candidate_snapshot.get("candidates") or []),
-        plan_request=plan_request,
-    )
-    return ok(
-        data={
-            **plan,
-            "summary": candidate_snapshot.get("summary") or {},
-            "pricing_batch": candidate_snapshot.get("pricing_batch") or {},
-            "candidate_snapshot_id": candidate_snapshot.get("snapshot_id") or plan_request.candidate_snapshot_id,
-            "candidate_snapshot_created_at": candidate_snapshot.get("created_at"),
-            "candidate_snapshot_updated_at": candidate_snapshot.get("updated_at"),
-            "candidate_snapshot_request_params": candidate_snapshot.get("request_params") or {},
-        }
-    )
 
 
 @industry_bp.get("/industry_job_manager/status")
@@ -521,18 +284,6 @@ def industry_active_jobs():
     character_id = optional_id_param("character_id")
     svc = IndustryService(state=get_state())
     return ok(data=svc.industry_active_jobs(character_id=character_id))
-
-
-@industry_bp.get("/industry/blueprint_skill_qualification")
-def industry_blueprint_skill_qualification():
-    require_ready(get_state())
-    type_ids = _type_ids_param("blueprint_type_ids")
-    if not type_ids:
-        return ok(data={})
-    svc = IndustryService(state=get_state())
-    result = svc.get_blueprint_skill_qualification(blueprint_type_ids=type_ids)
-    # JSON keys must be strings
-    return ok(data={str(k): {str(cid): v for cid, v in char_map.items()} for k, char_map in result.items()})
 
 
 @industry_bp.get("/industry/reorder_alerts")

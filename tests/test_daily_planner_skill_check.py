@@ -503,3 +503,19 @@ def test_an_owner_bound_bpc_whose_owner_lacks_the_invention_skills():
     assert _invents(decision, [_inventor(5, "Owner", hep=1), _inventor(6, "Able", hep=3)]) == []
     assert ("no invention today: owner Owner lacks the skills: High Energy Physics 3 (at 1)"
             in decision.decision_reason)
+
+
+def test_a_build_the_profiles_facility_cannot_host_is_not_built():
+    """The overview's facility gate (a capital hull without its shipyard) skips
+    the build before the skills are checked, with the gate's reason."""
+    skilled = _pilot(3, "Skilled", _skill("Energy Weapon Rigging", 4, EWR))
+    row = _row(ALGID, ALGID_BP)
+    row["facility_gate_reason"] = "needs Standup Capital Shipyard I: not fitted"
+    blocked = _decision(type_id=ALGID, decision_reason="Build", overview_row=row)
+    hostable = _decision(type_id=ALGID + 1, decision_reason="Build", overview_row=_row(ALGID + 1, ALGID_BP))
+
+    _service([skilled])._phase_4_skill_gate([blocked, hostable], _phase1())
+
+    assert (blocked.decision, blocked.pipeline_stage, blocked.decision_reason) == (
+        "skip", "blocked", "Build; not built: needs Standup Capital Shipyard I: not fitted")
+    assert hostable.decision == "build"

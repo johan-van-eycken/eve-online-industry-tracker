@@ -62,7 +62,6 @@ from eve_online_industry_tracker.application.industry.overview_jobs import Overv
 from eve_online_industry_tracker.application.industry.facilities import FacilitiesMixin
 from eve_online_industry_tracker.application.industry.pilot_modifiers import PilotModifiersMixin
 from eve_online_industry_tracker.application.industry.market_enrichment import MarketEnrichmentMixin
-from eve_online_industry_tracker.application.industry.portfolio_candidates import PortfolioCandidatesMixin
 from eve_online_industry_tracker.application.industry.owned_assets import OwnedAssetsMixin
 from eve_online_industry_tracker.application.industry.invention_planning import InventionPlanningMixin
 
@@ -233,7 +232,6 @@ class IndustryService(
     FacilitiesMixin,
     PilotModifiersMixin,
     MarketEnrichmentMixin,
-    PortfolioCandidatesMixin,
     OwnedAssetsMixin,
     InventionPlanningMixin,
 ):
@@ -4148,7 +4146,7 @@ class IndustryService(
             # not own. A label only; no cost number changes.
             row_out["manufacturing_job"]["assumes_owned_t2_bpo"] = True
         if invention_procurement_materials:
-            # Read by the Portfolio / Industry Builder shopping list
+            # Read by the shopping list
             # (industry/shopping_list.py). Not priced by the pricing step and not
             # read by the daily planner, which buys datacores via invent actions.
             row_out["manufacturing_job"]["invention_procurement_materials"] = self._overview_keyed_entries(
@@ -4384,6 +4382,7 @@ class IndustryService(
 
         # Filter and enrich (inventory allocation is separate from planning)
         product_rows = [row for row in product_rows if isinstance(row, dict) and not self._exclude_from_product_overview(row)]
+        self._stamp_facility_gate(product_rows, ctx.selected_industry_profile)
 
         if progress_callback is not None:
             progress_callback(0.82, "Built manufacturing product rows", {"stage": "rows_done", "rows": len(product_rows)})

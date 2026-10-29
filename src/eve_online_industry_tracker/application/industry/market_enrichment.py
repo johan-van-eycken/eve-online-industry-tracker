@@ -1064,6 +1064,92 @@ class MarketEnrichmentMixin:
 
         return product_rows
 
+    def _score_inventory_allocation_priority(self, product_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Score inventory allocation priority based on ISK/hr ranking (#3).
+
+        Products that consume owned inventory are ranked by profitability.
+        Products using owned materials but with lower ISK/hr than other products
+        that need the same materials get flagged with an inventory_priority_rank.
+        """
+        if not product_rows:
+            return product_rows
+
+        material_consumers: dict[int, list[tuple[int, float]]] = {}
+        for row_index, row in enumerate(product_rows):
+            if not isinstance(row, dict):
+                continue
+            isk_per_hour = self._as_float(row.get("isk_per_hour")) or 0.0
+            manufacturing_job = row.get("manufacturing_job") or {}
+            if not isinstance(manufacturing_job, dict):
+                continue
+            procurement_materials = manufacturing_job.get("procurement_materials") or manufacturing_job.get("materials") or {}
+            if not isinstance(procurement_materials, dict):
+                continue
+            for material in procurement_materials.values():
+                if not isinstance(material, dict):
+                    continue
+                if str(material.get("sourcing_strategy") or "").lower() == "take":
+                    type_id = int(material.get("type_id") or 0)
+                    if type_id > 0:
+                        material_consumers.setdefault(type_id, []).append((row_index, isk_per_hour))
+
+        contended_materials: set[int] = set()
+        for type_id, consumers in material_consumers.items():
+            if len(consumers) > 1:
+                contended_materials.add(type_id)
+
+        if not contended_materials:
+            for row in product_rows:
+                if isinstance(row, dict):
+                    row.setdefault("inventory_allocation_optimal", True)
+                    manufacturing_job = row.get("manufacturing_job")
+                    if isinstance(manufacturing_job, dict):
+                        manufacturing_job.setdefault("inventory_allocation_optimal", True)
+            return product_rows
+
+        ranked_rows = sorted(
+            enumerate(product_rows),
+            key=lambda item: -(self._as_float(item[1].get("isk_per_hour")) or 0.0),
+        )
+        rank_by_row_index: dict[int, int] = {row_index: rank + 1 for rank, (row_index, _) in enumerate(ranked_rows)}
+
+        for row_index, row in enumerate(product_rows):
+            if not isinstance(row, dict):
+                continue
+            manufacturing_job = row.get("manufacturing_job") or {}
+            if not isinstance(manufacturing_job, dict):
+                continue
+            procurement_materials = manufacturing_job.get("procurement_materials") or manufacturing_job.get("materials") or {}
+            if not isinstance(procurement_materials, dict):
+                continue
+
+            uses_contended = False
+            for material in procurement_materials.values():
+                if not isinstance(material, dict):
+                    continue
+                if str(material.get("sourcing_strategy") or "").lower() == "take":
+                    type_id = int(material.get("type_id") or 0)
+                    if type_id in contended_materials:
+                        consumers = material_consumers[type_id]
+                        best_isk_per_hour = max(c[1] for c in consumers)
+                        current_isk_per_hour = self._as_float(row.get("isk_per_hour")) or 0.0
+                        if current_isk_per_hour < best_isk_per_hour:
+                            uses_contended = True
+                            break
+
+            is_optimal = not uses_contended
+            row["inventory_allocation_optimal"] = is_optimal
+            row["inventory_priority_rank"] = rank_by_row_index.get(row_index)
+            # The rank orders ISK/h, an upper bound
+            # on a row whose job fees are partly unknown; flagged, not changed.
+            uses_upper_bound = bool(row.get("profit_is_upper_bound"))
+            row["inventory_priority_uses_upper_bound"] = uses_upper_bound
+            manufacturing_job["inventory_priority_uses_upper_bound"] = uses_upper_bound
+            manufacturing_job["inventory_allocation_optimal"] = is_optimal
+            manufacturing_job["inventory_priority_rank"] = rank_by_row_index.get(row_index)
+
+        return product_rows
+
     def _enrich_product_rows_with_manufacturing_signals(
         self,
         product_rows: list[dict[str, Any]],

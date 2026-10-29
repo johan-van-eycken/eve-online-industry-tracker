@@ -70,12 +70,6 @@ class IndustryOverviewRefreshJobState:
 
 
 @dataclass
-class IndustryPortfolioCandidatesJobState:
-    lock: threading.Lock = field(default_factory=threading.Lock)
-    jobs: dict[str, dict[str, Any]] = field(default_factory=dict)
-
-
-@dataclass
 class DailyPlannerJobState:
     status: str = "idle"        # "idle" | "running" | "done" | "failed"
     error: str | None = None
@@ -95,7 +89,6 @@ class MarketIntelligenceJobState:
 class JobsState:
     public_structures: PublicStructuresJobState = field(default_factory=PublicStructuresJobState)
     industry_overview_refresh: IndustryOverviewRefreshJobState = field(default_factory=IndustryOverviewRefreshJobState)
-    industry_portfolio_candidates: IndustryPortfolioCandidatesJobState = field(default_factory=IndustryPortfolioCandidatesJobState)
     daily_planner: DailyPlannerJobState = field(default_factory=DailyPlannerJobState)
     market_intelligence: MarketIntelligenceJobState = field(default_factory=MarketIntelligenceJobState)
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import pytest
-from streamlit_ui.shopping_list import aggregate_shopping_list, aggregate_shopping_list_with_stale
+from eve_online_industry_tracker.application.industry.shopping_list import aggregate_shopping_list, aggregate_shopping_list_with_stale
 from eve_online_industry_tracker.application.industry.shopping_list import (
     OLDER_OVERVIEW_REASON,
     rows_built_by_an_older_version,
@@ -325,8 +325,6 @@ def test_overview_without_an_extra_batch_list_scales_batch_one() -> None:
     assert _line(aggregate_shopping_list([row]), 204) == (20, 17)
 
 
-
-
 def test_unit_price_is_the_first_known_price_not_the_first_line_seen() -> None:
     unpriced = {**_owned_line(4, 0), "unit_price": None}
     priced = {**_owned_line(4, 0), "unit_price": 7.5}
@@ -340,7 +338,7 @@ def test_unit_price_stays_none_when_no_line_has_one() -> None:
 
 
 def test_with_stale_returns_the_stale_type_ids_and_the_same_items() -> None:
-    from streamlit_ui.shopping_list import aggregate_shopping_list_with_stale
+    from eve_online_industry_tracker.application.industry.shopping_list import aggregate_shopping_list_with_stale
 
     rows = [_make_row(1001, "Item A", 2, {"34": _stale_take_line()})]
     items, stale = aggregate_shopping_list_with_stale(rows)
@@ -349,45 +347,10 @@ def test_with_stale_returns_the_stale_type_ids_and_the_same_items() -> None:
 
 
 def test_with_stale_is_empty_for_lines_with_a_split() -> None:
-    from streamlit_ui.shopping_list import aggregate_shopping_list_with_stale
+    from eve_online_industry_tracker.application.industry.shopping_list import aggregate_shopping_list_with_stale
 
     _, stale = aggregate_shopping_list_with_stale([_make_row(1001, "Item A", 2, {"34": _owned_line(4, 3)})])
     assert stale == {}
-
-
-def _render_tab_captions(monkeypatch, rows: list[dict]) -> list[str]:
-    from streamlit_ui.pages import portfolio_planner as page
-
-    captions: list[str] = []
-    monkeypatch.setattr(page.st, "caption", lambda text, *a, **k: captions.append(str(text)))
-    monkeypatch.setattr(page.st, "markdown", lambda *a, **k: None)
-    monkeypatch.setattr(page.st, "info", lambda *a, **k: None)
-    monkeypatch.setattr(page.st, "multiselect", lambda label, options, **k: list(options))
-    monkeypatch.setattr(page.st, "stop", lambda: None)
-
-    class _Stop(Exception):
-        pass
-
-    # Everything after the aggregation is table rendering; stop there.
-    monkeypatch.setattr(page.st, "metric", lambda *a, **k: (_ for _ in ()).throw(_Stop()), raising=False)
-    monkeypatch.setattr(page.st, "columns", lambda *a, **k: (_ for _ in ()).throw(_Stop()), raising=False)
-    try:
-        page._render_shopping_list_tab(rows)
-    except _Stop:
-        pass
-    return captions
-
-
-def test_tab_shows_the_stale_caption_and_the_new_stock_rule(monkeypatch) -> None:
-    captions = _render_tab_captions(monkeypatch, [_make_row(1001, "Item A", 2, {"34": _stale_take_line()})])
-    assert any("older overview" in c and "refresh for exact stock use" in c for c in captions)
-    assert any("subtracted once" in c for c in captions)
-    assert not any("sourcing strategy" in c for c in captions)
-
-
-def test_tab_shows_no_stale_caption_for_current_lines(monkeypatch) -> None:
-    captions = _render_tab_captions(monkeypatch, [_make_row(1001, "Item A", 2, {"34": _owned_line(4, 3)})])
-    assert not any("older overview" in c for c in captions)
 
 
 # --- Unknown datacore need notice -----------------------------------------------
@@ -402,7 +365,7 @@ def _unknown_need_row(batches: int, from_batch: int) -> dict:
 
 
 def test_unknown_need_rows_names_rows_whose_batches_reach_the_unknown_need() -> None:
-    from streamlit_ui.shopping_list import invention_need_unknown_rows
+    from eve_online_industry_tracker.application.industry.shopping_list import invention_need_unknown_rows
 
     assert list(invention_need_unknown_rows([_unknown_need_row(3, 2)])) == ["Item T2"]
     assert invention_need_unknown_rows([_unknown_need_row(1, 2)]) == {}
@@ -410,27 +373,8 @@ def test_unknown_need_rows_names_rows_whose_batches_reach_the_unknown_need() -> 
     assert invention_need_unknown_rows([_make_row(1001, "Item A", 2, {"34": _owned_line(4, 3)})]) == {}
 
 
-def test_tab_warns_about_an_unknown_datacore_need(monkeypatch) -> None:
-    from streamlit_ui.pages import portfolio_planner as page
-
-    warnings: list[str] = []
-    monkeypatch.setattr(page.st, "warning", lambda text, *a, **k: warnings.append(str(text)))
-    _render_tab_captions(monkeypatch, [_unknown_need_row(3, 2)])
-    assert len(warnings) == 1
-    assert "Item T2" in warnings[0] and "datacore" in warnings[0].lower()
-
-
-def test_tab_shows_no_unknown_need_warning_for_known_rows(monkeypatch) -> None:
-    from streamlit_ui.pages import portfolio_planner as page
-
-    warnings: list[str] = []
-    monkeypatch.setattr(page.st, "warning", lambda text, *a, **k: warnings.append(str(text)))
-    _render_tab_captions(monkeypatch, [_make_row(1001, "Item A", 2, {"34": _owned_line(4, 3)})])
-    assert warnings == []
-
-
 def test_unknown_need_rows_log_debug_not_warning(caplog) -> None:
-    from streamlit_ui.shopping_list import invention_need_unknown_rows
+    from eve_online_industry_tracker.application.industry.shopping_list import invention_need_unknown_rows
 
     with caplog.at_level("DEBUG"):
         assert list(invention_need_unknown_rows([_unknown_need_row(3, 2)])) == ["Item T2"]
@@ -588,48 +532,6 @@ def test_an_unstamped_row_planned_without_bpcs_is_not_refused(kind) -> None:
     assert _line(aggregate_shopping_list([row])) == (288, 288)
 
 
-def test_the_tab_warns_and_shows_no_numbers_for_an_unstamped_row(monkeypatch) -> None:
-    from streamlit_ui.pages import portfolio_planner as page
-
-    warnings: list[str] = []
-    monkeypatch.setattr(page.st, "warning", lambda text, *a, **k: warnings.append(str(text)))
-    infos: list[str] = []
-    monkeypatch.setattr(page.st, "info", lambda text, *a, **k: infos.append(str(text)))
-    _render_tab_captions(monkeypatch, [_round_four_row(3)])
-    assert any("Item T2" in w and OLDER_OVERVIEW_REASON in w for w in warnings)
-
-
-def _render_tab_output(monkeypatch, rows: list[dict]) -> dict[str, list]:
-    """Everything the tab writes, rendered to the end (no early stop)."""
-    from streamlit_ui.pages import portfolio_planner as page
-
-    out: dict[str, list] = {k: [] for k in ("info", "warning", "caption", "markdown", "dataframe", "code")}
-    for name in out:
-        monkeypatch.setattr(page.st, name, lambda obj, *a, _n=name, **k: out[_n].append(obj))
-    monkeypatch.setattr(page.st, "multiselect", lambda label, options, **k: list(options))
-    page._render_shopping_list_tab(rows)
-    return out
-
-
-def test_the_tab_shows_no_numbers_of_a_refused_row_beside_a_current_one(monkeypatch) -> None:
-    current = _make_row(1002, "Item Current", 2, {"35": _owned_line(10, 0, type_id=35, type_name="Pyerite")})
-    out = _render_tab_output(monkeypatch, [current, _round_four_row(3, name="Item Old")])
-    (df,) = out["dataframe"]
-    # Only the current row's Pyerite line (2 x 10); the refused row's 3 x 96 Tritanium is absent.
-    assert df.to_dict("records") == [
-        {"Item": "Pyerite", "Need": "20", "Owned (est.)": "0", "Buy": "20",
-         "Unit Price": "5", "Total ISK": "100"},
-    ]
-    assert not any("Tritanium" in str(c) for c in out["code"])
-
-
-def test_the_tab_asks_for_a_refresh_when_every_selected_row_is_refused(monkeypatch) -> None:
-    out = _render_tab_output(monkeypatch, [_round_four_row(3)])
-    assert out["dataframe"] == [] and out["code"] == []
-    assert not any("No buy-sourced materials" in str(i) for i in out["info"])
-    assert any("refresh" in str(i).lower() for i in out["info"])
-
-
 # --- Net against the published hangar stock ------------------------------------
 # Every row of one overview is planned against the same hangar stock and
 # publishes it (manufacturing_job.owned_stock_by_type_id) for the types on its
@@ -741,15 +643,13 @@ def test_published_stock_on_another_row_covers_a_keyless_row() -> None:
     assert stale == {}
 
 
-
-
 def _pooled(row: dict, stock: dict, pool: str) -> dict:
     _with_stock(row, stock)["manufacturing_job"]["owned_stock_pool_id"] = pool
     return row
 
 
 def test_rows_from_one_stock_pool_keep_the_published_figure() -> None:
-    from streamlit_ui.shopping_list import rows_from_different_stock_pools
+    from eve_online_industry_tracker.application.industry.shopping_list import rows_from_different_stock_pools
 
     rows = [
         _pooled(_make_row(1001, "Item A", 1, {"34": _owned_line(8, 8)}), {34: 10}, "p1"),
@@ -760,7 +660,7 @@ def test_rows_from_one_stock_pool_keep_the_published_figure() -> None:
 
 
 def test_rows_from_different_stock_pools_net_the_smallest_figure_and_warn() -> None:
-    from streamlit_ui.shopping_list import rows_from_different_stock_pools
+    from eve_online_industry_tracker.application.industry.shopping_list import rows_from_different_stock_pools
 
     # Refresh 1 saw 12, refresh 2 saw 9: net 9 (never more than either saw).
     rows = [
@@ -777,32 +677,6 @@ def test_mixed_stock_pools_never_net_less_than_a_take() -> None:
         _pooled(_make_row(1002, "Item B", 1, {"34": _owned_line(8, 3)}), {34: 3}, "p2"),
     ]
     assert _line(aggregate_shopping_list(rows)) == (16, 8)
-
-
-def test_the_tab_warns_about_rows_from_different_refreshes(monkeypatch) -> None:
-    from streamlit_ui.pages import portfolio_planner as page
-
-    warnings: list[str] = []
-    monkeypatch.setattr(page.st, "warning", lambda text, *a, **k: warnings.append(str(text)))
-    rows = [
-        _pooled(_make_row(1001, "Item A", 1, {"34": _owned_line(8, 8)}), {34: 12}, "p1"),
-        _pooled(_make_row(1002, "Item B", 1, {"34": _owned_line(8, 8)}), {34: 9}, "p2"),
-    ]
-    _render_tab_captions(monkeypatch, rows)
-    assert any("different refreshes" in w and "refresh before buying" in w for w in warnings)
-
-
-def test_the_tab_does_not_warn_for_one_refresh(monkeypatch) -> None:
-    from streamlit_ui.pages import portfolio_planner as page
-
-    warnings: list[str] = []
-    monkeypatch.setattr(page.st, "warning", lambda text, *a, **k: warnings.append(str(text)))
-    rows = [
-        _pooled(_make_row(1001, "Item A", 1, {"34": _owned_line(8, 8)}), {34: 12}, "p1"),
-        _pooled(_make_row(1002, "Item B", 1, {"34": _owned_line(8, 8)}), {34: 12}, "p1"),
-    ]
-    _render_tab_captions(monkeypatch, rows)
-    assert not any("different refreshes" in w for w in warnings)
 
 
 def test_a_type_emptied_by_another_keyless_row_is_not_stale() -> None:
@@ -866,11 +740,6 @@ def test_a_shared_nested_bpc_shortfall_without_an_invention_model_is_named() -> 
     assert "1 run" in named["Item A"]
     assert shared_nested_bpc_shortfall_rows(rows[:1]) == {}
     assert shared_nested_bpc_shortfall_rows([_sharing_row(1, "A", 1, 3), _sharing_row(2, "B", 2, 3)]) == {}
-
-
-def test_the_tab_warns_about_a_shared_nested_bpc_shortfall_it_cannot_size(monkeypatch) -> None:
-    out = _render_tab_output(monkeypatch, [_sharing_row(1, "Item A", 2, 3), _sharing_row(2, "Item B", 2, 3)])
-    assert any("Item A" in str(w) and "Item B" in str(w) and "short" in str(w) for w in out["warning"])
 
 
 def test_a_row_from_before_this_plan_version_is_refused() -> None:

@@ -95,9 +95,3 @@ def test_one_row_is_singular():
         f"1 row hidden: region daily volume unknown ({REASON})")
 
 
-def test_the_builder_and_portfolio_pages_show_the_note():
-    from streamlit_ui.pages import portfolio_planner
-
-    # The pages show every hidden note (unknown_value_hidden_notes, the volume one included).
-    for page in (industry_builder, portfolio_planner):
-        assert "unknown_value_hidden_notes(" in inspect.getsource(page)

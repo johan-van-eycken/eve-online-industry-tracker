@@ -118,7 +118,7 @@ class ShoppingListBuilder:
             # runs = the assigned pilot's whole attempts (CharacterAssigner).
             # None: the datacore need is unknown (unknown odds). Nothing
             # is bought for it, never a guessed attempt count; the reason is
-            # on the action, as on the Portfolio shopping list.
+            # on the action.
             attempts = _positive_int(action.runs)
             if attempts is None:
                 logger.warning(
