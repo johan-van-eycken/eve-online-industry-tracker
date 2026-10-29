@@ -47,10 +47,14 @@ class MarketEnrichmentMixin:
 
     def _relist_broker_fee_fraction(self, row: dict[str, Any]) -> tuple[float, str | None]:
         """(the broker fee fraction of a relist, the note when it is assumed).
-        The product's own broker fee (market_fee_context) when known, 0.0
-        included; otherwise admin setting market_defaults/default_broker_fee,
-        with a note naming it (it was a hidden 3.5% before)."""
-        own = self._as_float((row.get("market_fee_context") or {}).get("broker_fee_fraction"))
+        0.0 when the product sells into buy orders (no order to relist); else
+        the product's own broker fee (manufacturing_job.market_fee_context)
+        when known, 0.0 included; otherwise admin setting
+        market_defaults/default_broker_fee, with a note naming it."""
+        context = (row.get("manufacturing_job") or {}).get("market_fee_context") or {}
+        if context and not context.get("broker_fee_applies"):
+            return 0.0, None
+        own = self._as_float((context.get("rates") or {}).get("broker_fee_fraction"))
         if own is not None:
             return own, None
         assumed = float(self._adm("market_defaults", "default_broker_fee"))
@@ -638,12 +642,13 @@ class MarketEnrichmentMixin:
                 row["margin_buffer_pct"] = None
 
             # Projected price at delivery
-            trend_pct = stats.get("trend_pct")
+            trend_30d_pct = stats.get("trend_30d_pct")
             mfg_seconds = self._as_float(mfg_job.get("manufacturing_time_seconds")) or 0
             mfg_days = mfg_seconds / 86400.0
 
-            if market_price and trend_pct is not None:
-                daily_trend = trend_pct / 100.0 / 30.0
+            if market_price and trend_30d_pct is not None:
+                # 7d vs 30d average: their midpoints (day 3.5 and day 15) are 11.5 days apart.
+                daily_trend = trend_30d_pct / 100.0 / 11.5
                 projected_price = market_price * (1.0 + daily_trend * mfg_days)
                 row["projected_price_at_delivery"] = projected_price
                 if unit_build_cost and unit_build_cost > 0 and projected_price > 0:

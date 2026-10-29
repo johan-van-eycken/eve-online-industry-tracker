@@ -4069,6 +4069,11 @@ class IndustryService(
         product_rows = self._enrich_product_rows_with_market_activity(product_rows, market_hub=normalized_market_hub)
         product_rows = self._enrich_product_rows_with_liquidity_metrics(product_rows)
         product_rows = self._enrich_product_rows_with_price_anomaly(product_rows, market_hub=normalized_market_hub)
+        if progress_callback is not None:
+            progress_callback(0.93, "Calculating sale proceeds and profit metrics", {"stage": "profit"})
+        product_rows = self._enrich_product_rows_with_sale_proceeds(product_rows, character_id=character_id, market_hub=normalized_market_hub, product_price_side=normalized_product_price_side, fee_context=ctx.market_fee_context)
+        product_rows = self._enrich_product_rows_with_profit_metrics(product_rows)
+        # After the profit step: the relist and builder-accuracy fields read profit_amount and net_proceeds.
         _mh_svc = MarketHistoryService(state=self._state, sessions=self._sessions)
         _ps = MarketPricingService(state=self._state, sessions=self._sessions)
         _region_id = int((_ps._market_hub_context(normalized_market_hub).get("region_id")) or 10000002)
@@ -4077,10 +4082,6 @@ class IndustryService(
             market_history_svc=_mh_svc,
             region_id=_region_id,
         )
-        if progress_callback is not None:
-            progress_callback(0.93, "Calculating sale proceeds and profit metrics", {"stage": "profit"})
-        product_rows = self._enrich_product_rows_with_sale_proceeds(product_rows, character_id=character_id, market_hub=normalized_market_hub, product_price_side=normalized_product_price_side, fee_context=ctx.market_fee_context)
-        product_rows = self._enrich_product_rows_with_profit_metrics(product_rows)
         product_rows = self._score_inventory_allocation_priority(product_rows)
         product_rows = self._enrich_product_rows_with_manufacturing_signals(product_rows)
         if progress_callback is not None:
