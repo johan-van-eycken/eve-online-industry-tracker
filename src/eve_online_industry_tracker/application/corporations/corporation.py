@@ -6,7 +6,7 @@ from typing import Optional, List, Dict, Any
 
 from sqlalchemy.exc import SQLAlchemyError
 
-from eve_online_industry_tracker.infrastructure.esi_client import ESI_REQUEST_ERRORS
+from eve_online_industry_tracker.infrastructure.esi_client import ESI_REQUEST_ERRORS, esi_get_back_to_known
 
 from eve_online_industry_tracker.config.config_manager import ConfigManager
 from eve_online_industry_tracker.infrastructure.database_manager import DatabaseManager
@@ -695,20 +695,11 @@ class Corporation:
                 if division is None:
                     continue
 
-                transactions = self._default_esi_character._esi_client.esi_get(
-                    ESI_CORP_WALLETS_TRANSACTIONS.format(corporation_id=self.corporation_id, division=division)
-                )
-                if isinstance(transactions, str):
-                    transactions = json.loads(transactions)
-                if not transactions or not isinstance(transactions, list):
-                    continue
-
-                for entry in transactions:
-                    if not isinstance(entry, dict):
-                        continue
-                    tx_id = entry.get("transaction_id")
-                    if tx_id is None or tx_id in known_ids:
-                        continue
+                for entry in esi_get_back_to_known(
+                    self._default_esi_character._esi_client.esi_get,
+                    ESI_CORP_WALLETS_TRANSACTIONS.format(corporation_id=self.corporation_id, division=division),
+                    known_ids,
+                ):
                     entry["division"] = division
                     new_entries.append(entry)
 
