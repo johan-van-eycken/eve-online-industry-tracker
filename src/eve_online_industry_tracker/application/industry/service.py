@@ -3188,6 +3188,373 @@ class IndustryService(
             return None, f"an input has no price: {', '.join(dict.fromkeys(unpriced))}"
         return total + (0.0 if fees == "none" else float(mj.get("total_job_cost") or 0.0)), None
 
+    def _top_level_blueprint_source(
+        self,
+        ctx: _ProductPlanningContext,
+        *,
+        blueprint_copy_asset: Any,
+        blueprint_copy_runs: int,
+        blueprint_original_asset: Any,
+        matched_blueprint_originals: list[Any],
+        has_top_level_invention_path: bool,
+        decryptor: DecryptorOption,
+        effective_runs: int,
+    ) -> tuple[int, int, str, bool, bool]:
+        """A product row's blueprint source (Step 3a): (ME, TE, source kind,
+        include a copying job, include the SDE research chain)."""
+        blueprint_material_efficiency = 0
+        blueprint_time_efficiency = 0
+        blueprint_source_kind = "unowned"
+        include_copying_job = False
+        include_sde_research_chain = False
+        if bool(ctx.build_from_bpc):
+            if blueprint_copy_asset is not None:
+                blueprint_material_efficiency = int(blueprint_copy_asset.blueprint_material_efficiency or 0)
+                blueprint_time_efficiency = int(blueprint_copy_asset.blueprint_time_efficiency or 0)
+                blueprint_source_kind = "owned_blueprint_copy"
+                include_copying_job = max(0, blueprint_copy_runs) < effective_runs and bool(matched_blueprint_originals)
+            elif blueprint_original_asset is not None:
+                blueprint_material_efficiency = int(blueprint_original_asset.blueprint_material_efficiency or 0)
+                blueprint_time_efficiency = int(blueprint_original_asset.blueprint_time_efficiency or 0)
+                blueprint_source_kind = "copied_from_owned_blueprint_original"
+                include_copying_job = True
+            else:
+                blueprint_source_kind = "unowned_blueprint_copy"
+                if has_top_level_invention_path and not matched_blueprint_originals:
+                    # The BPC is invented: ME 2 / TE 4 plus the decryptor
+                    # (EVE). A plain unowned T1 BPC stays at ME 0 / TE 0.
+                    blueprint_material_efficiency, blueprint_time_efficiency = invented_blueprint_efficiency(decryptor)
+        else:
+            if blueprint_original_asset is not None:
+                blueprint_material_efficiency = int(blueprint_original_asset.blueprint_material_efficiency or 0)
+                blueprint_time_efficiency = int(blueprint_original_asset.blueprint_time_efficiency or 0)
+                blueprint_source_kind = "owned_blueprint_original"
+            else:
+                blueprint_material_efficiency = int(self._adm("industry", "max_blueprint_material_efficiency"))
+                blueprint_time_efficiency = int(self._adm("industry", "max_blueprint_time_efficiency"))
+                blueprint_source_kind = "blueprint_sde_fallback"
+                include_sde_research_chain = True
+
+        return (
+            blueprint_material_efficiency, blueprint_time_efficiency, blueprint_source_kind,
+            include_copying_job, include_sde_research_chain,
+        )
+
+    def _plan_later_batches(
+        self,
+        ctx: _ProductPlanningContext,
+        *,
+        blueprint_type_id: int,
+        product_type_id: int,
+        manufacturing_job: dict[str, Any],
+        rig_groups: Any,
+        manufacturing_skill_entry_list: list[dict[str, Any]],
+        effective_runs: int,
+        max_production_limit: int,
+        fully_invented: bool,
+        has_top_level_invention_path: bool,
+        matched_blueprint_originals: list[Any],
+        requires_invention_chain: bool,
+        inv_costs: dict[str, Any] | None,
+        invention_job: dict[str, Any],
+        decryptor: DecryptorOption,
+        owned_target_copy_runs_used: int,
+        available_target_copy_runs: int,
+        missing_top_level_copy_runs: int,
+        copy_runs_before_batch_one: dict[int, Any],
+        available_blueprint_copy_runs_by_type_id: dict[int, Any],
+        batch_run_layout: _BatchRunLayout,
+        job_segments: list[dict[str, Any]],
+        recursive_prerequisite_plan: dict[str, Any],
+        invention_cost_unknown_reason: str | None,
+    ) -> dict[str, Any]:
+        """A product row's batches 2..N for the shopping list: the row's own
+        invention over all batches (invention_bpc_plan), each distinct later
+        batch planned on its own (extra_batch_schedule), and why a later
+        batch's datacore need is unknown. Also returns the row's invention
+        cost reason, extended with a later batch's unknown odds."""
+        # The list above is batch 1 only. The row's own invention for the
+        # later batches: the owned T2 BPC runs cover the first batches, every
+        # run past them is invented. Pure requirements: planned against no
+        # stock (take 0), because the shopping list nets owned stock once over
+        # all batches.
+        top_level_extra_attempts = 0
+        # Why the shopping list cannot size the datacores, and from which batch
+        # on: 1 when batch 1 itself invents with unknown odds, 2 when only the
+        # batches past the owned BPC runs do. Never replaced by a guessed count.
+        datacore_need_unknown_reasons: list[str] = []
+        datacore_need_unknown_from_batch = 2
+        extra_chance: dict[str, Any] | None = None
+        invents_top_level = bool(ctx.build_from_bpc) and has_top_level_invention_path and not matched_blueprint_originals
+        if invents_top_level:
+            if requires_invention_chain and owned_target_copy_runs_used <= 0 and inv_costs is not None:
+                # Batch 1 already invented every run when no owned BPC ran.
+                top_level_extra_attempts = int(inv_costs.get("whole_attempts") or 0)
+                if inv_costs.get("cost_unknown_reason") is not None:
+                    datacore_need_unknown_reasons.append(str(inv_costs["cost_unknown_reason"]))
+                    datacore_need_unknown_from_batch = 1
+            elif requires_invention_chain and inv_costs is not None and inv_costs.get("cost_unknown_reason") is not None:
+                # Partly owned BPC and unknown odds: batch 1 is unknown already,
+                # so a full batch is too (no second evaluation, no second WARNING).
+                datacore_need_unknown_reasons.append(str(inv_costs["cost_unknown_reason"]))
+                datacore_need_unknown_from_batch = 1
+            else:
+                top_level_extra_attempts, extra_unknown_reason, extra_chance = self._full_batch_invention_whole_attempts(
+                    invention_job=invention_job, blueprint_type_id=blueprint_type_id,
+                    runs=effective_runs, max_production_limit=max_production_limit,
+                    adjusted_price_map=ctx.adjusted_market_price_map,
+                    decryptor=decryptor, invention_context=ctx.invention_context,
+                )
+                if extra_unknown_reason is not None:
+                    datacore_need_unknown_reasons.append(f"batches past the owned T2 BPC runs: {extra_unknown_reason}")
+        # The nested sub-builds' invention for one later batch that repeats
+        # batch 1 (no extra_batch_schedule below): batch 1's own.
+        batch_one_nested_requirements = [
+            dict(e) for e in (recursive_prerequisite_plan.get("invention_requirements") or []) if isinstance(e, dict)
+        ]
+        # Later batches share invented BPCs. One BPC's runs can outlast a
+        # batch (a +run decryptor, or batches shorter than a BPC), so the
+        # shopping list sizes the row's own invention over ALL batches from
+        # this plan: BPCs needed = ceil(runs past the owned BPC runs / runs
+        # per BPC), each bought as whole attempts. Written only when the
+        # attempts are known (unknown odds are flagged instead, see above).
+        invention_bpc_plan: dict[str, Any] | None = None
+        if top_level_extra_attempts > 0 and inv_costs is not None:
+            runs_per_bpc = max(1, int(inv_costs.get("runs_per_invented_blueprint") or 1))
+            attempts_per_bpc, per_bpc_unknown = self._whole_attempts_per_blueprint(
+                invention_job=invention_job, blueprint_type_id=blueprint_type_id,
+                runs_per_bpc=runs_per_bpc, batch_runs=int(effective_runs),
+                max_production_limit=max_production_limit,
+                adjusted_price_map=ctx.adjusted_market_price_map,
+                decryptor=decryptor, invention_context=ctx.invention_context,
+            )
+            if per_bpc_unknown is None and attempts_per_bpc > 0:
+                per_attempt_lines, _ = self._plan_take_or_buy_material_nodes(
+                    self._invention_whole_attempt_requirements(invention_job, 1, decryptor=decryptor),
+                    available_owned_item_quantity_by_type_id={},
+                    owned_item_unit_cost_by_type_id=ctx.owned_item_unit_cost_by_type_id,
+                    sell_price_map=ctx.material_price_map,
+                    adjusted_price_map=ctx.adjusted_market_price_map,
+                )
+                batch_one_invents = requires_invention_chain and missing_top_level_copy_runs > 0
+                invention_bpc_plan = {
+                    "batch_runs": int(effective_runs),
+                    "runs_per_invented_blueprint": runs_per_bpc,
+                    "whole_attempts_per_blueprint": int(attempts_per_bpc),
+                    # Every owned BPC run of this variant, batch 1's included.
+                    "owned_blueprint_runs": max(0, int(available_target_copy_runs)),
+                    "batch_one_invented_blueprints": (
+                        int(math.ceil(missing_top_level_copy_runs / runs_per_bpc)) if batch_one_invents else 0
+                    ),
+                    # The whole attempts batch 1's own invention buys.
+                    "batch_one_whole_attempts": (
+                        int(inv_costs.get("whole_attempts") or 0) if requires_invention_chain else 0
+                    ),
+                    "per_attempt_materials": self._overview_keyed_entries(per_attempt_lines, compactor=lambda e: e),
+                    # Install fees per attempt and per source-copy run:
+                    # the planner's invent / copy actions when batch 1 does
+                    # not invent (activity_breakdown.invention is then absent).
+                    "job_cost_per_attempt": inv_costs.get("job_cost_per_attempt"),
+                    "job_cost_per_attempt_unknown_reason": inv_costs.get("job_cost_per_attempt_unknown_reason"),
+                    "source_copy_job_cost_per_run": inv_costs.get("source_copy_job_cost_per_run"),
+                    "source_copy_job_cost_per_run_unknown_reason": inv_costs.get("source_copy_job_cost_per_run_unknown_reason"),
+                }
+        # Batches 2..N (shopping list only). A later batch differs from batch
+        # 1 when batch 1 spent owned BPC runs (top level or in a sub-build)
+        # that it no longer has, or when its own job straddles two invented
+        # BPCs. Each distinct later batch is then planned on its own
+        # (_plan_extra_batch), quietly: this row logs one WARNING below.
+        extra_batch_schedule: dict[str, Any] | None = None
+        if bool(ctx.build_from_bpc) and not fully_invented:
+            nested_copy_runs_spent = self._blueprint_copy_runs_spent(
+                {t: r for t, r in copy_runs_before_batch_one.items() if int(t) != blueprint_type_id},
+                {t: r for t, r in available_blueprint_copy_runs_by_type_id.items() if int(t) != blueprint_type_id},
+            )
+            sub_build_plan_cache: dict[tuple, dict[str, Any]] = {}
+            with quiet_warnings():
+                extra_batch_schedule = self._later_batch_schedule(
+                    batch_run_layout, batch_runs=effective_runs, batch_one_segments=job_segments,
+                    nested_copy_runs_spent=nested_copy_runs_spent,
+                    plan_for=lambda segments: self._plan_extra_batch(
+                        ctx, manufacturing_job=manufacturing_job, blueprint_type_id=blueprint_type_id,
+                        job_segments=segments, manufacturing_group=rig_groups,
+                        required_skill_entries=manufacturing_skill_entry_list,
+                        # The row's own invention for that batch alone (the
+                        # shopping list's list without an invention_bpc_plan).
+                        own_invention_source=(
+                            batch_run_layout.next_source
+                            if invents_top_level and batch_run_layout.runs_per_blueprint else None
+                        ),
+                        invention_job=invention_job, decryptor=decryptor, max_production_limit=max_production_limit,
+                        sub_build_plan_cache=sub_build_plan_cache,
+                    ),
+                )
+        # Later batches are planned without any nested owned BPC run batch 1
+        # used, even when that BPC has runs left (it may also be counted by
+        # another selected row): over-buy only, and the row says so.
+        later_batch_notes: list[str] = []
+        if extra_batch_schedule is not None:
+            for spare_type_id, spare_runs in sorted(available_blueprint_copy_runs_by_type_id.items()):
+                before = int(copy_runs_before_batch_one.get(spare_type_id, 0) or 0)
+                if int(spare_type_id) == blueprint_type_id or not (0 < int(spare_runs or 0) < before):
+                    continue
+                spare_blueprint = (ctx.blueprint_row_by_type_id.get(int(spare_type_id)) or {}).get("blueprint") or {}
+                spare_name = str((spare_blueprint if isinstance(spare_blueprint, dict) else {}).get("type_name") or spare_type_id)
+                later_batch_notes.append(
+                    f"later batches assume nested BPC runs are spent: {spare_name} has {int(spare_runs)} runs "
+                    f"left after batch 1; the shopping list counts them for its invention unless another "
+                    f"selected row may use them, else batches 2+ may over-buy its sub-build"
+                )
+        invention_procurement_materials_per_extra_batch: list[dict[str, Any]] = []
+        nested_extra_batch_lines: list[dict[str, Any]] = []
+        if extra_batch_schedule is None:
+            # Every later batch repeats batch 1: its full-batch own attempts
+            # plus batch 1's nested sub-build invention.
+            invention_procurement_materials_per_extra_batch, _ = self._plan_take_or_buy_material_nodes(
+                self._merge_invention_requirements([
+                    *self._invention_whole_attempt_requirements(invention_job, top_level_extra_attempts, decryptor=decryptor),
+                    *batch_one_nested_requirements,
+                ]),
+                available_owned_item_quantity_by_type_id={},
+                owned_item_unit_cost_by_type_id=ctx.owned_item_unit_cost_by_type_id,
+                sell_price_map=ctx.material_price_map,
+                adjusted_price_map=ctx.adjusted_market_price_map,
+            )
+            if invention_bpc_plan is not None or batch_one_nested_requirements:
+                nested_extra_batch_lines, _ = self._plan_take_or_buy_material_nodes(
+                    self._merge_invention_requirements(batch_one_nested_requirements),
+                    available_owned_item_quantity_by_type_id={},
+                    owned_item_unit_cost_by_type_id=ctx.owned_item_unit_cost_by_type_id,
+                    sell_price_map=ctx.material_price_map,
+                    adjusted_price_map=ctx.adjusted_market_price_map,
+                )
+        else:
+            datacore_need_unknown_reasons.extend(
+                r for r in extra_batch_schedule.pop("unknown_reasons") if r not in datacore_need_unknown_reasons
+            )
+        # A batch past the owned BPC runs that must invent with unknown odds
+        # marks the row's invention cost unknown (Low confidence via the
+        # pricing step) even when batch 1's own cost is known.
+        extra_only_unknown_reasons = [
+            r for r in datacore_need_unknown_reasons
+            if r not in (invention_cost_unknown_reason or "")
+        ]
+        # Batch 1's cost is exact when every unknown is a later batch's.
+        batch_one_cost_exact = invention_cost_unknown_reason is None
+        if extra_only_unknown_reasons:
+            invention_cost_unknown_reason = "; ".join(
+                [*([invention_cost_unknown_reason] if invention_cost_unknown_reason else []), *extra_only_unknown_reasons]
+            )
+        if extra_only_unknown_reasons:
+            # One WARNING per row: the full-batch evaluations log theirs at
+            # DEBUG, the later-batch plans run quietly, and a batch-1 unknown
+            # already logged "invention cost left unknown" for the row's own
+            # invention.
+            logger.warning(
+                "Product %s: datacore need unknown from batch %s on (%s); "
+                "the shopping list flags it instead of buying 0 datacores",
+                product_type_id, datacore_need_unknown_from_batch, "; ".join(datacore_need_unknown_reasons),
+            )
+        return {
+            "datacore_need_unknown_reasons": datacore_need_unknown_reasons,
+            "datacore_need_unknown_from_batch": datacore_need_unknown_from_batch,
+            "extra_chance": extra_chance,
+            "invention_bpc_plan": invention_bpc_plan,
+            "extra_batch_schedule": extra_batch_schedule,
+            "later_batch_notes": later_batch_notes,
+            "invention_procurement_materials_per_extra_batch": invention_procurement_materials_per_extra_batch,
+            "nested_extra_batch_lines": nested_extra_batch_lines,
+            "invention_cost_unknown_reason": invention_cost_unknown_reason,
+            "batch_one_cost_exact": batch_one_cost_exact,
+        }
+
+    def _nested_blueprint_run_fields(
+        self,
+        ctx: _ProductPlanningContext,
+        *,
+        blueprint_type_id: int,
+        recursive_prerequisite_plan: dict[str, Any],
+        extra_batch_schedule: dict[str, Any] | None,
+        copy_runs_before_batch_one: dict[int, Any],
+        available_blueprint_copy_runs_by_type_id: dict[int, Any],
+        owned_target_copy_runs_used: int,
+        available_target_copy_runs: int,
+    ) -> dict[str, Any]:
+        """The shopping list's BPC-run fields of a product row built from BPCs
+        ({} otherwise): the later-batch plan version, batch 1's nested
+        inventions and the nested BPC runs it used, owned and left."""
+        fields: dict[str, Any] = {}
+        if not bool(ctx.build_from_bpc):
+            return fields
+        # Read by the shopping list: a row without it is from an older
+        # overview whose later batches repeat batch 1.
+        fields["later_batch_plan_version"] = LATER_BATCH_PLAN_VERSION
+        # Batch 1's nested inventions and the owned BPC runs left of
+        # every nested blueprint after batch 1, so the shopping list
+        # carries invented and owned spare runs across batches.
+        batch_one_nested_bpc_plans = self._compact_nested_invention_bpc_plans(
+            ctx, recursive_prerequisite_plan.get("nested_invention_bpc_plans"),
+        )
+        nested_blueprint_ids = {int(p["invented_blueprint_type_id"]) for p in batch_one_nested_bpc_plans}
+        for later_plan in (extra_batch_schedule or {}).get("plans") or []:
+            nested_blueprint_ids |= {
+                int(p["invented_blueprint_type_id"]) for p in later_plan.get("nested_invention_bpc_plans") or []
+            }
+        nested_blueprint_ids |= {
+            int(t) for t, r in copy_runs_before_batch_one.items()
+            if int(t) > 0 and float(available_blueprint_copy_runs_by_type_id.get(t, 0) or 0) < float(r or 0)
+        }
+        nested_blueprint_ids.discard(int(blueprint_type_id))
+        fields["nested_invention_bpc_plans"] = batch_one_nested_bpc_plans
+        # Each row is planned on its own copy of the
+        # owned BPC runs, so the shopping list nets the nested BPC runs
+        # batch 1 spent once across the selected rows.
+        used_nested_runs = {
+            int(t): int(math.ceil(float(r or 0) - float(available_blueprint_copy_runs_by_type_id.get(t, 0) or 0) - 1e-9))
+            for t, r in copy_runs_before_batch_one.items()
+            if int(t) > 0 and int(t) != int(blueprint_type_id)
+            and float(available_blueprint_copy_runs_by_type_id.get(t, 0) or 0) < float(r or 0)
+        }
+        owned_runs_before = {
+            t: max(0, int(math.floor(float(copy_runs_before_batch_one.get(t, 0) or 0) + 1e-9)))
+            for t in used_nested_runs
+        }
+        if owned_target_copy_runs_used > 0:
+            # The row's own top-level BPC runs too, so a
+            # top-level user of a BPC another row nests counts as well.
+            used_nested_runs[int(blueprint_type_id)] = int(owned_target_copy_runs_used)
+            owned_runs_before[int(blueprint_type_id)] = max(0, int(available_target_copy_runs))
+        fields["nested_blueprint_runs_used"] = {
+            str(t): used for t, used in sorted(used_nested_runs.items()) if used > 0
+        }
+        fields["nested_blueprint_runs_owned"] = {
+            str(t): owned_runs_before[t] for t in sorted(used_nested_runs) if used_nested_runs[t] > 0
+        }
+        fields["nested_blueprint_runs_left"] = {
+            str(t): max(0, int(math.floor(float(available_blueprint_copy_runs_by_type_id.get(t, 0) or 0) + 1e-9)))
+            for t in sorted(nested_blueprint_ids)
+        }
+        return fields
+
+    def _keyed_expected_invention_inputs(
+        self, expected_invention_inputs: list[dict[str, Any]], nested_expected_invention_inputs: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """The row's own amortized invention inputs keyed by type, then each
+        nested sub-build's keyed "<type_id>@<invented blueprint>"."""
+        keyed_invention_inputs = self._overview_keyed_entries(
+            expected_invention_inputs, compactor=lambda e: e,
+        )
+        # A nested sub-build's inputs are keyed "<type_id>@<invented blueprint>",
+        # so they never overwrite the row's own (or another sub-build's) line.
+        for entry in nested_expected_invention_inputs:
+            base_key = f"{int(entry.get('type_id') or 0)}@{int(entry.get('invented_blueprint_type_id') or 0)}"
+            key, n = base_key, 1
+            while key in keyed_invention_inputs:  # same blueprint invented in two sub-builds
+                n += 1
+                key = f"{base_key}#{n}"
+            keyed_invention_inputs[key] = entry
+        return keyed_invention_inputs
+
     def _build_single_product_row(
         self,
         ctx: _ProductPlanningContext,
@@ -3285,38 +3652,15 @@ class IndustryService(
                 else NO_DECRYPTOR
             )
         # Blueprint source resolution (Step 3a)
-        blueprint_material_efficiency = 0
-        blueprint_time_efficiency = 0
-        blueprint_source_kind = "unowned"
-        include_copying_job = False
-        include_sde_research_chain = False
-        if bool(ctx.build_from_bpc):
-            if blueprint_copy_asset is not None:
-                blueprint_material_efficiency = int(blueprint_copy_asset.blueprint_material_efficiency or 0)
-                blueprint_time_efficiency = int(blueprint_copy_asset.blueprint_time_efficiency or 0)
-                blueprint_source_kind = "owned_blueprint_copy"
-                include_copying_job = max(0, blueprint_copy_runs) < effective_runs and bool(matched_blueprint_originals)
-            elif blueprint_original_asset is not None:
-                blueprint_material_efficiency = int(blueprint_original_asset.blueprint_material_efficiency or 0)
-                blueprint_time_efficiency = int(blueprint_original_asset.blueprint_time_efficiency or 0)
-                blueprint_source_kind = "copied_from_owned_blueprint_original"
-                include_copying_job = True
-            else:
-                blueprint_source_kind = "unowned_blueprint_copy"
-                if has_top_level_invention_path and not matched_blueprint_originals:
-                    # The BPC is invented: ME 2 / TE 4 plus the decryptor
-                    # (EVE). A plain unowned T1 BPC stays at ME 0 / TE 0.
-                    blueprint_material_efficiency, blueprint_time_efficiency = invented_blueprint_efficiency(decryptor)
-        else:
-            if blueprint_original_asset is not None:
-                blueprint_material_efficiency = int(blueprint_original_asset.blueprint_material_efficiency or 0)
-                blueprint_time_efficiency = int(blueprint_original_asset.blueprint_time_efficiency or 0)
-                blueprint_source_kind = "owned_blueprint_original"
-            else:
-                blueprint_material_efficiency = int(self._adm("industry", "max_blueprint_material_efficiency"))
-                blueprint_time_efficiency = int(self._adm("industry", "max_blueprint_time_efficiency"))
-                blueprint_source_kind = "blueprint_sde_fallback"
-                include_sde_research_chain = True
+        (
+            blueprint_material_efficiency, blueprint_time_efficiency, blueprint_source_kind,
+            include_copying_job, include_sde_research_chain,
+        ) = self._top_level_blueprint_source(
+            ctx, blueprint_copy_asset=blueprint_copy_asset, blueprint_copy_runs=blueprint_copy_runs,
+            blueprint_original_asset=blueprint_original_asset, matched_blueprint_originals=matched_blueprint_originals,
+            has_top_level_invention_path=has_top_level_invention_path, decryptor=decryptor,
+            effective_runs=effective_runs,
+        )
 
         # Owned BPC runs this batch uses, and the runs it still lacks.
         available_target_copy_runs = int(available_blueprint_copy_runs_by_type_id.get(blueprint_type_id, 0)) if bool(ctx.build_from_bpc) else 0
@@ -3566,188 +3910,42 @@ class IndustryService(
             sell_price_map=ctx.material_price_map,
             adjusted_price_map=ctx.adjusted_market_price_map,
         )
-        # The list above is batch 1 only. The row's own invention for the
-        # later batches: the owned T2 BPC runs cover the first batches, every
-        # run past them is invented. Pure requirements: planned against no
-        # stock (take 0), because the shopping list nets owned stock once over
-        # all batches.
-        top_level_extra_attempts = 0
-        # Why the shopping list cannot size the datacores, and from which batch
-        # on: 1 when batch 1 itself invents with unknown odds, 2 when only the
-        # batches past the owned BPC runs do. Never replaced by a guessed count.
-        datacore_need_unknown_reasons: list[str] = []
-        datacore_need_unknown_from_batch = 2
-        extra_chance: dict[str, Any] | None = None
-        invents_top_level = bool(ctx.build_from_bpc) and has_top_level_invention_path and not matched_blueprint_originals
-        if invents_top_level:
-            if requires_invention_chain and owned_target_copy_runs_used <= 0 and inv_costs is not None:
-                # Batch 1 already invented every run when no owned BPC ran.
-                top_level_extra_attempts = int(inv_costs.get("whole_attempts") or 0)
-                if inv_costs.get("cost_unknown_reason") is not None:
-                    datacore_need_unknown_reasons.append(str(inv_costs["cost_unknown_reason"]))
-                    datacore_need_unknown_from_batch = 1
-            elif requires_invention_chain and inv_costs is not None and inv_costs.get("cost_unknown_reason") is not None:
-                # Partly owned BPC and unknown odds: batch 1 is unknown already,
-                # so a full batch is too (no second evaluation, no second WARNING).
-                datacore_need_unknown_reasons.append(str(inv_costs["cost_unknown_reason"]))
-                datacore_need_unknown_from_batch = 1
-            else:
-                top_level_extra_attempts, extra_unknown_reason, extra_chance = self._full_batch_invention_whole_attempts(
-                    invention_job=invention_job, blueprint_type_id=blueprint_type_id,
-                    runs=effective_runs, max_production_limit=max_production_limit,
-                    adjusted_price_map=ctx.adjusted_market_price_map,
-                    decryptor=decryptor, invention_context=ctx.invention_context,
-                )
-                if extra_unknown_reason is not None:
-                    datacore_need_unknown_reasons.append(f"batches past the owned T2 BPC runs: {extra_unknown_reason}")
-        # The nested sub-builds' invention for one later batch that repeats
-        # batch 1 (no extra_batch_schedule below): batch 1's own.
-        batch_one_nested_requirements = [
-            dict(e) for e in (recursive_prerequisite_plan.get("invention_requirements") or []) if isinstance(e, dict)
-        ]
-        # Later batches share invented BPCs. One BPC's runs can outlast a
-        # batch (a +run decryptor, or batches shorter than a BPC), so the
-        # shopping list sizes the row's own invention over ALL batches from
-        # this plan: BPCs needed = ceil(runs past the owned BPC runs / runs
-        # per BPC), each bought as whole attempts. Written only when the
-        # attempts are known (unknown odds are flagged instead, see above).
-        invention_bpc_plan: dict[str, Any] | None = None
-        if top_level_extra_attempts > 0 and inv_costs is not None:
-            runs_per_bpc = max(1, int(inv_costs.get("runs_per_invented_blueprint") or 1))
-            attempts_per_bpc, per_bpc_unknown = self._whole_attempts_per_blueprint(
-                invention_job=invention_job, blueprint_type_id=blueprint_type_id,
-                runs_per_bpc=runs_per_bpc, batch_runs=int(effective_runs),
-                max_production_limit=max_production_limit,
-                adjusted_price_map=ctx.adjusted_market_price_map,
-                decryptor=decryptor, invention_context=ctx.invention_context,
-            )
-            if per_bpc_unknown is None and attempts_per_bpc > 0:
-                per_attempt_lines, _ = self._plan_take_or_buy_material_nodes(
-                    self._invention_whole_attempt_requirements(invention_job, 1, decryptor=decryptor),
-                    available_owned_item_quantity_by_type_id={},
-                    owned_item_unit_cost_by_type_id=ctx.owned_item_unit_cost_by_type_id,
-                    sell_price_map=ctx.material_price_map,
-                    adjusted_price_map=ctx.adjusted_market_price_map,
-                )
-                batch_one_invents = requires_invention_chain and missing_top_level_copy_runs > 0
-                invention_bpc_plan = {
-                    "batch_runs": int(effective_runs),
-                    "runs_per_invented_blueprint": runs_per_bpc,
-                    "whole_attempts_per_blueprint": int(attempts_per_bpc),
-                    # Every owned BPC run of this variant, batch 1's included.
-                    "owned_blueprint_runs": max(0, int(available_target_copy_runs)),
-                    "batch_one_invented_blueprints": (
-                        int(math.ceil(missing_top_level_copy_runs / runs_per_bpc)) if batch_one_invents else 0
-                    ),
-                    # The whole attempts batch 1's own invention buys.
-                    "batch_one_whole_attempts": (
-                        int(inv_costs.get("whole_attempts") or 0) if requires_invention_chain else 0
-                    ),
-                    "per_attempt_materials": self._overview_keyed_entries(per_attempt_lines, compactor=lambda e: e),
-                    # Install fees per attempt and per source-copy run:
-                    # the planner's invent / copy actions when batch 1 does
-                    # not invent (activity_breakdown.invention is then absent).
-                    "job_cost_per_attempt": inv_costs.get("job_cost_per_attempt"),
-                    "job_cost_per_attempt_unknown_reason": inv_costs.get("job_cost_per_attempt_unknown_reason"),
-                    "source_copy_job_cost_per_run": inv_costs.get("source_copy_job_cost_per_run"),
-                    "source_copy_job_cost_per_run_unknown_reason": inv_costs.get("source_copy_job_cost_per_run_unknown_reason"),
-                }
-        # Batches 2..N (shopping list only). A later batch differs from batch
-        # 1 when batch 1 spent owned BPC runs (top level or in a sub-build)
-        # that it no longer has, or when its own job straddles two invented
-        # BPCs. Each distinct later batch is then planned on its own
-        # (_plan_extra_batch), quietly: this row logs one WARNING below.
-        extra_batch_schedule: dict[str, Any] | None = None
-        if bool(ctx.build_from_bpc) and not fully_invented:
-            nested_copy_runs_spent = self._blueprint_copy_runs_spent(
-                {t: r for t, r in copy_runs_before_batch_one.items() if int(t) != blueprint_type_id},
-                {t: r for t, r in available_blueprint_copy_runs_by_type_id.items() if int(t) != blueprint_type_id},
-            )
-            sub_build_plan_cache: dict[tuple, dict[str, Any]] = {}
-            with quiet_warnings():
-                extra_batch_schedule = self._later_batch_schedule(
-                    batch_run_layout, batch_runs=effective_runs, batch_one_segments=job_segments,
-                    nested_copy_runs_spent=nested_copy_runs_spent,
-                    plan_for=lambda segments: self._plan_extra_batch(
-                        ctx, manufacturing_job=manufacturing_job, blueprint_type_id=blueprint_type_id,
-                        job_segments=segments, manufacturing_group=rig_groups,
-                        required_skill_entries=manufacturing_skill_entry_list,
-                        # The row's own invention for that batch alone (the
-                        # shopping list's list without an invention_bpc_plan).
-                        own_invention_source=(
-                            batch_run_layout.next_source
-                            if invents_top_level and batch_run_layout.runs_per_blueprint else None
-                        ),
-                        invention_job=invention_job, decryptor=decryptor, max_production_limit=max_production_limit,
-                        sub_build_plan_cache=sub_build_plan_cache,
-                    ),
-                )
-        # Later batches are planned without any nested owned BPC run batch 1
-        # used, even when that BPC has runs left (it may also be counted by
-        # another selected row): over-buy only, and the row says so.
-        later_batch_notes: list[str] = []
-        if extra_batch_schedule is not None:
-            for spare_type_id, spare_runs in sorted(available_blueprint_copy_runs_by_type_id.items()):
-                before = int(copy_runs_before_batch_one.get(spare_type_id, 0) or 0)
-                if int(spare_type_id) == blueprint_type_id or not (0 < int(spare_runs or 0) < before):
-                    continue
-                spare_blueprint = (ctx.blueprint_row_by_type_id.get(int(spare_type_id)) or {}).get("blueprint") or {}
-                spare_name = str((spare_blueprint if isinstance(spare_blueprint, dict) else {}).get("type_name") or spare_type_id)
-                later_batch_notes.append(
-                    f"later batches assume nested BPC runs are spent: {spare_name} has {int(spare_runs)} runs "
-                    f"left after batch 1; the shopping list counts them for its invention unless another "
-                    f"selected row may use them, else batches 2+ may over-buy its sub-build"
-                )
-        invention_procurement_materials_per_extra_batch: list[dict[str, Any]] = []
-        nested_extra_batch_lines: list[dict[str, Any]] = []
-        if extra_batch_schedule is None:
-            # Every later batch repeats batch 1: its full-batch own attempts
-            # plus batch 1's nested sub-build invention.
-            invention_procurement_materials_per_extra_batch, _ = self._plan_take_or_buy_material_nodes(
-                self._merge_invention_requirements([
-                    *self._invention_whole_attempt_requirements(invention_job, top_level_extra_attempts, decryptor=decryptor),
-                    *batch_one_nested_requirements,
-                ]),
-                available_owned_item_quantity_by_type_id={},
-                owned_item_unit_cost_by_type_id=ctx.owned_item_unit_cost_by_type_id,
-                sell_price_map=ctx.material_price_map,
-                adjusted_price_map=ctx.adjusted_market_price_map,
-            )
-            if invention_bpc_plan is not None or batch_one_nested_requirements:
-                nested_extra_batch_lines, _ = self._plan_take_or_buy_material_nodes(
-                    self._merge_invention_requirements(batch_one_nested_requirements),
-                    available_owned_item_quantity_by_type_id={},
-                    owned_item_unit_cost_by_type_id=ctx.owned_item_unit_cost_by_type_id,
-                    sell_price_map=ctx.material_price_map,
-                    adjusted_price_map=ctx.adjusted_market_price_map,
-                )
-        else:
-            datacore_need_unknown_reasons.extend(
-                r for r in extra_batch_schedule.pop("unknown_reasons") if r not in datacore_need_unknown_reasons
-            )
-        # A batch past the owned BPC runs that must invent with unknown odds
-        # marks the row's invention cost unknown (Low confidence via the
-        # pricing step) even when batch 1's own cost is known.
-        extra_only_unknown_reasons = [
-            r for r in datacore_need_unknown_reasons
-            if r not in (invention_cost_unknown_reason or "")
-        ]
-        # Batch 1's cost is exact when every unknown is a later batch's.
-        batch_one_cost_exact = invention_cost_unknown_reason is None
-        if extra_only_unknown_reasons:
-            invention_cost_unknown_reason = "; ".join(
-                [*([invention_cost_unknown_reason] if invention_cost_unknown_reason else []), *extra_only_unknown_reasons]
-            )
-        if extra_only_unknown_reasons:
-            # One WARNING per row: the full-batch evaluations log theirs at
-            # DEBUG, the later-batch plans run quietly, and a batch-1 unknown
-            # already logged "invention cost left unknown" for the row's own
-            # invention.
-            logger.warning(
-                "Product %s: datacore need unknown from batch %s on (%s); "
-                "the shopping list flags it instead of buying 0 datacores",
-                product_type_id, datacore_need_unknown_from_batch, "; ".join(datacore_need_unknown_reasons),
-            )
+        later = self._plan_later_batches(
+            ctx,
+            blueprint_type_id=blueprint_type_id,
+            product_type_id=product_type_id,
+            manufacturing_job=manufacturing_job,
+            rig_groups=rig_groups,
+            manufacturing_skill_entry_list=manufacturing_skill_entry_list,
+            effective_runs=effective_runs,
+            max_production_limit=max_production_limit,
+            fully_invented=fully_invented,
+            has_top_level_invention_path=has_top_level_invention_path,
+            matched_blueprint_originals=matched_blueprint_originals,
+            requires_invention_chain=requires_invention_chain,
+            inv_costs=inv_costs,
+            invention_job=invention_job,
+            decryptor=decryptor,
+            owned_target_copy_runs_used=owned_target_copy_runs_used,
+            available_target_copy_runs=available_target_copy_runs,
+            missing_top_level_copy_runs=missing_top_level_copy_runs,
+            copy_runs_before_batch_one=copy_runs_before_batch_one,
+            available_blueprint_copy_runs_by_type_id=available_blueprint_copy_runs_by_type_id,
+            batch_run_layout=batch_run_layout,
+            job_segments=job_segments,
+            recursive_prerequisite_plan=recursive_prerequisite_plan,
+            invention_cost_unknown_reason=invention_cost_unknown_reason,
+        )
+        datacore_need_unknown_reasons = later["datacore_need_unknown_reasons"]
+        datacore_need_unknown_from_batch = later["datacore_need_unknown_from_batch"]
+        extra_chance = later["extra_chance"]
+        invention_bpc_plan = later["invention_bpc_plan"]
+        extra_batch_schedule = later["extra_batch_schedule"]
+        later_batch_notes = later["later_batch_notes"]
+        invention_procurement_materials_per_extra_batch = later["invention_procurement_materials_per_extra_batch"]
+        nested_extra_batch_lines = later["nested_extra_batch_lines"]
+        invention_cost_unknown_reason = later["invention_cost_unknown_reason"]
+        batch_one_cost_exact = later["batch_one_cost_exact"]
         total_time_seconds += int(recursive_prerequisite_plan.get("time_seconds") or 0)
         if recursive_prerequisite_plan.get("job_cost") is not None:
             total_job_cost += float(recursive_prerequisite_plan.get("job_cost") or 0.0)
@@ -3974,55 +4172,13 @@ class IndustryService(
         if extra_batch_schedule is not None:
             # Shopping list only: batches 2..N, each from its own plan.
             row_out["manufacturing_job"]["extra_batch_schedule"] = extra_batch_schedule
-        if bool(ctx.build_from_bpc):
-            # Read by the shopping list: a row without it is from an older
-            # overview whose later batches repeat batch 1.
-            row_out["manufacturing_job"]["later_batch_plan_version"] = LATER_BATCH_PLAN_VERSION
-            # Batch 1's nested inventions and the owned BPC runs left of
-            # every nested blueprint after batch 1, so the shopping list
-            # carries invented and owned spare runs across batches.
-            batch_one_nested_bpc_plans = self._compact_nested_invention_bpc_plans(
-                ctx, recursive_prerequisite_plan.get("nested_invention_bpc_plans"),
-            )
-            nested_blueprint_ids = {int(p["invented_blueprint_type_id"]) for p in batch_one_nested_bpc_plans}
-            for later_plan in (extra_batch_schedule or {}).get("plans") or []:
-                nested_blueprint_ids |= {
-                    int(p["invented_blueprint_type_id"]) for p in later_plan.get("nested_invention_bpc_plans") or []
-                }
-            nested_blueprint_ids |= {
-                int(t) for t, r in copy_runs_before_batch_one.items()
-                if int(t) > 0 and float(available_blueprint_copy_runs_by_type_id.get(t, 0) or 0) < float(r or 0)
-            }
-            nested_blueprint_ids.discard(int(blueprint_type_id))
-            row_out["manufacturing_job"]["nested_invention_bpc_plans"] = batch_one_nested_bpc_plans
-            # Each row is planned on its own copy of the
-            # owned BPC runs, so the shopping list nets the nested BPC runs
-            # batch 1 spent once across the selected rows.
-            used_nested_runs = {
-                int(t): int(math.ceil(float(r or 0) - float(available_blueprint_copy_runs_by_type_id.get(t, 0) or 0) - 1e-9))
-                for t, r in copy_runs_before_batch_one.items()
-                if int(t) > 0 and int(t) != int(blueprint_type_id)
-                and float(available_blueprint_copy_runs_by_type_id.get(t, 0) or 0) < float(r or 0)
-            }
-            owned_runs_before = {
-                t: max(0, int(math.floor(float(copy_runs_before_batch_one.get(t, 0) or 0) + 1e-9)))
-                for t in used_nested_runs
-            }
-            if owned_target_copy_runs_used > 0:
-                # The row's own top-level BPC runs too, so a
-                # top-level user of a BPC another row nests counts as well.
-                used_nested_runs[int(blueprint_type_id)] = int(owned_target_copy_runs_used)
-                owned_runs_before[int(blueprint_type_id)] = max(0, int(available_target_copy_runs))
-            row_out["manufacturing_job"]["nested_blueprint_runs_used"] = {
-                str(t): used for t, used in sorted(used_nested_runs.items()) if used > 0
-            }
-            row_out["manufacturing_job"]["nested_blueprint_runs_owned"] = {
-                str(t): owned_runs_before[t] for t in sorted(used_nested_runs) if used_nested_runs[t] > 0
-            }
-            row_out["manufacturing_job"]["nested_blueprint_runs_left"] = {
-                str(t): max(0, int(math.floor(float(available_blueprint_copy_runs_by_type_id.get(t, 0) or 0) + 1e-9)))
-                for t in sorted(nested_blueprint_ids)
-            }
+        row_out["manufacturing_job"].update(self._nested_blueprint_run_fields(
+            ctx, blueprint_type_id=blueprint_type_id, recursive_prerequisite_plan=recursive_prerequisite_plan,
+            extra_batch_schedule=extra_batch_schedule, copy_runs_before_batch_one=copy_runs_before_batch_one,
+            available_blueprint_copy_runs_by_type_id=available_blueprint_copy_runs_by_type_id,
+            owned_target_copy_runs_used=owned_target_copy_runs_used,
+            available_target_copy_runs=available_target_copy_runs,
+        ))
         if later_batch_notes:
             # Informational (pricing-confidence reasons): over-buy only.
             row_out["manufacturing_job"]["later_batch_notes"] = later_batch_notes
@@ -4036,19 +4192,9 @@ class IndustryService(
             # Kept out of `materials` and `procurement_materials`: those are the
             # manufacturing job's own buy list, and the daily planner buys the
             # datacores from its separate invent action.
-            keyed_invention_inputs = self._overview_keyed_entries(
-                expected_invention_inputs, compactor=lambda e: e,
+            row_out["manufacturing_job"]["expected_invention_materials"] = self._keyed_expected_invention_inputs(
+                expected_invention_inputs, nested_expected_invention_inputs,
             )
-            # A nested sub-build's inputs are keyed "<type_id>@<invented blueprint>",
-            # so they never overwrite the row's own (or another sub-build's) line.
-            for entry in nested_expected_invention_inputs:
-                base_key = f"{int(entry.get('type_id') or 0)}@{int(entry.get('invented_blueprint_type_id') or 0)}"
-                key, n = base_key, 1
-                while key in keyed_invention_inputs:  # same blueprint invented in two sub-builds
-                    n += 1
-                    key = f"{base_key}#{n}"
-                keyed_invention_inputs[key] = entry
-            row_out["manufacturing_job"]["expected_invention_materials"] = keyed_invention_inputs
         # The hangar stock this row was planned against, for every type on its
         # buy lists (batch 1 and every later batch). Every row of one overview
         # is planned against a copy of the same stock, so the shopping list
