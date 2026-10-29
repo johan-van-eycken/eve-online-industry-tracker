@@ -986,95 +986,39 @@ class IndustryService(
             invention_row_by_blueprint_type_id,
         )
 
-    def _plan_blueprint_chain_for_quantity(
+    def _chain_blueprint_source(
         self,
         *,
-        blueprint_row: dict[str, Any],
         activity: str,
-        desired_product_type_id: int,
+        job: dict[str, Any],
+        blueprint_type_id: int,
+        blueprint_display_name: str,
+        requested_runs: int,
         required_quantity: int,
+        product_quantity_per_run: int,
         build_from_bpc: bool,
-        include_reactions: bool,
-        selected_industry_profile: dict[str, Any] | None,
-        selected_character_modifiers: dict[str, Any] | None,
-        character_skill_levels_by_name: dict[str, int],
+        available_copy_runs: dict[int, Any],
+        matched_blueprint_copies: list[Any],
+        matched_blueprint_originals: list[Any],
+        invention_source_row: dict[str, Any] | None,
+        has_invention_path: bool,
         adjusted_market_price_map: dict[int, dict[str, Any]],
-        sell_price_map: dict[int, dict[str, Any]] | None,
-        blueprint_copy_assets_by_type_id: dict[int, list[Any]],
-        available_blueprint_copy_runs_by_type_id: dict[int, int] | None,
-        available_owned_item_quantity_by_type_id: dict[int, int] | None,
-        invention_valuation_stock: dict[int, Any],
-        owned_item_unit_cost_by_type_id: dict[int, float] | None,
-        blueprint_original_assets_by_type_id: dict[int, list[Any]],
-        character_name_by_id: dict[int, str] | None = None,
-        corporation_name_by_id: dict[int, str] | None = None,
-        manufacturing_row_by_product_type_id: dict[int, dict[str, Any]],
-        reaction_row_by_product_type_id: dict[int, dict[str, Any]],
-        invention_row_by_blueprint_type_id: dict[int, dict[str, Any]],
         invention_context: InventionContext,
-        visited: set[tuple[str, int]] | None = None,
-        depth: int = 0,
-    ) -> dict[str, Any] | None:
-        if depth >= 8 or required_quantity <= 0:
-            return None
-        visit_key = (activity, int(desired_product_type_id))
-        if visited is not None and visit_key in visited:
-            return None
-        next_visited = set(visited or set())
-        next_visited.add(visit_key)
-
-        job = blueprint_row.get(f"{activity}_job") or {}
-        if not isinstance(job, dict):
-            return None
-        products = job.get("products") or []
-        if not isinstance(products, list) or not products:
-            return None
-
-        selected_product = None
-        for product in products:
-            if not isinstance(product, dict):
-                continue
-            if int(product.get("type_id") or 0) == int(desired_product_type_id):
-                selected_product = dict(product)
-                break
-        if selected_product is None:
-            selected_product = dict(products[0]) if isinstance(products[0], dict) else None
-        if selected_product is None:
-            return None
-
-        product_quantity_per_run = max(1, int(selected_product.get("quantity") or 1))
-        requested_runs = max(1, int(math.ceil(float(required_quantity) / float(product_quantity_per_run))))
+    ) -> dict[str, Any]:
+        """Where a sub-build's blueprint runs come from: the owned BPC runs it
+        spends (taken from `available_copy_runs`), a copy or invention for the
+        rest, the BPO, or the SDE fallback; and the runs it then builds."""
         runs = requested_runs
         planned_quantity = required_quantity
-
-        blueprint_type_id = int(blueprint_row.get("blueprint_type_id") or 0)
-        blueprint_payload = blueprint_row.get("blueprint") or {}
-        if not isinstance(blueprint_payload, dict):
-            blueprint_payload = {}
-        blueprint_display_name = str(
-            blueprint_payload.get("type_name")
-            or blueprint_payload.get("name")
-            or blueprint_type_id
-            or "Blueprint"
-        )
         blueprint_material_efficiency = 0
         blueprint_time_efficiency = 0
         blueprint_source_kind = activity
         include_copying_job = False
         include_sde_research_chain = False
-        available_copy_runs = available_blueprint_copy_runs_by_type_id if available_blueprint_copy_runs_by_type_id is not None else {}
-        available_owned_item_quantities = (
-            available_owned_item_quantity_by_type_id if available_owned_item_quantity_by_type_id is not None else {}
-        )
-        owned_item_unit_costs = owned_item_unit_cost_by_type_id or {}
-        matched_blueprint_copies = blueprint_copy_assets_by_type_id.get(blueprint_type_id) or []
-        matched_blueprint_originals = blueprint_original_assets_by_type_id.get(blueprint_type_id) or []
         owned_copy_runs_used = 0
         second_job: tuple[int, int, int, str] | None = None  # (runs, ME, TE, source) of a D3 second job
         bought_past_owned_note: str | None = None  # batch 1 buys the runs past the owned BPC
         missing_blueprint_copy_runs = 0
-        invention_source_row = invention_row_by_blueprint_type_id.get(blueprint_type_id) if activity == "manufacturing" else None
-        has_invention_path = isinstance((invention_source_row or {}).get("invention_job"), dict)
         if activity == "manufacturing":
             if bool(build_from_bpc):
                 # Whole runs only for a job; a fractional remainder an
@@ -1144,8 +1088,6 @@ class IndustryService(
                         )
                     else:
                         include_copying_job = missing_blueprint_copy_runs > 0
-                if runs <= 0:
-                    return None
             else:
                 if matched_blueprint_originals:
                     blueprint_material_efficiency = int(matched_blueprint_originals[0].blueprint_material_efficiency or 0)
@@ -1156,6 +1098,114 @@ class IndustryService(
                     blueprint_time_efficiency = int(self._adm("industry", "max_blueprint_time_efficiency"))
                     blueprint_source_kind = "blueprint_sde_fallback"
                     include_sde_research_chain = True
+
+        return {
+            "runs": runs, "planned_quantity": planned_quantity,
+            "blueprint_material_efficiency": blueprint_material_efficiency,
+            "blueprint_time_efficiency": blueprint_time_efficiency,
+            "blueprint_source_kind": blueprint_source_kind,
+            "include_copying_job": include_copying_job, "include_sde_research_chain": include_sde_research_chain,
+            "owned_copy_runs_used": owned_copy_runs_used, "second_job": second_job,
+            "bought_past_owned_note": bought_past_owned_note,
+            "missing_blueprint_copy_runs": missing_blueprint_copy_runs,
+        }
+
+    def _plan_blueprint_chain_for_quantity(
+        self,
+        *,
+        blueprint_row: dict[str, Any],
+        activity: str,
+        desired_product_type_id: int,
+        required_quantity: int,
+        build_from_bpc: bool,
+        include_reactions: bool,
+        selected_industry_profile: dict[str, Any] | None,
+        selected_character_modifiers: dict[str, Any] | None,
+        character_skill_levels_by_name: dict[str, int],
+        adjusted_market_price_map: dict[int, dict[str, Any]],
+        sell_price_map: dict[int, dict[str, Any]] | None,
+        blueprint_copy_assets_by_type_id: dict[int, list[Any]],
+        available_blueprint_copy_runs_by_type_id: dict[int, int] | None,
+        available_owned_item_quantity_by_type_id: dict[int, int] | None,
+        invention_valuation_stock: dict[int, Any],
+        owned_item_unit_cost_by_type_id: dict[int, float] | None,
+        blueprint_original_assets_by_type_id: dict[int, list[Any]],
+        character_name_by_id: dict[int, str] | None = None,
+        corporation_name_by_id: dict[int, str] | None = None,
+        manufacturing_row_by_product_type_id: dict[int, dict[str, Any]],
+        reaction_row_by_product_type_id: dict[int, dict[str, Any]],
+        invention_row_by_blueprint_type_id: dict[int, dict[str, Any]],
+        invention_context: InventionContext,
+        visited: set[tuple[str, int]] | None = None,
+        depth: int = 0,
+    ) -> dict[str, Any] | None:
+        if depth >= 8 or required_quantity <= 0:
+            return None
+        visit_key = (activity, int(desired_product_type_id))
+        if visited is not None and visit_key in visited:
+            return None
+        next_visited = set(visited or set())
+        next_visited.add(visit_key)
+
+        job = blueprint_row.get(f"{activity}_job") or {}
+        if not isinstance(job, dict):
+            return None
+        products = job.get("products") or []
+        if not isinstance(products, list) or not products:
+            return None
+
+        selected_product = None
+        for product in products:
+            if not isinstance(product, dict):
+                continue
+            if int(product.get("type_id") or 0) == int(desired_product_type_id):
+                selected_product = dict(product)
+                break
+        if selected_product is None:
+            selected_product = dict(products[0]) if isinstance(products[0], dict) else None
+        if selected_product is None:
+            return None
+
+        product_quantity_per_run = max(1, int(selected_product.get("quantity") or 1))
+        requested_runs = max(1, int(math.ceil(float(required_quantity) / float(product_quantity_per_run))))
+        blueprint_type_id = int(blueprint_row.get("blueprint_type_id") or 0)
+        blueprint_payload = blueprint_row.get("blueprint") or {}
+        if not isinstance(blueprint_payload, dict):
+            blueprint_payload = {}
+        blueprint_display_name = str(
+            blueprint_payload.get("type_name")
+            or blueprint_payload.get("name")
+            or blueprint_type_id
+            or "Blueprint"
+        )
+        available_copy_runs = available_blueprint_copy_runs_by_type_id if available_blueprint_copy_runs_by_type_id is not None else {}
+        available_owned_item_quantities = (
+            available_owned_item_quantity_by_type_id if available_owned_item_quantity_by_type_id is not None else {}
+        )
+        owned_item_unit_costs = owned_item_unit_cost_by_type_id or {}
+        matched_blueprint_copies = blueprint_copy_assets_by_type_id.get(blueprint_type_id) or []
+        matched_blueprint_originals = blueprint_original_assets_by_type_id.get(blueprint_type_id) or []
+        invention_source_row = invention_row_by_blueprint_type_id.get(blueprint_type_id) if activity == "manufacturing" else None
+        has_invention_path = isinstance((invention_source_row or {}).get("invention_job"), dict)
+        source = self._chain_blueprint_source(
+            activity=activity, job=job, blueprint_type_id=blueprint_type_id,
+            blueprint_display_name=blueprint_display_name, requested_runs=requested_runs,
+            required_quantity=required_quantity, product_quantity_per_run=product_quantity_per_run,
+            build_from_bpc=build_from_bpc, available_copy_runs=available_copy_runs,
+            matched_blueprint_copies=matched_blueprint_copies, matched_blueprint_originals=matched_blueprint_originals,
+            invention_source_row=invention_source_row, has_invention_path=has_invention_path,
+            adjusted_market_price_map=adjusted_market_price_map, invention_context=invention_context,
+        )
+        if activity == "manufacturing" and bool(build_from_bpc) and source["runs"] <= 0:
+            return None
+        runs, planned_quantity = source["runs"], source["planned_quantity"]
+        blueprint_material_efficiency = source["blueprint_material_efficiency"]
+        blueprint_time_efficiency = source["blueprint_time_efficiency"]
+        blueprint_source_kind = source["blueprint_source_kind"]
+        include_copying_job, include_sde_research_chain = source["include_copying_job"], source["include_sde_research_chain"]
+        owned_copy_runs_used, second_job = source["owned_copy_runs_used"], source["second_job"]
+        bought_past_owned_note = source["bought_past_owned_note"]
+        missing_blueprint_copy_runs = source["missing_blueprint_copy_runs"]
 
         required_skill_entries = [
             dict(skill)
