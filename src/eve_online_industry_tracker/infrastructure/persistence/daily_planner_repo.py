@@ -216,17 +216,6 @@ class DailyPlannerRepository:
     # plan_item_outcome
     # ------------------------------------------------------------------
 
-    def insert_outcome(self, outcome: PlanItemOutcomeModel) -> None:
-        session = self._session_provider.app_session()
-        try:
-            session.add(outcome)
-            session.commit()
-        except Exception:
-            session.rollback()
-            raise
-        finally:
-            session.close()
-
     def get_outcomes(self, type_id: int, limit: int = 20) -> list[PlanItemOutcomeModel]:
         session = self._session_provider.app_session()
         try:

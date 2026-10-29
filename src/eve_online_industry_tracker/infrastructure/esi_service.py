@@ -15,6 +15,8 @@ from eve_online_industry_tracker.infrastructure.esi_client import (
     ESI_REQUEST_ERRORS,
     ESIClient,
     EsiRequestError,
+    _ESI_ERROR_LIMITER,
+    _esi_gate,
     call_esi_monitor,
     esi_total_pages,
 )
@@ -95,8 +97,6 @@ class ESIService:
 
         # { (order_type, region_id, type_id): (timestamp, [orders]) }
         self._type_orders_cache: Dict[tuple, tuple] = {}
-        # Legacy: kept for backwards compatibility; we no longer fetch full region order books.
-        self._region_orders_cache: Dict[tuple, tuple] = {}
         # { (region_id, type_id): (timestamp, [history_rows]) }
         self._market_history_cache: Dict[tuple, tuple] = {}
         # (timestamp, [prices])
@@ -143,12 +143,6 @@ class ESIService:
         left out of the result), or None when it did not fail."""
         region_id = region_id or self._region_id
         return self._fetch_failures("_market_history_failures").get((int(region_id), int(type_id)))
-
-    def set_market_context(self, *, region_id: Optional[int] = None, station_id: Optional[int] = None) -> None:
-        if region_id is not None:
-            self._region_id = region_id
-        if station_id is not None:
-            self._station_id = station_id
 
     def _esi_resilience(self, key: str) -> Any:
         """An esi_resilience admin setting at each request; the schema default
@@ -226,6 +220,8 @@ class ESIService:
                 except (TypeError, ValueError):
                     page = None
             while True:
+                # The error budget is per IP, so public calls wait on and feed the same limiter.
+                _esi_gate(f"GET {endpoint}")
                 request_started_at = time.time()
                 try:
                     response = self._http_session.get(
@@ -234,6 +230,7 @@ class ESIService:
                         timeout=float(timeout_seconds),
                         headers=headers,
                     )
+                    _ESI_ERROR_LIMITER.update_from_headers(getattr(response, "headers", None))
                     _monitor(
                         "record_http_attempt",
                         lambda: dict(

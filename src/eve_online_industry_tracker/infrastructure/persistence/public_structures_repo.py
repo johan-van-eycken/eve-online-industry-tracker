@@ -1,22 +1,14 @@
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Iterable
 
-from sqlalchemy import delete, select
+from sqlalchemy import select
 
 from eve_online_industry_tracker.db_models import PublicStructuresModel
 
 
-def list_by_system_id(
-    session,
-    system_id: int,
-    *,
-    newer_than: datetime | None = None,
-) -> list[PublicStructuresModel]:
+def list_by_system_id(session, system_id: int) -> list[PublicStructuresModel]:
     stmt = select(PublicStructuresModel).where(PublicStructuresModel.system_id == system_id)
-    if newer_than is not None:
-        stmt = stmt.where(PublicStructuresModel.updated_at >= newer_than)
     stmt = stmt.order_by(PublicStructuresModel.structure_name.asc())
     return list(session.execute(stmt).scalars().all())
 
@@ -54,14 +46,3 @@ def upsert_many(session, structures: Iterable[dict]) -> int:
     session.commit()
     return count
 
-
-def delete_by_system_id(session, system_id: int) -> int:
-    result = session.execute(delete(PublicStructuresModel).where(PublicStructuresModel.system_id == system_id))
-    session.commit()
-    return int(getattr(result, "rowcount", 0) or 0)
-
-
-def delete_all(session) -> int:
-    result = session.execute(delete(PublicStructuresModel))
-    session.commit()
-    return int(getattr(result, "rowcount", 0) or 0)

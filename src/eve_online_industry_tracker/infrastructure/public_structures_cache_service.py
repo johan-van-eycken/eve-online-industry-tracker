@@ -47,8 +47,9 @@ def get_cached_public_structures(*, state: Any, system_id: int, ttl_seconds: int
     try:
         _ensure_table_exists(session)
         newer_than = datetime.utcnow() - timedelta(seconds=ttl_seconds)
-        fresh_rows = public_structures_repo.list_by_system_id(session, system_id, newer_than=newer_than)
-        rows = fresh_rows or public_structures_repo.list_by_system_id(session, system_id)
+        # Every known row: a per-system refresh only samples ESI, so older rows are still real structures.
+        rows = public_structures_repo.list_by_system_id(session, system_id)
+        is_fresh = any(r.updated_at is not None and r.updated_at >= newer_than for r in rows)
 
         payload = [
             {
@@ -61,7 +62,7 @@ def get_cached_public_structures(*, state: Any, system_id: int, ttl_seconds: int
             }
             for r in rows
         ]
-        return payload, bool(fresh_rows)
+        return payload, is_fresh
     finally:
         try:
             session.close()
@@ -106,7 +107,6 @@ def refresh_public_structures_for_system(
     session = state.db_app.Session()
     try:
         _ensure_table_exists(session)
-        public_structures_repo.delete_by_system_id(session, system_id)
         written = public_structures_repo.upsert_many(
             session,
             [

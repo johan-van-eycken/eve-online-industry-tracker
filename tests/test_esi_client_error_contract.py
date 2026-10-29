@@ -187,3 +187,30 @@ def test_a_broken_esi_monitor_does_not_fail_a_public_esi_get(monkeypatch, caplog
     with caplog.at_level(logging.WARNING):
         assert svc._public_esi_get("/universe/stations/60003760/") == {"name": "Jita IV - Moon 4"}
     assert any("ESI monitor" in r.getMessage() and "record_http_attempt" in r.getMessage() for r in caplog.records)
+
+
+def test_parallel_calls_with_an_expired_token_refresh_it_once(client, monkeypatch):
+    import threading
+    import time as real_time
+
+    release, refreshes = threading.Event(), []
+
+    def slow_refresh():
+        refreshes.append(1)
+        release.wait(timeout=2)        # keep the refresh in flight while the other threads arrive
+        client.access_token, client.token_expiry = "new", int(real_time.time()) + 1200
+
+    ok = requests.Response()
+    ok.status_code, ok._content = 200, b'[{"x": 1}]'
+    client._http_session = _Session(lambda: ok)
+    client.token_expiry = int(real_time.time()) - 1
+    monkeypatch.setattr(client, "refresh_access_token", slow_refresh)
+
+    threads = [threading.Thread(target=client.esi_get, args=("/x/",), kwargs={"use_cache": False}) for _ in range(6)]
+    for t in threads:
+        t.start()
+    threading.Event().wait(0.2)        # time.sleep is patched out by the fixture
+    release.set()
+    for t in threads:
+        t.join(timeout=5)
+    assert len(refreshes) == 1 and client._http_session.calls == 6

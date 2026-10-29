@@ -205,25 +205,3 @@ def get_rig_effects_for_type_ids(
     return rigs_out
 
 
-def compute_combined_reduction(reductions: Iterable[float]) -> float:
-    """Combine multiplicatively: total = 1 - Π(1 - r_i)."""
-
-    mul = 1.0
-    for r in reductions:
-        try:
-            r_f = float(r or 0.0)
-        except (TypeError, ValueError):
-            continue
-
-        # Defensive normalization:
-        # - Most of our pipeline uses fractions (0.024 == 2.4%).
-        # - Some upstream sources or historical payloads may provide percentages (2.4 == 2.4%).
-        while r_f >= 1.0:
-            r_f /= 100.0
-
-        if r_f <= 0:
-            continue
-        mul *= 1.0 - r_f
-
-    total = 1.0 - mul
-    return max(0.0, min(total, 1.0))

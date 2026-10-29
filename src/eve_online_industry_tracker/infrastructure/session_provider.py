@@ -8,8 +8,6 @@ class SessionProvider(Protocol):
 
     def sde_session(self) -> Any: ...
 
-    def oauth_session(self) -> Any: ...
-
 
 class StateSessionProvider:
     """Session provider backed by the injected app state.
@@ -30,10 +28,4 @@ class StateSessionProvider:
         db = getattr(self._state, "db_sde", None)
         if db is None:
             raise RuntimeError("db_sde not initialized")
-        return db.Session()
-
-    def oauth_session(self) -> Any:
-        db = getattr(self._state, "db_oauth", None)
-        if db is None:
-            raise RuntimeError("db_oauth not initialized")
         return db.Session()

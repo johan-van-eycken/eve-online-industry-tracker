@@ -48,14 +48,6 @@ class DatabaseManager:
         # Thread-local session proxy. Safe with Flask (multi-threaded) and other callers.
         self.session = scoped_session(self.Session)
 
-    def safe_commit(self) -> None:
-        """Commit the current session, rolling back on error."""
-        try:
-            self.session.commit()
-        except Exception as e:
-            self.session.rollback()
-            raise e
-
     def safe_query(self, query_fn, *args, **kwargs):
         """
         Execute a query function safely, rolling back the session if an exception occurs.
