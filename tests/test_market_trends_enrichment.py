@@ -159,3 +159,27 @@ def test_pipeline_and_realized_margin_are_summed_per_type_over_character_and_cor
     assert duplicate["pipeline_total_units"] == 65
     assert (second["pipeline_units_in_jobs"], second["pipeline_units_on_market"]) == (7, 0)
     assert second["historical_realized_margin_pct"] is None  # one sale: too few to average
+
+
+def test_the_price_anomaly_reads_known_history_once(monkeypatch):
+    from eve_online_industry_tracker.application.industry import market_enrichment
+
+    reads = []
+
+    class _CountingHistory:
+        def get_price_stats(self, *, type_id, **kw):
+            reads.append(type_id)
+            return {"has_data": type_id == 34 or reads.count(type_id) > 1, "avg_7d": 5.0}
+
+        def fetch_and_store_history(self, **kw):
+            return None
+
+    monkeypatch.setattr(market_enrichment, "MarketPricingService", _Pricing)
+    monkeypatch.setattr(market_enrichment, "MarketHistoryService", lambda **kw: _CountingHistory())
+    svc = IndustryService(state=SimpleNamespace(esi_service=None, admin_settings=None), sessions=None)
+
+    rows = svc._enrich_product_rows_with_price_anomaly(
+        [{"type_id": 34, "market_unit_price": 5.0}, {"type_id": 35, "market_unit_price": 5.0}], market_hub="jita")
+
+    assert sorted(reads) == [34, 35, 35]  # 35 had no history: read, fetched, read again
+    assert [r["history_7d_avg"] for r in rows] == [5.0, 5.0]

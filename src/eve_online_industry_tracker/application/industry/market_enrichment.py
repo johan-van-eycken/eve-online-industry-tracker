@@ -373,15 +373,23 @@ class MarketEnrichmentMixin:
             if isinstance(row, dict) and int(row.get("type_id") or 0) > 0
         })
 
-        # Fetch ESI history for any type_id not yet in the DB (runs once; subsequent calls hit the DB)
-        missing: list[int] = []
-        for tid in type_ids:
-            stats = history_service.get_price_stats(type_id=tid, region_id=region_id, days=60)
-            if not stats.get("has_data"):
-                missing.append(tid)
-
         # Why a type has no history to compare with: shown on its row, not a silent skip.
         history_unavailable: dict[int, str] = {}
+        # Fetch ESI history for any type_id not yet in the DB (runs once; subsequent calls hit the DB)
+        price_stats: dict[int, dict[str, Any]] = {}
+        missing: list[int] = []
+        for tid in type_ids:
+            try:
+                price_stats[tid] = history_service.get_price_stats(type_id=tid, region_id=region_id, days=60)
+            except SQLAlchemyError as exc:
+                logger.warning("Price anomaly: the price stats of type_id=%s cannot be read (%s); no anomaly check for "
+                               "it", tid, exc)
+                price_stats[tid] = {"has_data": False}
+                history_unavailable.setdefault(tid, f"price stats unreadable (DB error: {type(exc).__name__})")
+                continue
+            if not price_stats[tid].get("has_data"):
+                missing.append(tid)
+
         if missing:
             with ThreadPoolExecutor(max_workers=20) as pool:
                 futures = {
@@ -398,9 +406,8 @@ class MarketEnrichmentMixin:
                     if reason:
                         history_unavailable[futures[f]] = str(reason)
 
-        # Load price stats for all type_ids
-        price_stats: dict[int, dict[str, Any]] = {}
-        for tid in type_ids:
+        # Re-read only the types whose history was just fetched
+        for tid in missing:
             try:
                 price_stats[tid] = history_service.get_price_stats(type_id=tid, region_id=region_id, days=60)
             except SQLAlchemyError as exc:
