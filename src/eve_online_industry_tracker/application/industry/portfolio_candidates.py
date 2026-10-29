@@ -334,7 +334,6 @@ class PortfolioCandidatesMixin:
             "liquidity_indicator": cls._calculate_liquidity_indicator(
                 hub_sell_liquidity=cls._optional_int(row, "hub_sell_liquidity"),
                 region_daily_volume_7d_avg=cls._as_float(region_daily_volume_7d_avg),
-                hub_sell_orders=cls._optional_int(row, "hub_sell_order_count"),
             ),
             "liquidity_score": cls._calculate_liquidity_score(
                 hub_sell_liquidity=cls._optional_int(row, "hub_sell_liquidity"),

@@ -335,7 +335,6 @@ class MarketEnrichmentMixin:
             row["liquidity_indicator"] = self._calculate_liquidity_indicator(
                 hub_sell_liquidity=hub_sell_liquidity,
                 region_daily_volume_7d_avg=region_daily_volume_7d_avg,
-                hub_sell_orders=hub_sell_orders,
             )
             row["liquidity_score"] = self._calculate_liquidity_score(
                 hub_sell_liquidity=hub_sell_liquidity,
@@ -1406,7 +1405,7 @@ class MarketEnrichmentMixin:
             return None
 
     @staticmethod
-    def _calculate_sell_through_rate(region_daily_volume_7d_avg: float | None, hub_sell_liquidity: int) -> float | None:
+    def _calculate_sell_through_rate(region_daily_volume_7d_avg: float | None, hub_sell_liquidity: int | None) -> float | None:
         """Calculate Sell-Through Rate (%) = (Region Daily Volume 7d avg / Hub Sell Liquidity) * 100"""
         try:
             if region_daily_volume_7d_avg is None or hub_sell_liquidity is None or hub_sell_liquidity <= 0:
@@ -1416,7 +1415,7 @@ class MarketEnrichmentMixin:
             return None
 
     @staticmethod
-    def _calculate_liquidity_indicator(hub_sell_liquidity: int | None, region_daily_volume_7d_avg: float | None, hub_sell_orders: int | None) -> str:
+    def _calculate_liquidity_indicator(hub_sell_liquidity: int | None, region_daily_volume_7d_avg: float | None) -> str:
         """Calculate liquidity indicator based on DOS ranges: Very High, High, Medium, Low, Very Low;
         Unknown when the hub liquidity or the region volume is unknown."""
         try:
@@ -1456,10 +1455,10 @@ class MarketEnrichmentMixin:
 
             dos = float(hub_sell_liquidity) / float(region_daily_volume_7d_avg)
 
-            # DOS score: lower DOS is better (1 day = 100, 30 days = 0, linear scale)
+            # DOS score: lower DOS is better (0 days = 100, 30+ days = 0, linear)
             dos_score = max(0.0, min(100.0, 100.0 - (dos / 30.0 * 100.0)))
 
-            # Order count score: more orders is better (log scale, 100 orders = 100)
+            # Order count score: more orders is better (linear, 100+ orders = 100)
             order_count_score = min(100.0, (float(hub_sell_orders) / 100.0) * 100.0) if hub_sell_orders > 0 else 0.0
 
             # Combined score: 70% DOS, 30% order count
