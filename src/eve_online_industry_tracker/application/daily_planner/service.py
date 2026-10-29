@@ -22,8 +22,7 @@ from eve_online_industry_tracker.application.daily_planner.action_plan_builder i
 from eve_online_industry_tracker.application.daily_planner.chain_planner import NOT_BUILT_STAGE, ChainPlanner
 from eve_online_industry_tracker.application.daily_planner.character_assigner import (
     CharacterAssigner,
-    manufacture_skill_block,
-    pilot_skill_levels,
+    _SkillGate,
     sole_blueprint_owners,
 )
 from eve_online_industry_tracker.application.daily_planner.feedback_processor import FeedbackProcessor
@@ -944,16 +943,19 @@ class DailyPlannerService:
         When the only free blueprints of its type are pilots' own (owner-bound
         in the ledger, Task A) only those owners count: "not built: owner X
         lacks the skills: ...". CharacterAssigner applies the same rule
-        (manufacture_skill_block's helpers) to every job it assigns."""
-        pilots = pilot_skill_levels(self._character_assigner._get_characters(self._characters))
-        blueprint_data = phase1["blueprint_data"]
+        (_SkillGate) to every job it assigns."""
+        assigner = self._character_assigner
+        gate = _SkillGate(phase1["blueprint_data"], assigner._compute_available_slots(
+            assigner._get_characters(self._characters), [], _now(),
+        ))
         bpos, bpcs = phase1["bpo_assets_by_type_id"], phase1["bpc_assets_by_type_id"]
         busy = {int(i) for i in phase1.get("busy_blueprint_item_ids") or ()}
         for decision in decisions:
             if decision.decision != "build":
                 continue
-            owners = sole_blueprint_owners(orow.get_blueprint_type_id(decision.overview_row), bpos, bpcs, busy)
-            blocked = manufacture_skill_block(decision.overview_row, blueprint_data, pilots, owners)
+            blueprint_type_id = orow.get_blueprint_type_id(decision.overview_row)
+            owners = sole_blueprint_owners(blueprint_type_id, bpos, bpcs, busy)
+            _qualified, blocked = gate.for_owners(blueprint_type_id, "manufacturing", owners or [])
             if blocked is None:
                 continue
             logger.info("DailyPlannerService: type_id=%s not built: %s", decision.type_id, blocked)
@@ -1203,30 +1205,43 @@ class DailyPlannerService:
             session.close()
 
     def _get_corp_assets(self) -> list[Any]:
-        """Get corp assets.
+        """The assets of the known pilots' corporations: the producer's rule
+        for its "all" scopes (IndustryService._resolve_scope_owner_ids). A
+        corporation no known pilot is in any more is not planned from.
 
         No error handler: an empty list would mean "the corp owns no BPOs and
         no stock", and the plan would tell the user to buy both. A failed
         query must fail the compute (see _get_industry_jobs).
         """
+        corporation_ids = sorted({
+            int(c["corporation_id"]) for c in self._character_assigner._get_characters(self._characters)
+            if c.get("corporation_id")
+        })
         session = self._session_provider.app_session()
         try:
             from eve_online_industry_tracker.infrastructure.models import CorporationAssetsModel
-            return session.query(CorporationAssetsModel).all()
+            return session.query(CorporationAssetsModel).filter(
+                CorporationAssetsModel.corporation_id.in_(corporation_ids)
+            ).all()
         finally:
             session.close()
 
     def _get_character_blueprint_assets(self) -> list[Any]:
-        """Every pilot's blueprint assets: the producer's owned-blueprint
-        source for its default scope (blueprints_repo.get_character_blueprints).
+        """The known pilots' blueprint assets: the producer's owned-blueprint
+        source for its default scope (IndustryService._resolve_scope_owner_ids,
+        "all_characters"). A removed pilot's leftover rows are not planned.
 
         No error handler (like _get_corp_assets): an empty list would plan a
         row the producer priced from a pilot's blueprint as not built, or
         tell the user to buy a blueprint a pilot owns."""
+        character_ids = [
+            int(c["character_id"]) for c in self._character_assigner._get_characters(self._characters)
+            if c.get("character_id")
+        ]
         session = self._session_provider.app_session()
         try:
             from eve_online_industry_tracker.infrastructure.persistence import blueprints_repo
-            return list(blueprints_repo.get_character_blueprints(session))
+            return list(blueprints_repo.get_character_blueprint_assets_for_ids(session, character_ids))
         finally:
             session.close()
 

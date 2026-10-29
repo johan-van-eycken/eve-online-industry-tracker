@@ -19,10 +19,10 @@ from test_daily_planner_assignment import _AdminStub, _Chars, _char, _decision, 
 
 from eve_online_industry_tracker.application.daily_planner.character_assigner import (
     CharacterAssigner,
-    manufacture_skill_block,
-    pilot_skill_levels,
+    _SkillGate,
 )
 from eve_online_industry_tracker.application.daily_planner.models import ChainPlan
+from eve_online_industry_tracker.application.daily_planner.values import utc_now
 from eve_online_industry_tracker.application.industry.character_slots import (
     activity_skill_requirements,
     skill_shortfall,
@@ -323,13 +323,15 @@ def test_the_sde_loader_carries_every_activitys_skills():
 # ── the decision gate ────────────────────────────────────────────────────────
 
 def test_the_decision_gate_names_the_missing_skills():
-    pilots = pilot_skill_levels([_alpha(), _other(), {**_alpha(), "character_id": 9, "industry_enabled": False}])
-    assert [name for name, _levels in pilots.values()] == ["Pilot Alpha", "Other"]
-    assert manufacture_skill_block(_row(ALGID, ALGID_BP), BLUEPRINTS, pilots) == (
-        "no pilot has the skills: Energy Weapon Rigging 4 (best: Pilot Alpha at 2)"
+    def gate(chars):
+        return _SkillGate(BLUEPRINTS, CharacterAssigner()._compute_available_slots(chars, [], utc_now()))
+
+    alpha_other = gate([_alpha(), _other(), {**_alpha(), "character_id": 9, "industry_enabled": False}])
+    assert alpha_other.for_owners(ALGID_BP, "manufacturing", []) == (
+        frozenset(), "no pilot has the skills: Energy Weapon Rigging 4 (best: Pilot Alpha at 2)"
     )
-    skilled = pilot_skill_levels([_pilot(3, "Skilled", _skill("Energy Weapon Rigging", 4, EWR))])
-    assert manufacture_skill_block(_row(ALGID, ALGID_BP), BLUEPRINTS, skilled) is None
+    skilled = gate([_pilot(3, "Skilled", _skill("Energy Weapon Rigging", 4, EWR))])
+    assert skilled.for_owners(ALGID_BP, "manufacturing", []) == (frozenset({3}), None)
 
 
 def _phase1(bpos=None, bpcs=None, busy=()):

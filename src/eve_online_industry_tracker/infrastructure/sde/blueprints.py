@@ -78,7 +78,7 @@ def get_blueprint_manufacturing_data(
     for bp in blueprints:
         blueprint_type_id_set.add(bp.blueprintTypeID)
         activities = bp.activities if isinstance(bp.activities, dict) else {}
-        for activity in _SKILL_ACTIVITIES:
+        for activity in SDE_ACTIVITIES:
             for skill in _activity_skill_list(activities, activity):
                 try:
                     skill_type_ids.add(int(skill["typeID"]))
@@ -335,15 +335,16 @@ def get_blueprint_manufacturing_data(
                         for skill in _activity_skill_list(activities, activity)
                     ) if enriched is not None
                 ]
-                for activity in _SKILL_ACTIVITIES if isinstance(activities.get(activity), dict)
+                for activity in SDE_ACTIVITIES if isinstance(activities.get(activity), dict)
             },
         }
 
     return result
 
 
-#: The blueprint activities whose required skills activity_skills carries.
-_SKILL_ACTIVITIES = ("manufacturing", "reaction", "invention", "copying", "research_material", "research_time")
+#: The SDE blueprint activities: the activity_skills keys of
+#: get_blueprint_manufacturing_data.
+SDE_ACTIVITIES = ("manufacturing", "reaction", "invention", "copying", "research_material", "research_time")
 
 
 def _activity_skill_list(activities: dict[str, Any], activity: str) -> list[dict[str, Any]]:
