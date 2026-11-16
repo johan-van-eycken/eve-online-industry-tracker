@@ -414,6 +414,22 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
                 "label": "Corp wallet reserve %",
                 "help": "Share of the corp wallet the planner never spends.",
             },
+            "planner_min_bpc_stock": {
+                "type": "int",
+                "default": 3,
+                "min": 0,
+                "max": 50,
+                "label": "Minimum BPCs in stock per owned BPO",
+                "help": "Leftover research slots copy an owned BPO with fewer BPCs than this (jobs in progress count).",
+            },
+            "planner_min_invented_bpc_stock": {
+                "type": "int",
+                "default": 3,
+                "min": 0,
+                "max": 50,
+                "label": "Minimum invented BPCs in stock per inventable T2",
+                "help": "Leftover research slots invent a T2 blueprint, inventable from an owned BPO, with fewer BPCs than this.",
+            },
             "planner_min_margin_pct": {
                 "type": "float",
                 "default": 10.0,

@@ -29,9 +29,13 @@ from eve_online_industry_tracker.application.daily_planner.assigned_invention im
     assigned_invention_lanes,
     invention_probability_floor,
 )
+from eve_online_industry_tracker.application.daily_planner import blueprint_stock as _stock
 from eve_online_industry_tracker.application.daily_planner.blueprint_ledger import BlueprintLedger
 from eve_online_industry_tracker.application.daily_planner.chain_planner import (
     NOT_BUILT_STAGE,
+    _copy_seconds,
+    _max_runs_per_job,
+    build_invention_source_index,
     build_product_to_blueprint_index,
 )
 from eve_online_industry_tracker.application.daily_planner.input_row import require_batch_runs
@@ -112,6 +116,7 @@ class CharacterAssigner:
         # shortcut: None = unlimited for the 57 existing test calls; the service always passes a budget
         budget: WalletBudget | None = None,
         corp_material_stock: dict[int, int] | None = None,
+        blueprint_stock: dict[str, Any] | None = None,
     ) -> list[AssignedAction]:
         """Return list of AssignedAction for all planned jobs.
 
@@ -123,7 +128,9 @@ class CharacterAssigner:
         budget: the corp wallet left for jobs. Each manufacture is charged
         its install fee plus the inputs to buy after `corp_material_stock`
         (consumed in assignment order), its runs cut to what is affordable
-        (_BuildCharger)."""
+        (_BuildCharger).
+        blueprint_stock: phase 1's blueprint indexes and the two stock
+        minimums, for the stock pass (_stock_pass); None skips it."""
         now = _now()
         self.free_slots_after = {}
 
@@ -305,6 +312,15 @@ class CharacterAssigner:
                 with_science.add(id(decision))
                 assigned_actions.extend(actions)
 
+        # Stock pass: research slots still free keep a minimum of BPCs.
+        stock_dropped: dict[int, str] = {}
+        if blueprint_stock is not None:
+            assigned_actions.extend(self._stock_pass(
+                chain_plan, industry_jobs, blueprint_stock, assigned_actions, char_slots, characters,
+                skill_gate, bpc_pool, blueprint_data=blueprint_data, budget=budget,
+                probability_floor=probability_floor, price_map=price_map or {}, stock_dropped=stock_dropped,
+            ))
+
         if fell_back:
             _reword_unused_research_claims(chain_plan.decisions, assigned_actions, fell_back)
         _reword_released_bpcs(chain_plan.decisions, bpc_pool)
@@ -317,7 +333,9 @@ class CharacterAssigner:
                 "manufacturing": int(slot["free_mfg"]),
                 "science": int(slot["free_research"]),
                 "manufacturing_reason": mfg_reason if slot["free_mfg"] > 0 else None,
-                "science_reason": (blocked or dropped.get(cid, "no eligible job")) if slot["free_research"] > 0 else None,
+                "science_reason": (
+                    blocked or stock_dropped.get(cid) or dropped.get(cid, "no eligible job")
+                ) if slot["free_research"] > 0 else None,
             }
             for cid, slot in char_slots.items()
         }
@@ -458,6 +476,188 @@ class CharacterAssigner:
         used_bpos.update(reserved_bpos)
         bpc_pool.setdefault("copy_used", {}).setdefault(int(decision.type_id), []).extend(reserved_bpos)
         return copies
+
+    def _stock_pass(
+        self, chain_plan: Any, industry_jobs: list[Any], stock: dict[str, Any], planned: list[AssignedAction],
+        char_slots: dict[int, dict[str, Any]], characters: list[dict[str, Any]], skill_gate: _SkillGate,
+        bpc_pool: dict[str, Any], *, blueprint_data: Any, budget: WalletBudget | None, probability_floor: float,
+        price_map: dict[int, Any], stock_dropped: dict[int, str],
+    ) -> list[AssignedAction]:
+        """Copy and invent jobs on the research slots still free (design
+        section 7): owned BPOs with fewer than `min_bpc` BPCs, and T2
+        blueprints inventable from an owned BPO with fewer than
+        `min_invented`, counting running jobs and this plan's own copy /
+        invent actions as stock. Best gap first (blueprint_stock.rank_gaps);
+        each job charged to what builds and science left (budget.charge)."""
+        bpos = stock.get("bpo_assets_by_type_id") or {}
+        bpcs = stock.get("bpc_assets_by_type_id") or {}
+        # No owned BPO: no gap of either kind.
+        if not bpos or not any(int(s.get("free_research", 0)) > 0 for s in char_slots.values()):
+            return []
+        top = {int(d.type_id): d for d in chain_plan.decisions if not d.is_sub_component}
+        bp_of = {**build_product_to_blueprint_index(blueprint_data), **{
+            t: bp for t, d in top.items() if (bp := orow.get_blueprint_type_id(d.overview_row)) is not None
+        }}
+        product_of = {bp: t for t, bp in bp_of.items()}
+        sources = build_invention_source_index(blueprint_data)
+
+        def _probability(bp: int) -> float | None:
+            decision = top.get(product_of.get(bp))  # type: ignore[arg-type]
+            return _stock.overview_probability(decision.overview_row) if decision is not None else None
+
+        in_progress = _stock.count_in_progress(industry_jobs, _probability)
+        for action in planned:
+            if action.action_type == "copy":
+                target, gain = int(action.type_id), float(action.quantity or 1)
+            elif action.action_type == "invent" and int(action.type_id) in bp_of:
+                p = action.invention_probability
+                target = bp_of[int(action.type_id)]
+                gain = (action.runs or 0) * (p if p is not None else 1.0)
+            else:
+                continue
+            in_progress[target] = in_progress.get(target, 0.0) + gain
+
+        # Every blueprint a job or this plan already uses is not free.
+        ledger = BlueprintLedger(bpos, bpcs)
+        taken: set[Any] = {int(i) for i in stock.get("busy_blueprint_item_ids") or ()}
+        for decision in top.values():
+            claims = decision.overview_row.get("ledger_claims")
+            if isinstance(claims, dict):
+                taken.update(k for keys in claims.values() for k in keys or ())
+        taken.update(bpc_pool.get("bpos") or ())
+        taken.update(bpc_pool.get("bpcs") or ())
+        taken.update(a.blueprint_item_id for a in planned if a.blueprint_item_id is not None)
+        # A placeholder key (a row without item ids) may be any blueprint of
+        # its type; a sub-build uses one of its BPOs without a claim.
+        blocked = {k[1] for k in taken if isinstance(k, tuple) and len(k) >= 2}
+        blocked.update(bp_of.get(int(a.type_id)) for a in planned if a.action_type == "sub_manufacture")
+
+        gaps = _stock.stock_gaps(
+            bpo_type_ids=bpos.keys(), bpc_counts={int(t): len(ledger.free_bpcs(int(t))) for t in bpcs},
+            in_progress=in_progress, invention_source_index=sources,
+            min_bpc=int(stock["min_bpc"]), min_invented=int(stock["min_invented"]), product_of=product_of.get,
+        )
+        # The T1 copy fee is on the overview rows of the T2 products it invents into.
+        fee_rows: dict[int, dict[str, Any]] = {}
+        for t, decision in top.items():
+            src = sources.get(bp_of.get(t))  # type: ignore[arg-type]
+            if src is not None and (src not in fee_rows or orow.get_source_copy_fee_per_run(fee_rows[src]) is None):
+                fee_rows[src] = decision.overview_row
+
+        def _skip(gap: _stock.StockGap, why: str) -> list[AssignedAction]:
+            logger.info("CharacterAssigner: no stock %s of blueprint %s today: %s", gap.kind, gap.blueprint_type_id, why)
+            return []
+
+        out: list[AssignedAction] = []
+        for gap in _stock.rank_gaps(gaps, top):
+            if not any(int(s.get("free_research", 0)) > 0 for s in char_slots.values()):
+                break
+            note = f"stock: {gap.have:g} of {gap.want} BPCs"
+            bp = gap.blueprint_type_id
+            if gap.kind == "copy":
+                row = fee_rows.get(bp)
+                max_runs = _max_runs_per_job(blueprint_data.get(bp) or {})
+                qualified, gate = skill_gate.check(bp, "copying")
+                free = [] if bp in blocked else [k for k, _a in ledger.free_bpos_to_copy(bp) if k not in taken]
+                if row is None:
+                    why = "no product overview row carries its copy fee"
+                elif orow.get_source_copy_fee_per_run(row) is None:
+                    reason = orow.get_invention_fee_unknown_reason(row, "source_copy_job_cost_per_run")
+                    why = f"copy fee unknown ({reason or 'no reason recorded'})"
+                elif max_runs is None:
+                    why = "SDE max runs per copy unknown"
+                else:
+                    why = gate or (None if free else "no free BPO")
+                if why is not None or row is None or max_runs is None:
+                    out.extend(_skip(gap, why or ""))
+                    continue
+                owners = {k: o for k in free if (o := ledger.owner_of(k)) is not None}
+                reserved, reserved_bpos, _b, _u = self._reserve_owned_copy_pilots(char_slots, row, free, owners, qualified)
+                for char_id, _name in reserved[1:]:
+                    self._release_slot(char_slots, char_id, "copy")
+                if not reserved:
+                    out.extend(_skip(gap, "no free pilot with the copying skills"))
+                    continue
+                secs = _copy_seconds(blueprint_data.get(bp) or {})
+                copies = math.ceil(gap.want - gap.have - 1e-9)
+                jobs = _shape_copy_jobs(copies * max_runs, [max_runs], 1, max_runs, secs)
+                product = top.get(gap.product_type_id)  # type: ignore[arg-type]
+                name = product.type_name if product is not None else str(
+                    (blueprint_data.get(bp) or {}).get("type_name") or f"Blueprint {bp}"
+                )
+                (action,) = self._copy_actions(
+                    {**row, "t1_max_runs_per_copy": max_runs, "t1_copy_seconds_per_run": secs},
+                    gap.product_type_id or bp, name, bp, reserved[:1], jobs, note, max_runs_per_copy=max_runs,
+                )
+                if not self._charge_stock(action, budget, stock_dropped):
+                    self._release_slot(char_slots, action.character_id, "copy")
+                    continue
+                taken.add(reserved_bpos[0])
+                bpc_pool.setdefault("bpos", set()).add(reserved_bpos[0])
+                out.append(action)
+                continue
+            decision = top.get(gap.product_type_id)  # type: ignore[arg-type]
+            src = int(gap.source_blueprint_type_id or 0)
+            qualified, gate = skill_gate.check(src, "invention")
+            entries = [] if src in blocked else [e for e in ledger.free_bpcs(src) if e[0] not in taken and e[2] > 0]
+            if decision is None:
+                why = "no product overview row"
+            elif _stock.overview_probability(decision.overview_row) is None:
+                why = "invention probability unknown"
+            else:
+                why = gate or (None if entries else "no free T1 BPC")
+            if why is not None or decision is None:
+                out.extend(_skip(gap, why or ""))
+                continue
+            row = decision.overview_row
+            owners = {e[1]: o for e in entries if e[1] is not None and (o := ledger.owner_of(e[0])) is not None}
+            results, _free = self._invention_results(
+                char_slots, characters, row, probability_floor=probability_floor, price_map=price_map,
+                max_lanes=len(entries), bpc_owners=[owners.get(e[1]) if e[1] is not None else None for e in entries],
+                qualified=qualified,
+            )
+            remaining = gap.want - gap.have
+            for char_id, invention, bpc in _lanes_on_bpcs(results, entries, owners):
+                p = invention.probability
+                if remaining <= 0:
+                    break
+                if p is None or p <= 0 or invention.whole_attempts is None:
+                    out.extend(_skip(gap, invention.reason or "invention attempts unknown"))
+                    continue
+                invention = _cap_lane(invention, math.ceil(remaining / p - 1e-9), f"the {remaining:g} BPC(s) the stock lacks")
+                action = self._invent_action(
+                    row, decision.type_id, decision.type_name, char_id,
+                    str(char_slots[char_id].get("character_name") or ""), invention, orow.get_invention_decryptor(row),
+                )
+                if bpc[1] is not None:
+                    action.blueprint_item_id = bpc[1]
+                    action.notes = f"{action.notes}; from T1 BPC item {bpc[1]} ({_count(bpc[2], 'run', 'runs')})"
+                action.notes = f"{action.notes}; {note}"
+                if not self._charge_stock(action, budget, stock_dropped):
+                    continue
+                self._take_slot(char_slots, char_id, "invent")
+                taken.add(bpc[0])
+                bpc_pool.setdefault("bpcs", set()).add(bpc[0])
+                remaining -= (action.runs or 0) * p
+                out.append(action)
+        return out
+
+    @staticmethod
+    def _charge_stock(action: AssignedAction, budget: WalletBudget | None, stock_dropped: dict[int, str]) -> bool:
+        """Charge a stock job (science_cost) to what is left of the wallet;
+        False (nothing charged, the pilot's reason set) when its cost is
+        unknown or does not fit. No budget: unlimited, but never unknown."""
+        cost = science_cost(action)
+        cid = int(action.character_id)
+        if cost is None:
+            why = f"{action.action_type} cost unknown ({action.estimated_job_fee_unknown_reason or 'fee or inputs unpriced'})"
+            stock_dropped.setdefault(cid, f"no science today: {why}")
+        elif budget is None or budget.charge(cost):
+            return True
+        else:
+            why = stock_dropped[cid] = budget.blocked_reason or "wallet"
+        logger.info("CharacterAssigner: no stock %s of type_id=%s today: %s", action.action_type, action.type_id, why)
+        return False
 
     def _take_slot(self, char_slots: dict[int, dict], char_id: int, action_type: str) -> None:
         """Consume one slot immediately, so sibling actions cannot reuse it."""

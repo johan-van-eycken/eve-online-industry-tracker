@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 from eve_online_industry_tracker.application.corporations.corporation_manager import CorporationRefreshError
 from eve_online_industry_tracker.application.daily_planner.action_plan_builder import ActionPlanBuilder
+from eve_online_industry_tracker.application.daily_planner.admin_setting import schema_default
 from eve_online_industry_tracker.application.daily_planner.models import ChainPlan
 from eve_online_industry_tracker.application.daily_planner.service import DailyPlannerService
 from eve_online_industry_tracker.application.daily_planner.shopping_list_builder import ShoppingListBuilder
@@ -22,6 +23,15 @@ import test_blueprint_ledger as L
 import test_chain_planner_keying as K
 import test_daily_planner_assigned_inventor as INV
 import test_daily_planner_release_replan as R
+
+
+class _StockAdmin(_AdminStub):
+    """_AdminStub, with the blueprint stock minimums at their schema defaults."""
+
+    def get(self, section, key, default=None):
+        if key in ("planner_min_bpc_stock", "planner_min_invented_bpc_stock"):
+            return schema_default(section, key)
+        return super().get(section, key, default)
 
 PAID = {"manufacture", "sub_manufacture", "me_research", "te_research", "copy", "invent"}
 
@@ -61,6 +71,7 @@ def _plan_actions(svc, budget, decisions):
         "wallet_budget": budget, "corp_material_stock": {},
         "industry_jobs": [], "price_map": PRICES, "market_depth_cache": PRICES,
         "blueprint_data": NO_SKILL_REQUIREMENTS, "corp_assets": [],
+        "bpo_assets_by_type_id": {}, "bpc_assets_by_type_id": {},
     }
     chain = ChainPlan(decisions=decisions)
     assigned = svc._phase_6_assign(chain, phase1)
@@ -90,7 +101,7 @@ def test_plan_never_exceeds_budget():
     svc = DailyPlannerService(
         industry_service=SimpleNamespace(), corporations_service=SimpleNamespace(),
         characters_service=_Chars([_char(1), _char(2)]), sales_history_service=SimpleNamespace(),
-        market_pricing_service=SimpleNamespace(), repo=SimpleNamespace(), admin_settings=_AdminStub(),
+        market_pricing_service=SimpleNamespace(), repo=SimpleNamespace(), admin_settings=_StockAdmin(),
         session_provider=SimpleNamespace(),
     )
     decisions = [_parent(type_id=100, runs=50), _parent(type_id=200, runs=20)]
@@ -193,7 +204,7 @@ def test_plan_never_exceeds_budget_with_subs_stock_and_science():
         industry_service=SimpleNamespace(), corporations_service=SimpleNamespace(),
         characters_service=_Chars([R._pilot(1, "P1", INV.ENCRYPTION, lab=2, mass=4)]),
         sales_history_service=SimpleNamespace(), market_pricing_service=SimpleNamespace(),
-        repo=SimpleNamespace(), admin_settings=_AdminStub(), session_provider=SimpleNamespace(),
+        repo=SimpleNamespace(), admin_settings=_StockAdmin(), session_provider=SimpleNamespace(),
     )
     svc._meta_resolver = _NoBlueprints()
     balance = 4_790.0
@@ -201,6 +212,7 @@ def test_plan_never_exceeds_budget_with_subs_stock_and_science():
         "wallet_budget": WalletBudget(balance=balance, reserve_pct=0), "corp_material_stock": {54321: 300},
         "industry_jobs": [], "price_map": prices, "market_depth_cache": prices,
         "blueprint_data": NO_SKILL_REQUIREMENTS, "corp_assets": [{"type_id": 54321, "quantity": 300}],
+        "bpo_assets_by_type_id": {}, "bpc_assets_by_type_id": {},
     }
     assigned = svc._phase_6_assign(chain, phase1)
     phase1["blueprint_data"] = blueprints

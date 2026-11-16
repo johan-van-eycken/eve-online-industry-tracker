@@ -1026,6 +1026,14 @@ class DailyPlannerService:
             blueprint_data=phase1["blueprint_data"],
             budget=phase1["wallet_budget"],
             corp_material_stock=phase1["corp_material_stock"],
+            # Leftover research slots keep a minimum blueprint stock.
+            blueprint_stock={
+                "bpo_assets_by_type_id": phase1["bpo_assets_by_type_id"],
+                "bpc_assets_by_type_id": phase1["bpc_assets_by_type_id"],
+                "busy_blueprint_item_ids": phase1.get("busy_blueprint_item_ids") or set(),
+                "min_bpc": int(_adm(self._admin, "planner_min_bpc_stock")),
+                "min_invented": int(_adm(self._admin, "planner_min_invented_bpc_stock")),
+            },
         )
 
     def _phase_7_shopping(
