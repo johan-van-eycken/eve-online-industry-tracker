@@ -207,6 +207,37 @@ balance stays and is shown and planned with as if it were current.
   unknown one: no paid job, and the status bar says the wallet is stale and
   since when.
 
+### 7. Blueprint stock pass (phase 6, added 2026-11-16)
+
+Why: the science fill pass only picks jobs the chain planner flagged, so
+science slots stay empty while blueprint stock is short. 362 BPO types are
+owned; 76 have fewer than 3 BPCs, and 181 of the 270 inventable T2 blueprint
+types have fewer than 3 invented BPCs. The user wants blueprints ready, so a
+profitable build never waits on a copy or an invention.
+
+Decided by the user:
+- Minimum stock: **3 BPCs for every owned BPO**, and **3 invented BPCs for
+  every T2 blueprint inventable from an owned BPO's T1 BPCs**
+  (`planner_min_bpc_stock`, `planner_min_invented_bpc_stock`, default 3).
+- Runs after the build pass and the science fill pass, only in research
+  slots still free.
+- Invention may use any free T1 BPC, also ones that bring T1 stock below 3
+  (option B). Copies refill T1 stock later.
+- Order: gaps of products that pass the build rules first, by capital return
+  per day; then the rest by margin; unknown values last.
+- Jobs in progress count as stock: a running copy job counts its copies; a
+  running invention job counts its expected successes (attempts × the
+  product overview's probability; attempts when that is unknown).
+- Copy size: the run count the planner already uses for copies of that
+  blueprint. Invention: the decryptor the product overview chose.
+- Wallet: these jobs only spend what is left after builds and science
+  (`WalletBudget.charge`, not the science pot). When money runs out the
+  slot reason says "wallet".
+
+Unchanged rules apply: one job per blueprint (the ledger), the skill gate,
+invention only from BPCs that exist now, unknown cost = not affordable (its
+reason names the input), no job on a BPO the corp does not own.
+
 ## Constraints
 
 - The planner's existing rules: fail loud on contract violations, unknown is
