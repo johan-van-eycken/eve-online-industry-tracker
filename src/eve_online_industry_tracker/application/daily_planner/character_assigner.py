@@ -2381,9 +2381,12 @@ class _BuildCharger:
                     requested = math.ceil(requested * (runs / batch_runs))
                 gap = max(requested - self._ledger.available(sub_type_id), 0)
                 take = min(gap, self.covered[sub_type_id])
+                # The stock draw uses the same figure, so later parents see
+                # the stock the re-size assumed is left.
+                if sub_type_id in materials:
+                    materials[sub_type_id] = requested - take
                 if not take:
                     continue
-                materials[sub_type_id] = max(materials.get(sub_type_id, 0) - take, 0)
                 new_runs = math.ceil(max(take - self.spare[sub_type_id], 0) / out_per_run)
                 if new_runs:
                     rounding = self.rounding[sub_type_id]

@@ -210,6 +210,28 @@ def test_sub_units_use_the_re_sizes_float_ceil():
     assert budget.spent >= row["sub_manufacture_cost"] + row["sub_install_fee"] + 70 * M
 
 
+def test_pooled_stock_draw_uses_the_re_sizes_figure():
+    """A needs 204 (cut 12 -> 7: the re-size requests 120), B needs 100, stock 150:
+    the re-size builds 120 + 100 - 150 = 70, so 70 sub units are charged."""
+    a = _parent(type_id=100, runs=12, materials={MAT: 240, COMP: 204}, crpd=2.0)  # 200M a run
+    b = _parent(type_id=200, runs=1, materials={COMP: 100}, crpd=1.0)
+    resized = {}
+
+    def resize(fallen, dropped=frozenset(), scale=None):
+        resized["sub"] = _sub(need=math.ceil(204 * scale.get(100, 1)) + 100 - 150, parents=(100, 200))
+        return [resized["sub"]]
+
+    plan = ChainPlan(decisions=[a, b, _sub(need=204 + 100 - 150, parents=(100, 200))], resize_sub_components=resize)
+    # A: 7 runs = 1400M (its 120 from stock); B: 70 sub units at 1M + 1 ISK rounding.
+    budget = WalletBudget(balance=1471 * M, reserve_pct=0)
+    actions = _assign(None, [_char(1, mfg_slots=4)], budget, stock={COMP: 150}, plan=plan)
+    runs = {x.type_id: x.runs for x in _of(actions, "manufacture")}
+    row = resized["sub"].overview_row
+    assert runs == {100: 7, 200: 1} and row["quantity_needed"] == 70
+    assert budget.spent >= row["sub_manufacture_cost"] + row["sub_install_fee"] + 1400 * M
+    assert budget.spent <= 1471 * M
+
+
 def test_no_budget_means_old_behaviour():
     decisions = [_parent(type_id=100, score=2.0), _parent(type_id=200, score=1.0)]
     actions = _assign(decisions, [_char(1)], None)
