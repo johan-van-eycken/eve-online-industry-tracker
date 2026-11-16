@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import math
 
+import pytest
+
 from eve_online_industry_tracker.application.daily_planner.character_assigner import CharacterAssigner, cut_batch
 from eve_online_industry_tracker.application.daily_planner.models import AssignedAction, ChainPlan, ItemDecision
 from eve_online_industry_tracker.application.daily_planner.wallet_budget import WalletBudget
@@ -164,14 +166,48 @@ def test_sub_charged_in_whole_runs():
     assert budget.spent <= 100 * M
 
 
-def test_component_stock_used_before_the_sub():
-    """Request 30, stock 20, sub builds 10: a parent cut to 10 runs takes its 10 from stock."""
-    parent = _parent(runs=30, materials={MAT: 30, COMP: 30})
-    plan = ChainPlan(decisions=[parent, _sub(need=10)], resize_sub_components=lambda *a, **k: [])
-    budget = WalletBudget(balance=100 * M, reserve_pct=0)
-    actions = _assign(None, [_char(1, mfg_slots=3)], budget, stock={COMP: 20}, plan=plan)
+@pytest.mark.parametrize("balance, runs, sub_units", [(1000.0, 10, None), (2403.0, 24, 4)])
+def test_charge_mirrors_the_real_sub_re_size(balance, runs, sub_units):
+    """ChainPlanner's real re-size: request 30 (1 a run), corp stock 20. Cut to
+    10 runs the 10 come from stock (no sub); cut to 24 the sub builds 4, in one
+    whole run. Tritanium (34) 100 a run, 1 ISK each."""
+    from test_chain_planner_keying import _SUB_PHASE1, _batch_materials, _decision, _planner, _row
+
+    row = _row(runs=30, materials=_batch_materials(**{"54321": 30, "34": 3000}), manufacturing_job_cost=0.0)
+    row["quantity"] = 30
+    phase1 = {**_SUB_PHASE1, "corp_material_stock": {54321: 20}}
+    plan = _planner().plan_chain([_decision(row)], phase1)
+    (sub,) = [d for d in plan.decisions if d.is_sub_component]
+    assert sub.overview_row["quantity_needed"] == 10
+
+    budget = WalletBudget(balance=balance, reserve_pct=0)
+    actions = _assign(None, [_char(1, mfg_slots=3)], budget, stock={54321: 20},
+                      prices=_SUB_PHASE1["market_depth_cache"], plan=plan)
     (mfg,) = _of(actions, "manufacture")
-    assert mfg.runs == 10 and budget.spent == 100 * M
+    assert mfg.runs == runs
+    resized = [d for d in plan.decisions if d.is_sub_component]
+    sub_cost = sum(d.overview_row["sub_manufacture_cost"] + d.overview_row["sub_install_fee"] for d in resized)
+    assert [d.overview_row["quantity_needed"] for d in resized] == ([sub_units] if sub_units else [])
+    assert sub_cost + runs * 100 <= budget.spent <= balance
+
+
+def test_sub_units_use_the_re_sizes_float_ceil():
+    """204 x 7/12 is 119, but _sub_decisions' ceil(204 * (7 / 12)) builds 120: charge 120."""
+    parent = _parent(runs=12, materials={MAT: 12, COMP: 204})
+    resized = {}
+
+    def resize(fallen, dropped=frozenset(), scale=None):
+        resized["sub"] = _sub(need=math.ceil(204 * scale[100]))
+        return [resized["sub"]]
+
+    plan = ChainPlan(decisions=[parent, _sub(need=204)], resize_sub_components=resize)
+    budget = WalletBudget(balance=191 * M, reserve_pct=0)
+    actions = _assign(None, [_char(1, mfg_slots=3)], budget, plan=plan)
+    (mfg,) = _of(actions, "manufacture")
+    row = resized["sub"].overview_row
+    assert mfg.runs == 7 and row["quantity_needed"] == 120
+    assert budget.spent == 70 * M + 120 * M + 1
+    assert budget.spent >= row["sub_manufacture_cost"] + row["sub_install_fee"] + 70 * M
 
 
 def test_no_budget_means_old_behaviour():

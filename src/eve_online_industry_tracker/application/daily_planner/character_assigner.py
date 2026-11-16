@@ -2373,12 +2373,17 @@ class _BuildCharger:
             materials = {t: -(-q * runs // batch_runs) for t, q in base.items()}
             built = 0.0
             for sub_type_id, (run_cost, out_per_run) in sub_runs.items():
-                # Corp stock first (ChainPlanner sizes the sub net of it); the sub covers the rest.
-                gap = max(materials.get(sub_type_id, 0) - self._ledger.available(sub_type_id), 0)
+                # What ChainPlanner's re-size builds for this parent: its gross
+                # request scaled with the same float ceil (_sub_decisions), net
+                # of the corp stock still free (_resolve_sub_manufacture).
+                requested = base.get(sub_type_id, 0)
+                if runs < batch_runs:
+                    requested = math.ceil(requested * (runs / batch_runs))
+                gap = max(requested - self._ledger.available(sub_type_id), 0)
                 take = min(gap, self.covered[sub_type_id])
                 if not take:
                     continue
-                materials[sub_type_id] -= take
+                materials[sub_type_id] = max(materials.get(sub_type_id, 0) - take, 0)
                 new_runs = math.ceil(max(take - self.spare[sub_type_id], 0) / out_per_run)
                 if new_runs:
                     rounding = self.rounding[sub_type_id]
