@@ -132,11 +132,12 @@ balance minus the reserve:
   from the wallet), then building (its own inputs to buy plus its fee) or
   buying at market, whichever is less. A component request merged over
   several parents is booked by each parent for its own share.
-- If a component booked as "build" gets no slot in the second pass, it is
-  bought instead (as today, `_component_buy_reasons`). The extra cost over its
-  build cost is charged then; if the budget cannot carry it, the parent's runs
-  are cut until it fits (resizing its components again). The wallet is never
-  exceeded.
+- So that a component booked as "build" is really built, the parent reserves
+  the manufacturing slots of its sub-jobs at its own turn, on pilots with the
+  skills. A sub-job that cannot get a reserved slot is booked as bought from
+  the start. That way no cost is charged late and the wallet is never
+  exceeded (designer's call; it replaces a late "buy instead and cut the
+  parent" fallback, which would have re-sized the chain a second time).
 - Pause decisions get no new job today (only their deliveries,
   `character_assigner.py` `_assign_decision`), so they take no budget.
 - Research and copy jobs cost their fee; invention costs its fee plus the
