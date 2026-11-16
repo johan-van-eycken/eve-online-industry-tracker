@@ -45,7 +45,7 @@ class FlaskSettings:
 @lru_cache(maxsize=1)
 def get_settings() -> FlaskSettings:
     return FlaskSettings(
-        flask_host=os.getenv("FLASK_HOST", "localhost"),
+        flask_host=os.getenv("FLASK_HOST", "127.0.0.1"),  # not localhost: macOS AirPlay answers on ::1:5000
         flask_port=int(os.getenv("FLASK_PORT", "5000")),
         flask_debug=_bool("FLASK_DEBUG", default=False),
         refresh_metadata_on_startup=_bool("FLASK_REFRESH_METADATA", default=True),

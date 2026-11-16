@@ -148,7 +148,7 @@ Market defaults (such as the default broker fee and order book depth), industry 
 | `ADMIN_SETTINGS_PATH` | `database/admin_settings.json` | Path to the application settings |
 | `STREAMLIT_PREFERENCES_PATH` | `database/streamlit_preferences.json` | Path to the UI preferences |
 | `LOG_LEVEL` | `DEBUG` | Logging verbosity |
-| `FLASK_HOST` | `localhost` | Flask bind host |
+| `FLASK_HOST` | `127.0.0.1` | Flask bind host |
 | `FLASK_PORT` | `5000` | Flask bind port |
 | `FLASK_DEBUG` | `false` | Flask debug mode |
 | `FLASK_HEALTH_POLL_TIMEOUT` | `300` | Max seconds to wait for backend readiness |
