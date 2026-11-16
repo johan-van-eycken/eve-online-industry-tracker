@@ -22,6 +22,7 @@ from eve_online_industry_tracker.application.characters.asset_provenance import 
     industry_job_input_quantities,
 )
 from eve_online_industry_tracker.db_models import (
+    Blueprints,
     CharacterIndustryJobsModel,
     CharacterModel,
     CharacterRealizedSalesLedgerModel,
@@ -229,6 +230,9 @@ def _opening_inventory_lot(events: list[dict[str, Any]]) -> FifoLot | None:
         elif kind == "sell":
             tx = event.get("tx")
             quantity = _safe_int(getattr(tx, "quantity", None)) or 0
+            running_balance -= int(quantity)
+        elif kind == "consume":
+            # Consumes drain the opening lot first, so it is sized for them too.
             running_balance -= int(quantity)
 
         min_balance = min(min_balance, int(running_balance))
@@ -657,34 +661,52 @@ class _BaseRealizedProfitLedgerService:
         rows = query.order_by(self.ledger_model.date.desc(), self.ledger_model.transaction_id.desc()).all()
         return [_normalize_untracked_payload(self._serialize_row(row)) for row in rows]
 
-    def next_fifo_unit_cost(
-        self, *, owner_scope: str, owner_id: int, type_id: int,
-    ) -> tuple[float | None, str | None]:
-        """Unit cost of `type_id`'s oldest lot still open in the owner's FIFO
-        queue after replaying every buy, build, sale and job input, with a
-        short source label; (None, reason) when the queue is empty or
-        unpriced. Read-only: no ledger rows are written."""
+    def next_fifo_unit_costs(self, *, owner_scope: str, owner_id: int) -> dict[int, tuple[float | None, str]]:
+        """{type_id: (unit cost of its oldest lot still open after replaying
+        every buy, build, sale and job input, short source label)} from one
+        replay of the owner; (None, reason) when that lot has no cost. Types
+        with an empty queue are left out. Read-only: no ledger rows."""
         service_class = _SERVICE_BY_SCOPE.get(str(owner_scope))
         if service_class is None:
             raise ValueError(f"owner_scope must be 'character' or 'corporation', not {owner_scope!r}")
         service = self if isinstance(self, service_class) else service_class(
             app_session=self._app_session, sde_session=self._sde_session,
             market_prices=self._market_prices, admin_settings=self._admin_settings)
-        lots = service._replay_owner(owner_id=int(owner_id))["lots_by_type"].get(int(type_id)) or []
-        head = next((lot for lot in lots if int(lot.quantity or 0) > 0), None)
-        if head is None:
-            return None, f"fifo: no open lot of type {int(type_id)} for {owner_scope} {int(owner_id)}"
-        if _safe_float(head.unit_price) is None or float(head.unit_price) <= 0:
-            return None, f"fifo: oldest lot of type {int(type_id)} has no cost"
-        if head.reference_id is not None:
-            label = f"fifo: {str(head.reference_type or head.source).replace('_', ' ')} {int(head.reference_id)}"
-        else:
-            label = f"fifo: {head.source or 'unknown'}"
-        return float(head.unit_price), label
+        out: dict[int, tuple[float | None, str]] = {}
+        for type_id, lots in service._replay_owner(owner_id=int(owner_id))["lots_by_type"].items():
+            head = next((lot for lot in lots if int(lot.quantity or 0) > 0), None)
+            if head is None:
+                continue
+            if _safe_float(head.unit_price) is None or float(head.unit_price) <= 0:
+                out[int(type_id)] = (None, f"fifo: oldest lot of type {int(type_id)} has no cost")
+            elif head.reference_id is not None:
+                out[int(type_id)] = (float(head.unit_price), "fifo: {} {}".format(
+                    str(head.reference_type or head.source).replace("_", " "), int(head.reference_id)))
+            else:
+                out[int(type_id)] = (float(head.unit_price), f"fifo: {head.source or 'unknown'}")
+        return out
+
+    def next_fifo_unit_cost(
+        self, *, owner_scope: str, owner_id: int, type_id: int,
+    ) -> tuple[float | None, str | None]:
+        """next_fifo_unit_costs for one type; (None, reason) when its queue is empty."""
+        costs = self.next_fifo_unit_costs(owner_scope=owner_scope, owner_id=int(owner_id))
+        return costs.get(int(type_id)) or (
+            None, f"fifo: no open lot of type {int(type_id)} for {owner_scope} {int(owner_id)}")
 
     def _load_input_consuming_jobs(self, *, owner_id: int) -> list[Any]:
         """The jobs whose inputs left this owner's queue: its own jobs."""
         return self._load_industry_jobs(owner_id=int(owner_id))
+
+    def _load_blueprints(self, blueprint_type_ids: set[int | None]) -> dict[int, Any]:
+        """{blueprintTypeID: SDE row} in one query per chunk, for a replay."""
+        ids = sorted(i for i in blueprint_type_ids if i) if self._sde_session is not None else []
+        out: dict[int, Any] = {}
+        for start in range(0, len(ids), _SQL_IN_CHUNK):
+            for bp in self._sde_session.query(Blueprints).filter(
+                    Blueprints.blueprintTypeID.in_(ids[start:start + _SQL_IN_CHUNK])).all():
+                out[int(bp.blueprintTypeID)] = bp
+        return out
 
     def _replay_owner(self, *, owner_id: int) -> dict[str, Any]:
         """Replay the owner's events per item in (date, id) order through one
@@ -698,14 +720,34 @@ class _BaseRealizedProfitLedgerService:
         asset_history_lots = self._load_asset_history_lots(owner_id=int(owner_id))
 
         # Char-job and char-buy lots cover char-built items sold before the transfer was
-        # captured in asset history (Manufacturing instead of opening_inventory). A lot the
-        # asset history already stamped from the same job or buy is skipped: unconsumed
-        # leftovers stay in the queue and a later sale would take them as a second copy.
+        # captured in asset history (Manufacturing instead of opening_inventory). Each enters
+        # less what the characters' own jobs took from it (those units never left the
+        # character). A lot the asset history already stamped from the same job or buy is
+        # skipped: unconsumed leftovers stay in the queue and a later sale would take them as
+        # a second copy. Stamped units beyond what the character's replay left of that lot
+        # are the same units the replay left in a later lot, so they cancel those, oldest first.
         supplemental_lots = self._load_supplemental_lots(owner_id=int(owner_id))
+        drawn = self._supplemental_draws() if supplemental_lots else {}
         for supp_type_id, supp_lots in supplemental_lots.items():
             type_lots = asset_history_lots.setdefault(int(supp_type_id), [])
-            stamped = {(lot.reference_type, lot.reference_id) for lot in type_lots if lot.reference_id is not None}
-            type_lots.extend(lot for lot in supp_lots if (lot.reference_type, lot.reference_id) not in stamped)
+            stamped: dict[tuple[Any, Any], int] = defaultdict(int)
+            for lot in type_lots:
+                if lot.reference_id is not None:
+                    stamped[(lot.reference_type, lot.reference_id)] += int(lot.quantity)
+            residuals: list[FifoLot] = []
+            excess = 0
+            for lot in supp_lots:
+                key = (lot.reference_type, lot.reference_id)
+                left = max(0, int(lot.quantity) - drawn.get((int(supp_type_id), *key), 0))
+                if key in stamped:
+                    excess += max(0, stamped[key] - left)
+                elif left:
+                    residuals.append(replace(lot, quantity=left))
+            for lot in residuals:
+                cancelled = min(excess, int(lot.quantity))
+                excess -= cancelled
+                if int(lot.quantity) > cancelled:
+                    type_lots.append(replace(lot, quantity=int(lot.quantity) - cancelled))
 
         # A lot that points at an industry job is priced from the job's
         # current unit_build_cost, not the cost stamped when the lot was
@@ -765,11 +807,14 @@ class _BaseRealizedProfitLedgerService:
             )
 
         # Inputs leave when the job starts, from the same queue a sale takes from.
-        for job in self._load_input_consuming_jobs(owner_id=int(owner_id)):
+        consuming_jobs = self._load_input_consuming_jobs(owner_id=int(owner_id))
+        blueprints = self._load_blueprints({_safe_int(getattr(job, "blueprint_type_id", None)) for job in consuming_jobs})
+        for job in consuming_jobs:
             start_date = _parse_date(getattr(job, "start_date", None))
             if start_date is None:
                 continue
-            for input_type_id, input_quantity in industry_job_input_quantities(job, sde_session=self._sde_session).items():
+            job_inputs = industry_job_input_quantities(job, sde_session=self._sde_session, blueprints=blueprints)
+            for input_type_id, input_quantity in job_inputs.items():
                 events_by_type.setdefault(int(input_type_id), []).append(
                     {
                         "kind": "consume",
@@ -791,7 +836,8 @@ class _BaseRealizedProfitLedgerService:
                 )
 
         sales: list[tuple[Any, dict[str, Any]]] = []
-        inputs = {"jobs": set(), "drained": 0, "untracked": 0}
+        # draws: {(type_id, reference_type, reference_id): units} the job inputs took per lot.
+        inputs: dict[str, Any] = {"jobs": set(), "drained": 0, "untracked": 0, "draws": defaultdict(int)}
         for type_id, events in events_by_type.items():
             events.sort(key=lambda item: (item.get("dt") or datetime.min, int(item.get("sort_id") or 0)))
             lots = lots_by_type.setdefault(int(type_id), [])
@@ -852,6 +898,9 @@ class _BaseRealizedProfitLedgerService:
                     inputs["jobs"].add(int(event["sort_id"]))
                     inputs["drained"] += int(taken["priced_quantity"])
                     inputs["untracked"] += int(taken["unpriced_quantity"])
+                    for drawn in taken["allocations"]:
+                        if drawn["reference_id"] is not None:
+                            inputs["draws"][(int(type_id), drawn["reference_type"], int(drawn["reference_id"]))] += int(drawn["quantity"])
                     continue
 
                 if kind != "sell":
@@ -1021,6 +1070,11 @@ class _BaseRealizedProfitLedgerService:
 
     def _load_supplemental_lots(self, *, owner_id: int) -> dict[int, list[FifoLot]]:
         """Return additional FifoLots to merge into the FIFO queue. Subclasses may override."""
+        return {}
+
+    def _supplemental_draws(self) -> dict[tuple[int, Any, int], int]:
+        """{(type_id, reference_type, reference_id): units} taken from the
+        supplemental lots elsewhere before they reach this queue."""
         return {}
 
     def _load_owner_context(self, *, owner_id: int) -> dict[str, Any]:
@@ -1382,20 +1436,21 @@ class CorporationRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
                     break
         return stale
 
-    def _load_input_consuming_jobs(self, *, owner_id: int) -> list[Any]:
-        """The corp's jobs and every character job: _load_character_source_lots
-        puts every character's built and bought lots in the corp queue, so the
-        character jobs that used them as inputs take them out again."""
-        jobs = self._load_industry_jobs(owner_id=int(owner_id))
-        seen = {_safe_int(getattr(job, "job_id", None)) for job in jobs}
-        return jobs + [
-            job for job in self._app_session.query(CharacterIndustryJobsModel).all()
-            if _safe_int(getattr(job, "job_id", None)) not in seen
-        ]
-
     def _load_supplemental_lots(self, *, owner_id: int) -> dict[int, list[FifoLot]]:
         """Delegate to _load_character_source_lots for the corp service."""
         return self._load_character_source_lots(corporation_id=int(owner_id))
+
+    def _supplemental_draws(self) -> dict[tuple[int, Any, int], int]:
+        """What every character's own ledger replay let its jobs take, per lot:
+        the corp side never draws what the character side did not."""
+        character_service = CharacterRealizedProfitLedgerService(
+            app_session=self._app_session, sde_session=self._sde_session,
+            market_prices=self._market_prices, admin_settings=self._admin_settings)
+        drawn: dict[tuple[int, Any, int], int] = defaultdict(int)
+        for character_id in character_service.owner_ids():
+            for key, quantity in character_service._replay_owner(owner_id=character_id)["inputs"]["draws"].items():
+                drawn[key] += int(quantity)
+        return drawn
 
     def _load_owner_context(self, *, owner_id: int) -> dict[str, Any]:
         """Pre-load journal entries and pre-compute per-unit broker fees for corp sells.

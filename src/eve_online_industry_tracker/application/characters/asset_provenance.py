@@ -441,13 +441,16 @@ def industry_job_material_type_ids(
     return out
 
 
-def industry_job_input_quantities(job: Any, *, sde_session: Any) -> dict[int, int]:
+def industry_job_input_quantities(
+    job: Any, *, sde_session: Any, blueprints: Mapping[int, Any] | None = None,
+) -> dict[int, int]:
     """{input type: units a manufacturing job took when it started}: the SDE
     materials x runs at the job's ME, raised to what the job's
     historical_input_costs recorded where that is more (a recorded quantity
     covers only the tracked stock, so it is a floor). {} for any other
     activity: their historical_input_costs hold the blueprint's manufacturing
-    materials, not what the job used."""
+    materials, not what the job used. `blueprints` ({blueprintTypeID: row},
+    prefetched by the caller) saves the per-job SDE lookup."""
     raw = _industry_job_raw_payload(job)
     activity_id = _safe_int(getattr(job, "activity_id", None)) or _safe_int(raw.get("activity_id"))
     if activity_id not in {None, 1}:
@@ -457,7 +460,10 @@ def industry_job_input_quantities(job: Any, *, sde_session: Any) -> dict[int, in
                    or raw.get("blueprint_material_efficiency") or raw.get("material_efficiency")) or 0
     runs = _industry_job_runs(job)
     out: dict[int, int] = {}
-    bp = sde_session.query(Blueprints).filter_by(blueprintTypeID=int(blueprint_type_id)).first() if blueprint_type_id else None
+    if blueprints is not None:
+        bp = blueprints.get(int(blueprint_type_id or 0))
+    else:
+        bp = sde_session.query(Blueprints).filter_by(blueprintTypeID=int(blueprint_type_id)).first() if blueprint_type_id else None
     for material in (_get_mfg_activity(getattr(bp, "activities", None)) or {}).get("materials") or []:
         type_id = _safe_int(material.get("typeID")) if isinstance(material, dict) else None
         quantity = me_adjusted_batch_quantity(_safe_int(material.get("quantity")) or 0, runs, me) if type_id else 0
