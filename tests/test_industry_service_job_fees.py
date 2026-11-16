@@ -317,3 +317,16 @@ def test_a_partly_priced_component_has_no_fee_and_says_why() -> None:
     mj = row["manufacturing_job"]
     assert mj["manufacturing_job_cost"] is None
     assert "EIV" in mj["manufacturing_job_cost_unknown_reason"]
+
+
+def test_an_owned_bpo_row_publishes_its_copy_fee_per_run() -> None:
+    """The daily planner's stock copies of a BPO no T2 invents from. One
+    copy run: job value 0.02 x per-run EIV 50 = 1.0, x (copying index 0.03 + 0.10)."""
+    mj = _owned_bpo_manufacturing_job()
+    assert mj["copy_job_cost_per_run"] == pytest.approx(0.13)
+    assert mj["copy_job_cost_unknown_reason"] is None
+
+
+def test_a_row_without_an_owned_bpo_publishes_no_copy_fee(monkeypatch) -> None:
+    mj = _invention_overview(monkeypatch, profile=_FEE_PROFILE)[5002]["manufacturing_job"]
+    assert "copy_job_cost_per_run" not in mj

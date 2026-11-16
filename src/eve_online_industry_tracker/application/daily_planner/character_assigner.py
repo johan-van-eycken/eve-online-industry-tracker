@@ -520,7 +520,7 @@ class CharacterAssigner:
         # Every blueprint a job or this plan already uses is not free.
         ledger = BlueprintLedger(bpos, bpcs)
         taken: set[Any] = {int(i) for i in stock.get("busy_blueprint_item_ids") or ()}
-        for decision in top.values():
+        for decision in chain_plan.decisions:
             claims = decision.overview_row.get("ledger_claims")
             if isinstance(claims, dict):
                 taken.update(k for keys in claims.values() for k in keys or ())
@@ -537,33 +537,55 @@ class CharacterAssigner:
             in_progress=in_progress, invention_source_index=sources,
             min_bpc=int(stock["min_bpc"]), min_invented=int(stock["min_invented"]), product_of=product_of.get,
         )
-        # The T1 copy fee is on the overview rows of the T2 products it invents into.
-        fee_rows: dict[int, dict[str, Any]] = {}
+        # The T2 rows each T1 blueprint invents into: the fallback copy fee,
+        # and the rank of a T1 without a row of its own.
+        dependants: dict[int, list[ItemDecision]] = {}
         for t, decision in top.items():
             src = sources.get(bp_of.get(t))  # type: ignore[arg-type]
-            if src is not None and (src not in fee_rows or orow.get_source_copy_fee_per_run(fee_rows[src]) is None):
-                fee_rows[src] = decision.overview_row
+            if src is not None:
+                dependants.setdefault(src, []).append(decision)
+
+        def _copy_fee(bp: int, product: int | None) -> tuple[dict[str, Any] | None, float | None, str]:
+            """(row, fee per copied run, why unknown): the BPO's own product
+            row first, else a T2 row's source copy fee."""
+            own = top.get(product) if product is not None else None
+            deps = dependants.get(bp) or []
+            if own is None and not deps:
+                return None, None, "no product overview row"
+            if own is not None and (fee := orow.get_copy_job_cost_per_run(own.overview_row)) is not None:
+                return own.overview_row, fee, ""
+            for dep in deps:
+                if (fee := orow.get_source_copy_fee_per_run(dep.overview_row)) is not None:
+                    return dep.overview_row, fee, ""
+            reasons = [orow.get_copy_job_cost_unknown_reason(own.overview_row)] if own is not None else []
+            reasons += [orow.get_invention_fee_unknown_reason(d.overview_row, "source_copy_job_cost_per_run") for d in deps]
+            return None, None, f"copy fee unknown ({next((r for r in reasons if r), 'no reason recorded')})"
+
+        ranking = dict(top)
+        for gap in gaps:
+            deps = dependants.get(gap.blueprint_type_id)
+            if gap.kind == "copy" and gap.product_type_id is not None and gap.product_type_id not in top and deps:
+                ranking[gap.product_type_id] = min(deps, key=_stock.rank_key)
+
+        skipped: dict[str, list[int]] = {}
 
         def _skip(gap: _stock.StockGap, why: str) -> list[AssignedAction]:
-            logger.info("CharacterAssigner: no stock %s of blueprint %s today: %s", gap.kind, gap.blueprint_type_id, why)
+            skipped.setdefault(f"{gap.kind}: {why}", []).append(gap.blueprint_type_id)
             return []
 
         out: list[AssignedAction] = []
-        for gap in _stock.rank_gaps(gaps, top):
+        for gap in _stock.rank_gaps(gaps, ranking):
             if not any(int(s.get("free_research", 0)) > 0 for s in char_slots.values()):
                 break
             note = f"stock: {gap.have:g} of {gap.want} BPCs"
             bp = gap.blueprint_type_id
             if gap.kind == "copy":
-                row = fee_rows.get(bp)
+                row, fee, fee_why = _copy_fee(bp, gap.product_type_id)
                 max_runs = _max_runs_per_job(blueprint_data.get(bp) or {})
                 qualified, gate = skill_gate.check(bp, "copying")
                 free = [] if bp in blocked else [k for k, _a in ledger.free_bpos_to_copy(bp) if k not in taken]
                 if row is None:
-                    why = "no product overview row carries its copy fee"
-                elif orow.get_source_copy_fee_per_run(row) is None:
-                    reason = orow.get_invention_fee_unknown_reason(row, "source_copy_job_cost_per_run")
-                    why = f"copy fee unknown ({reason or 'no reason recorded'})"
+                    why = fee_why
                 elif max_runs is None:
                     why = "SDE max runs per copy unknown"
                 else:
@@ -587,7 +609,8 @@ class CharacterAssigner:
                 )
                 (action,) = self._copy_actions(
                     {**row, "t1_max_runs_per_copy": max_runs, "t1_copy_seconds_per_run": secs},
-                    gap.product_type_id or bp, name, bp, reserved[:1], jobs, note, max_runs_per_copy=max_runs,
+                    gap.product_type_id or bp, name, bp, reserved[:1], jobs, "", max_runs_per_copy=max_runs,
+                    lead=note, fee_per_run=(fee, None),
                 )
                 if not self._charge_stock(action, budget, stock_dropped):
                     self._release_slot(char_slots, action.character_id, "copy")
@@ -640,6 +663,11 @@ class CharacterAssigner:
                 bpc_pool.setdefault("bpcs", set()).add(bpc[0])
                 remaining -= (action.runs or 0) * p
                 out.append(action)
+        for why, bps in skipped.items():
+            logger.info(
+                "CharacterAssigner: stock pass skipped %d gap(s), %s (e.g. blueprint(s) %s)",
+                len(bps), why, bps[:5],
+            )
         return out
 
     @staticmethod
@@ -1728,6 +1756,8 @@ class CharacterAssigner:
         self, row: dict[str, Any], type_id: int, type_name: str, t1_blueprint_type_id: int,
         pilots: list[tuple[int, str | None]], jobs: list[dict[str, int]] | None, note: str, *,
         max_runs_per_copy: int | None = None, lane_sizes: list[int] | None = None,
+        lead: str | None = "Copy T1 BPO to feed invention pipeline",
+        fee_per_run: tuple[float | None, str | None] | None = None,
     ) -> list[AssignedAction]:
         """One copy action per reserved pilot, each one copy job on its own
         free T1 BPO (a BPO is in one job at a time, a corp BPO is installed by
@@ -1735,7 +1765,9 @@ class CharacterAssigner:
         with its own licensed runs; here `quantity` is the copies and `runs`
         the copied BPC runs in all (copies x runs per copy), which the copy
         fee is charged on (job_cost.py) and one invention attempt uses one
-        of. `jobs` None: the runs are unknown. The slots are already taken."""
+        of. `jobs` None: the runs are unknown. The slots are already taken.
+        `lead`: the notes' first clause (a stock copy: its stock note). `fee_per_run`: (fee
+        per copied run, why unknown) instead of the row's T1 source copy fee."""
         actions: list[AssignedAction] = []
         for index, (char_id, char_name) in enumerate(pilots):
             job = jobs[index] if jobs is not None and index < len(jobs) else None
@@ -1768,17 +1800,18 @@ class CharacterAssigner:
                 estimated_profit_isk=None,
                 estimated_completion=None,
                 notes="; ".join([
-                    "Copy T1 BPO to feed invention pipeline",
+                    *([lead] if lead else []),
                     *([f"BPO {index + 1} of {len(pilots)}"] if len(pilots) > 1 else []),
                     *shape,
-                    note,
+                    *([note] if note else []),
                 ]),
                 **_job_fee(
-                    _times_runs(orow.get_source_copy_fee_per_run(row), runs),
+                    _times_runs(orow.get_source_copy_fee_per_run(row), runs) if fee_per_run is None
+                    else _times_runs(fee_per_run[0], runs),
                     _rate_fee_reason(
                         row, "source_copy_job_cost_per_run", runs,
                         "the copy runs are unknown (the invention attempts are unknown)",
-                    ),
+                    ) if fee_per_run is None else fee_per_run[1],
                     "copy", type_id,
                 ),
             ))

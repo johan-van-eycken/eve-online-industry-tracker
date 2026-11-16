@@ -4100,6 +4100,14 @@ class IndustryService(
                 row_out["manufacturing_job"]["research_job_cost_by_level"],
                 row_out["manufacturing_job"]["research_job_cost_by_level_unknown_reason"],
             ) = self._research_job_cost_by_level(ctx, row=row, per_run_material_eiv=per_run_material_eiv)
+            # One copy run of this BPO (the planner's stock copies); None = unknown, never 0.
+            (
+                row_out["manufacturing_job"]["copy_job_cost_per_run"],
+                row_out["manufacturing_job"]["copy_job_cost_unknown_reason"],
+            ) = self._source_copy_fee_per_run(
+                compute_activity=lambda **kw: self._plan_activity_costs(ctx, **kw),
+                invention_source_row=row, adjusted_price_map=ctx.adjusted_market_price_map,
+            )
             row_out["manufacturing_job"]["research_duration_seconds_by_level"] = self._research_duration_by_level(ctx, row=row)
             row_out["manufacturing_job"]["research_duration_seconds_by_level_unskilled"] = self._research_duration_by_level(
                 ctx, row=row, skilled=False,

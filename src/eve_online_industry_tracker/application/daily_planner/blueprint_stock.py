@@ -84,17 +84,20 @@ def stock_gaps(
     return gaps
 
 
-def rank_gaps(gaps: list[StockGap], decision_by_product: dict[int, ItemDecision]) -> list[StockGap]:
-    """Gaps of "build" rows first by capital return per day, then the other
-    rows by margin, then those without a decision or margin; stable."""
-    def _key(gap: StockGap) -> tuple[int, float]:
-        decision = decision_by_product.get(gap.product_type_id) if gap.product_type_id is not None else None
-        if decision is not None and decision.decision == "build":
-            crpd = decision.capital_return_per_day
-            return 0, -(crpd if crpd is not None else float("-inf"))
-        margin = decision.margin_pct if decision is not None else None
-        if isinstance(margin, (int, float)) and not isinstance(margin, bool):
-            return 1, -float(margin)
-        return 2, 0.0
+def rank_key(decision: ItemDecision | None) -> tuple[int, float]:
+    """"build" rows first by capital return per day, then the other rows by
+    margin, then no decision or no margin (lower sorts first)."""
+    if decision is not None and decision.decision == "build":
+        crpd = decision.capital_return_per_day
+        return 0, -(crpd if crpd is not None else float("-inf"))
+    margin = decision.margin_pct if decision is not None else None
+    if isinstance(margin, (int, float)) and not isinstance(margin, bool):
+        return 1, -float(margin)
+    return 2, 0.0
 
-    return sorted(gaps, key=_key)
+
+def rank_gaps(gaps: list[StockGap], decision_by_product: dict[int, ItemDecision]) -> list[StockGap]:
+    """The gaps by their product's rank_key; stable."""
+    return sorted(gaps, key=lambda g: rank_key(
+        decision_by_product.get(g.product_type_id) if g.product_type_id is not None else None
+    ))

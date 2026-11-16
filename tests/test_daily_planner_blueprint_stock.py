@@ -42,6 +42,17 @@ def _t2_skip_row():
     return _decision(12345, decision="skip", margin=40.0, row=L._t2_row())
 
 
+def _t1_row(type_id=12344, *, margin=10.0, copy_fee=0.25):
+    """A pure T1 product's row, a skip decision, with its own BPO's copy fee."""
+    return _decision(type_id, decision="skip", margin=margin, row={
+        "type_id": type_id, "manufacturing_job": {"copy_job_cost_per_run": copy_fee},
+    })
+
+
+def _one_slot_pilot():
+    return {"character_id": 9, "character_name": "Solo", "skills": {"skills": []}}
+
+
 def _stock_pass(decisions, chars, bpcs, *, budget=None, min_bpc=3, min_invented=3, jobs=()):
     assigner = CharacterAssigner()
     actions = assigner.assign(
@@ -126,7 +137,8 @@ def test_stock_pass_skips_a_bpo_without_a_fee_row():
 
 def test_invent_uses_t1_below_minimum():
     # One T1 BPC: T1 stock is short too, but the T2 gap ranks first and invents from it (option B).
-    _assigner, actions = _stock_pass([_t2_skip_row()], [A._best_inventor()], {998: [L._bpc(701, 998, 10)]})
+    t1 = _decision(12344, decision="skip", margin=1.0)
+    _assigner, actions = _stock_pass([_t2_skip_row(), t1], [A._best_inventor()], {998: [L._bpc(701, 998, 10)]})
     (action,) = actions
     assert (action.action_type, action.type_id, action.blueprint_item_id) == ("invent", 12345, 701)
     assert "stock: 0 of 3 BPCs" in action.notes
@@ -150,6 +162,33 @@ def test_no_stock_pass_without_inputs():
         blueprint_data=BLUEPRINTS,
     )
     assert actions == []
+
+
+def test_pure_t1_bpo_copies_priced_from_its_own_row():
+    # No T2 row invents from BPO 998: the copy fee is its own row's (0.25 per copied run).
+    _assigner, actions = _stock_pass([_t1_row()], [A._copier()], {998: [L._bpc(701, 998, 10)]}, min_invented=0)
+    (action,) = actions
+    assert (action.action_type, action.type_id, action.quantity, action.runs) == ("copy", 998, 2, 60)
+    assert action.estimated_job_fee_isk == 15.0
+    assert action.notes.startswith("stock: 1 of 3 BPCs; make 2 copies")
+    assert "Copy T1 BPO to feed invention pipeline" not in action.notes
+
+
+def test_copy_gap_without_own_row_ranks_by_its_t2_dependant():
+    # BPO 998 has no T1 row, but its T2 dependant (margin 40) outranks BPO 500's own row (margin 10).
+    blueprints = dict(BLUEPRINTS)
+    blueprints[500] = {**copy.deepcopy(BLUEPRINTS[998]), "invention": {"materials": [], "products": []}}
+    blueprints[500]["manufacturing"]["products"] = [{"type_id": 5000, "quantity": 1}]
+    assigner = CharacterAssigner()
+    actions = assigner.assign(
+        ChainPlan(decisions=[_t1_row(5000, margin=10.0), _t2_skip_row()]), [], _Chars([_one_slot_pilot()]),
+        A._Admin(), dict(A.PRICES), blueprint_data=blueprints,
+        blueprint_stock={
+            "bpo_assets_by_type_id": {998: [L._bpo(77, 998)], 500: [L._bpo(55, 500)]}, "bpc_assets_by_type_id": {},
+            "busy_blueprint_item_ids": set(), "min_bpc": 3, "min_invented": 0,
+        },
+    )
+    assert [(a.action_type, a.type_id) for a in actions] == [("copy", 998)]
 
 
 def test_service_passes_the_stock_inputs():
