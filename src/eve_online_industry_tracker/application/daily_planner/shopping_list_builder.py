@@ -164,8 +164,8 @@ class ShoppingListBuilder:
 
         return _merge_lines(shopping)
 
+    @staticmethod
     def _get_materials_and_output_for_action(
-        self,
         action: AssignedAction,
         blueprint_data: dict[int, dict[str, Any]],
         product_to_blueprint: dict[int, int],
@@ -258,52 +258,19 @@ class ShoppingListBuilder:
         blueprint_data: dict[int, dict[str, Any]],
         product_to_blueprint: dict[int, int],
     ) -> list[tuple[int, str, int]]:
-        """(material type_id, name, units needed) for one job.
-
-        An action carrying a batch-materials mapping uses it as-is. For
-        manufacture that is the producer's batch (per-run x runs after
-        ME/structure reduction). For sub_manufacture it is ChainPlanner's
-        batch at the owned BPO's ME plus the parent structure's material
-        bonus (and the rig bonus where the rig covers the component's own
-        group). Otherwise (no mapping) the SDE per-run
-        quantities x runs are used, which carry no ME/structure reduction.
-        """
-        mats, per_run_output = self._get_materials_and_output_for_action(
+        """(material type_id, name, units needed) for one job, from
+        action_material_needs (the wallet charge's source too)."""
+        mats, _per_run_output = self._get_materials_and_output_for_action(
             action, blueprint_data, product_to_blueprint
         )
         names = {
             int(m.get("type_id") or 0): m.get("type_name") for m in mats if isinstance(m, dict)
         }
+        needs = action_material_needs(action, blueprint_data, product_to_blueprint) or {}
+        return [(t, str(names.get(t) or f"type_{t}"), q) for t, q in needs.items()]
 
-        if action.materials is not None:
-            return [
-                (t, str(names.get(t) or f"type_{t}"), int(q))
-                for t, q in action.materials.items()
-                if int(t) > 0 and int(q) > 0
-            ]
-        if action.action_type == "manufacture":
-            logger.info(
-                "ShoppingListBuilder: type_id=%s has no producer batch materials; "
-                "buying SDE per-run quantities x runs (no ME/structure reduction)",
-                action.type_id,
-            )
-
-        runs = self._effective_runs(action, per_run_output)
-        needs: list[tuple[int, str, int]] = []
-        for mat in mats:
-            mat_type_id = int(mat.get("type_id") or 0)
-            per_run_qty = int(mat.get("quantity") or 0)
-            if mat_type_id <= 0 or per_run_qty <= 0:
-                continue
-            # Blueprint material quantities are per run.
-            needs.append((
-                mat_type_id,
-                str(mat.get("type_name") or f"type_{mat_type_id}"),
-                per_run_qty * runs,
-            ))
-        return needs
-
-    def _effective_runs(self, action: AssignedAction, per_run_output: int) -> int:
+    @staticmethod
+    def _effective_runs(action: AssignedAction, per_run_output: int) -> int:
         """Runs to buy materials for.
 
         `manufacture` actions carry a real run count in `action.runs`; use it
@@ -351,6 +318,48 @@ class ShoppingListBuilder:
     ) -> tuple[float | None, bool]:
         """Return (price, is_vwap). Prefers vwap_5d over spot_sell_price."""
         return price_map_unit_price(market_depth_cache.get(type_id))
+
+
+def action_material_needs(
+    action: AssignedAction,
+    blueprint_data: dict[int, dict[str, Any]],
+    product_to_blueprint: dict[int, int],
+) -> dict[int, int] | None:
+    """{material type_id: units} one manufacture / sub_manufacture job buys
+    for, shared by the shopping list and the wallet charge (CharacterAssigner).
+
+    An action carrying a batch-materials mapping uses it as-is. For
+    manufacture that is the producer's batch (per-run x runs after
+    ME/structure reduction). For sub_manufacture it is ChainPlanner's
+    batch at the owned BPO's ME plus the parent structure's material
+    bonus (and the rig bonus where the rig covers the component's own
+    group). Otherwise (no mapping) the SDE per-run quantities x runs are
+    used, which carry no ME/structure reduction. None when neither is known
+    (no blueprint in blueprint_data makes the product).
+    """
+    if action.materials is not None:
+        return {int(t): int(q) for t, q in action.materials.items() if int(t) > 0 and int(q) > 0}
+    mats, per_run_output = ShoppingListBuilder._get_materials_and_output_for_action(
+        action, blueprint_data, product_to_blueprint
+    )
+    if action.action_type == "manufacture":
+        logger.info(
+            "ShoppingListBuilder: type_id=%s has no producer batch materials; "
+            "buying SDE per-run quantities x runs (no ME/structure reduction)",
+            action.type_id,
+        )
+    if not mats:
+        return None
+    runs = ShoppingListBuilder._effective_runs(action, per_run_output)
+    needs: dict[int, int] = {}
+    for mat in mats:
+        mat_type_id = int(mat.get("type_id") or 0)
+        per_run_qty = int(mat.get("quantity") or 0)
+        if mat_type_id <= 0 or per_run_qty <= 0:
+            continue
+        # Blueprint material quantities are per run.
+        needs[mat_type_id] = needs.get(mat_type_id, 0) + per_run_qty * runs
+    return needs
 
 
 def price_map_unit_price(entry: Any) -> tuple[float | None, bool]:

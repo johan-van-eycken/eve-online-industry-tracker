@@ -30,9 +30,21 @@ from eve_online_industry_tracker.application.daily_planner.assigned_invention im
     invention_probability_floor,
 )
 from eve_online_industry_tracker.application.daily_planner.blueprint_ledger import BlueprintLedger
-from eve_online_industry_tracker.application.daily_planner.chain_planner import NOT_BUILT_STAGE
+from eve_online_industry_tracker.application.daily_planner.chain_planner import (
+    NOT_BUILT_STAGE,
+    build_product_to_blueprint_index,
+)
 from eve_online_industry_tracker.application.daily_planner.input_row import require_batch_runs
 from eve_online_industry_tracker.application.daily_planner.models import AssignedAction, ItemDecision
+from eve_online_industry_tracker.application.daily_planner.shopping_list_builder import (
+    action_material_needs,
+    price_map_unit_price,
+)
+from eve_online_industry_tracker.application.daily_planner.wallet_budget import (
+    StockLedger,
+    WalletBudget,
+    max_affordable_runs,
+)
 from eve_online_industry_tracker.application.industry import overview_row as orow
 from eve_online_industry_tracker.application.industry.research_time import research_skill_time_multiplier
 # The slot model and skill readers are shared with the producer's parallel
@@ -92,6 +104,9 @@ class CharacterAssigner:
         price_map: dict[int, Any] | None = None,
         *,
         blueprint_data: Any,
+        # shortcut: None = unlimited for the 57 existing test calls; the service always passes a budget
+        budget: WalletBudget | None = None,
+        corp_material_stock: dict[int, int] | None = None,
     ) -> list[AssignedAction]:
         """Return list of AssignedAction for all planned jobs.
 
@@ -99,7 +114,11 @@ class CharacterAssigner:
         invention inputs a weaker assigned inventor needs.
         blueprint_data: phase 1's SDE blueprint map
         (get_blueprint_manufacturing_data): the skills each job's activity
-        requires (_SkillGate). Required: no caller may skip the check."""
+        requires (_SkillGate). Required: no caller may skip the check.
+        budget: the corp wallet left for jobs. Each manufacture is charged
+        its install fee plus the inputs to buy after `corp_material_stock`
+        (consumed in assignment order), its runs cut to what is affordable
+        (_BuildCharger)."""
         now = _now()
 
         # Build character capability map
@@ -119,10 +138,16 @@ class CharacterAssigner:
         # it must never take a slot ahead of a parent. Slots only decrease, so
         # a parent left without a slot leaves none for its components either.
         build_decisions = [d for d in chain_plan.decisions if d.decision in ("build", "pause")]
+        # Capital-return order (phase 4); rows without one keep the score order.
         top_level = sorted(
-            (d for d in build_decisions if not d.is_sub_component), key=lambda d: -d.adjusted_score
+            (d for d in build_decisions if not d.is_sub_component),
+            key=lambda d: (-(d.capital_return_per_day or 0), -d.adjusted_score),
         )
         sub_components = [d for d in build_decisions if d.is_sub_component]
+        charger = None if budget is None else _BuildCharger(
+            self, budget, StockLedger(corp_material_stock or {}), price_map or {}, blueprint_data,
+            sub_components, char_slots, characters, skill_gate,
+        )
 
         resize = getattr(chain_plan, "resize_sub_components", None)
         # Research-first parents that got no research slot and build from
@@ -150,6 +175,7 @@ class CharacterAssigner:
                 can_resize=callable(resize),
                 bpc_pool=bpc_pool,
                 skill_gate=skill_gate,
+                charger=charger,
             )
 
         for pass_decisions in (top_level, None):
@@ -201,12 +227,19 @@ class CharacterAssigner:
                     if d.decision == "build" and int(d.type_id) in requesters
                     and not any(a.action_type == "manufacture" for a in emitted.get(id(d)) or [])
                 }
-                if (fell_back or no_build) and callable(resize):
+                scale = charger.scale if charger is not None else {}
+                if (fell_back or no_build or scale) and callable(resize):
                     # Their components were sized for the research-first
-                    # batch: re-plan them for the batch actually built,
+                    # batch, or the whole batch of a parent cut to the
+                    # wallet: re-plan them for the batch actually built,
                     # before any sub-component takes a slot.
-                    resized = resize(set(fell_back), dropped=no_build) if no_build else resize(set(fell_back))
+                    resized = (
+                        resize(set(fell_back), dropped=no_build, scale=scale) if scale
+                        else resize(set(fell_back), dropped=no_build) if no_build else resize(set(fell_back))
+                    )
                     sub_components = [d for d in resized if d.decision in ("build", "pause")]
+                    if charger is not None:
+                        charger.carry_reservations(sub_components)
                     rebuild = getattr(chain_plan, "rebuild_decisions", None)
                     # One ItemDecision per type_id: the planner's own merge.
                     chain_plan.decisions[:] = rebuild(resized) if callable(rebuild) else [
@@ -214,8 +247,9 @@ class CharacterAssigner:
                     ]
                     logger.info(
                         "CharacterAssigner: re-sized the sub-components for type_id(s) %s (built from "
-                        "their kept BPO row) and dropped those of %s (no manufacture today)",
-                        sorted(fell_back), sorted(no_build),
+                        "their kept BPO row), scaled those of %s (cut to the wallet or market) and "
+                        "dropped those of %s (no manufacture today)",
+                        sorted(fell_back), sorted(scale), sorted(no_build),
                     )
                 pass_decisions = sub_components
             for decision in pass_decisions:
@@ -255,6 +289,7 @@ class CharacterAssigner:
         can_resize: bool = False,
         bpc_pool: dict[str, Any] | None = None,
         skill_gate: _SkillGate,
+        charger: _BuildCharger | None = None,
     ) -> list[AssignedAction]:
         """Return AssignedAction(s) for a single ItemDecision. A research-first
         parent that builds from its kept BPO row is added to `fell_back`;
@@ -622,15 +657,23 @@ class CharacterAssigner:
                 _note_skill_block(decision, blocked)
                 return actions
             pilots: list[tuple[int | None, str | None]] = []
+            # The slots its parent reserved at its own turn (_BuildCharger),
+            # used first; extra jobs of a re-size look for a free slot.
+            reserved = list(row.get("reserved_sub_pilots") or [])
             for index, job in enumerate(jobs):
                 after = job.get("after_job")
                 queued = isinstance(after, int) and 1 <= after <= len(pilots)
+                from_reserved = not queued and bool(reserved)
                 # A job beyond the free BPOs waits for an earlier job
                 # on the same BPO; it goes to that job's pilot and takes no
                 # slot of its own (the earlier job's slot frees first).
-                char_id, char_name = (
-                    pilots[after - 1] if queued else self._best_mfg_char(char_slots, characters, qualified=qualified)
-                )
+                if queued:
+                    char_id, char_name = pilots[after - 1]
+                elif from_reserved:
+                    char_id = reserved.pop(0)
+                    char_name = char_slots[char_id]["character_name"]
+                else:
+                    char_id, char_name = self._best_mfg_char(char_slots, characters, qualified=qualified)
                 if char_id is None:
                     logger.info(
                         "CharacterAssigner: no free mfg slot for %d of %d sub-manufacture "
@@ -657,8 +700,11 @@ class CharacterAssigner:
                     **_job_fee(job.get("fee"), job.get("fee_unknown_reason"), "sub_manufacture", type_id),
                 ))
                 pilots.append((char_id, char_name))
-                if not queued:
+                if not queued and not from_reserved:
                     self._take_slot(char_slots, char_id, "sub_manufacture")
+            # Reserved for jobs the re-size no longer has: free again.
+            for char_id in reserved:
+                self._release_slot(char_slots, char_id, "sub_manufacture")
             return actions  # sub-components don't get a manufacture action
 
         # Research first (research_first.py): ChainPlanner planned, before
@@ -782,8 +828,12 @@ class CharacterAssigner:
                     "manufacture", type_id,
                 ),
             ))
-            _component_buy_reasons(decision, actions[-1])
             self._take_slot(char_slots, char_id, "manufacture")
+            if charger is not None and not charger.charge(decision, actions[-1], int(first["runs"])):
+                actions.pop()
+                self._release_slot(char_slots, char_id, "manufacture")
+            else:
+                _component_buy_reasons(decision, actions[-1])
         elif char_id is not None:
             # Both live under manufacturing_job. A top-level runs_per_batch /
             # runs / estimated_material_cost is written by no producer, so
@@ -838,8 +888,12 @@ class CharacterAssigner:
                     "manufacture", type_id,
                 ),
             ))
-            _component_buy_reasons(decision, actions[-1])
             self._take_slot(char_slots, char_id, "manufacture")
+            if charger is not None and not charger.charge(decision, actions[-1], runs):
+                actions.pop()
+                self._release_slot(char_slots, char_id, "manufacture")
+            else:
+                _component_buy_reasons(decision, actions[-1])
         else:
             logger.debug("CharacterAssigner: no free mfg slot for type_id=%s", type_id)
 
@@ -2178,3 +2232,164 @@ def _sub_manufacture_notes(
     if job["output"] > job["quantity"]:
         notes += f"; outputs {job['output']}, {job['quantity']} needed"
     return notes
+
+
+def cut_batch(action: AssignedAction, runs: int, batch_runs: int) -> None:
+    """Cut a manufacture action from `batch_runs` to `runs`: its units and
+    materials (rounded up) and its ISK figures scale with the runs; None
+    (unknown) stays None."""
+    action.runs = runs
+    if action.quantity is not None:
+        action.quantity = -(-action.quantity * runs // batch_runs)
+    if action.materials is not None:
+        action.materials = {t: -(-q * runs // batch_runs) for t, q in action.materials.items()}
+    for name in ("estimated_cost_isk", "estimated_build_cost_isk", "estimated_profit_isk", "estimated_job_fee_isk"):
+        value = getattr(action, name)
+        if value is not None:
+            setattr(action, name, value * runs / batch_runs)
+
+
+class _BuildCharger:
+    """Charges each top-level manufacture to the wallet at its turn
+    (capital-return order). The charge is the install fee plus the inputs to
+    buy after the corp stock left by higher rows (StockLedger); a component
+    a sub decision builds costs its build cost per unit for the units its
+    jobs cover, booked at the parent's turn on slots reserved there, so the
+    sub pass cannot spend later what was not charged. Runs are cut to the
+    market cap and to what the wallet allows."""
+
+    def __init__(
+        self, assigner: CharacterAssigner, budget: WalletBudget, ledger: StockLedger,
+        price_map: dict[int, Any], blueprint_data: Any, subs: list[ItemDecision],
+        char_slots: dict[int, dict[str, Any]], characters: list[dict[str, Any]], skill_gate: _SkillGate,
+    ) -> None:
+        self._assigner, self._budget, self._ledger = assigner, budget, ledger
+        self._price_map, self._blueprint_data, self._subs = price_map, blueprint_data, subs
+        self._char_slots, self._characters, self._skill_gate = char_slots, characters, skill_gate
+        self._product_to_blueprint: dict[int, int] | None = None
+        #: {sub type_id: pilot per reserved job} and the units those jobs
+        #: still cover for the parents (consumed parent by parent, like the
+        #: shopping list's sub_built).
+        self.reserved: dict[int, list[int]] = {}
+        self.covered: dict[int, int] = {}
+        #: {parent type_id: runs built / batch runs} for the sub re-size.
+        self.scale: dict[int, float] = {}
+
+    def _unit_price(self, type_id: int) -> float | None:
+        return price_map_unit_price(self._price_map.get(type_id))[0]
+
+    def _materials(self, action: AssignedAction) -> dict[int, int] | None:
+        if action.materials is None and self._product_to_blueprint is None:
+            self._product_to_blueprint = build_product_to_blueprint_index(self._blueprint_data)
+        return action_material_needs(action, self._blueprint_data, self._product_to_blueprint or {})
+
+    def _reserve_subs(self, parent_type_id: int) -> list[int]:
+        """Reserve the slots of the not yet reserved subs this parent requests;
+        their type_ids. A job without a pilot ends the reservation (its units
+        and the later jobs' are bought), as in the sub pass."""
+        fresh: list[int] = []
+        for sub in self._subs:
+            sub_type_id, row = int(sub.type_id), sub.overview_row
+            if sub_type_id in self.reserved or parent_type_id not in {
+                int(p) for p in row.get("requested_by_type_ids") or []
+            }:
+                continue
+            qualified, blocked = self._skill_gate.check(orow.get_blueprint_type_id(row), "manufacturing")
+            pilots: list[int] = []
+            units = jobs_covered = 0
+            # No pilot has the skills: nothing reserved, the units are bought.
+            for job in (row.get("sub_job_batches") or []) if blocked is None else []:
+                after = job.get("after_job")
+                if not (isinstance(after, int) and 1 <= after <= jobs_covered):
+                    char_id, _name = self._assigner._best_mfg_char(
+                        self._char_slots, self._characters, qualified=qualified,
+                    )
+                    if char_id is None:
+                        break
+                    self._assigner._take_slot(self._char_slots, char_id, "sub_manufacture")
+                    pilots.append(char_id)
+                jobs_covered += 1
+                units += int(job["quantity"])
+            self.reserved[sub_type_id], self.covered[sub_type_id] = pilots, units
+            row["reserved_sub_pilots"] = list(pilots)
+            fresh.append(sub_type_id)
+        return fresh
+
+    def _release(self, sub_type_ids: list[int]) -> None:
+        for sub_type_id in sub_type_ids:
+            for char_id in self.reserved.pop(sub_type_id):
+                self._assigner._release_slot(self._char_slots, char_id, "sub_manufacture")
+            self.covered.pop(sub_type_id)
+        for sub in self._subs:
+            if int(sub.type_id) in sub_type_ids:
+                sub.overview_row.pop("reserved_sub_pilots", None)
+
+    def carry_reservations(self, subs: list[ItemDecision]) -> None:
+        """After a re-size: the new sub decisions keep their type's
+        reservation (matched by type_id; the sub pass frees the jobs it no
+        longer has); a type no longer sub-built frees its slots."""
+        kept = {int(d.type_id) for d in subs}
+        self._release([t for t in self.reserved if t not in kept])
+        for sub in subs:
+            if int(sub.type_id) in self.reserved:
+                sub.overview_row["reserved_sub_pilots"] = list(self.reserved[int(sub.type_id)])
+
+    def charge(self, decision: ItemDecision, action: AssignedAction, batch_runs: int) -> bool:
+        """Cut `action` to the runs the wallet allows and charge it; False
+        (nothing charged, reason on the decision) when not even 1 run fits."""
+        parent_type_id = int(decision.type_id)
+        fresh = self._reserve_subs(parent_type_id)
+        build_unit_cost = {
+            int(sub.type_id): (sub.overview_row["sub_manufacture_cost"] + sub.overview_row["sub_install_fee"])
+            / sub.overview_row["quantity_needed"]
+            for sub in self._subs
+            if int(sub.type_id) in self.covered
+            and parent_type_id in {int(p) for p in sub.overview_row.get("requested_by_type_ids") or []}
+        }
+        base, fee = self._materials(action), action.estimated_job_fee_isk
+
+        def cost_of(runs: int, commit: bool = False) -> float | None:
+            if base is None or fee is None:
+                return None
+            materials = {t: -(-q * runs // batch_runs) for t, q in base.items()}
+            built = 0.0
+            for sub_type_id, unit_cost in build_unit_cost.items():
+                take = min(materials.get(sub_type_id, 0), self.covered[sub_type_id])
+                if take:
+                    materials[sub_type_id] -= take
+                    built += take * unit_cost
+                    if commit:
+                        self.covered[sub_type_id] -= take
+            bought = self._ledger.purchase_cost(materials, self._unit_price, commit=commit)
+            return None if bought is None else fee * runs / batch_runs + built + bought
+
+        budget = self._budget
+        target = min(batch_runs, decision.market_cap_runs or batch_runs)
+        runs = 0 if budget.blocked_reason else max_affordable_runs(cost_of, target, budget.available)
+        if runs == 0:
+            self._release(fresh)
+            one_run = cost_of(1)
+            if budget.blocked_reason:
+                why = budget.blocked_reason
+            elif one_run is None:
+                why = f"wallet charge unknown ({self._unknown_input(base, fee, action)})"
+            else:
+                why = f"wallet ({budget.available:,.0f} ISK left, 1 run needs {one_run:,.0f})"
+            logger.info("CharacterAssigner: type_id=%s not built today: %s", decision.type_id, why)
+            _append_reason(decision, f"not built today: {why}")
+            return False
+        cost = cost_of(runs, commit=True)
+        if runs < batch_runs:
+            cut_batch(action, runs, batch_runs)
+            self.scale[parent_type_id] = runs / batch_runs
+            action.notes = f"{action.notes}; cut from {batch_runs} to {_count(runs, 'run', 'runs')} (wallet / market)"
+        budget.charge(cost)
+        return True
+
+    def _unknown_input(self, base: dict[int, int] | None, fee: float | None, action: AssignedAction) -> str:
+        if fee is None:
+            return f"install fee unknown: {action.estimated_job_fee_unknown_reason or 'no reason recorded'}"
+        if base is None:
+            return "batch materials unknown"
+        unpriced = sorted(t for t in base if self._unit_price(t) is None)
+        return f"no market price for type_id(s) {unpriced}"
