@@ -77,3 +77,11 @@ def test_max_affordable_runs():
     assert max_affordable_runs(lambda r: 10.0 * r, 30, 95.0) == 9
     assert max_affordable_runs(lambda r: 10.0 * r, 30, 5.0) == 0
     assert max_affordable_runs(lambda r: None, 30, 1e9) == 0
+
+
+def test_spendable_is_balance_after_reserve_and_0_when_blocked():
+    b = WalletBudget(balance=100.0, reserve_pct=10)
+    b.set_aside(30.0)
+    b.charge(20.0)
+    assert b.spendable == 90.0
+    assert WalletBudget(balance=100.0, reserve_pct=10, blocked_reason="stale").spendable == 0.0

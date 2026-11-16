@@ -1106,12 +1106,14 @@ class DailyPlannerService:
                 "refreshed_at": refreshed_at,
                 "age_hours": wallet_age_hours(refreshed_at, datetime.now(timezone.utc)),
                 "reserve_pct": float(_adm(self._admin, "planner_wallet_reserve_pct")),
-                "budget": 0.0 if budget.blocked_reason else budget.available + budget.spent,
+                "budget": budget.spendable,
                 "spent": budget.spent,
                 "blocked_reason": budget.blocked_reason,
             }
             summary["free_slots"] = {
-                slot["character_name"]: {k: slot[k] for k in ("manufacturing", "science", "reason")}
+                slot["character_name"]: {
+                    k: slot[k] for k in ("manufacturing", "science", "manufacturing_reason", "science_reason")
+                }
                 for slot in self._character_assigner.free_slots_after.values()
             }
         plan = BuildPlanModel(

@@ -96,7 +96,7 @@ def test_skill_blocked_research_reserves_nothing():
 def test_free_slots_reason_no_eligible_job():
     assigner, _actions = _assign([_parent(runs=1)], [_pilot(research_slots=2)], WalletBudget(balance=1e12, reserve_pct=0))
     left = assigner.free_slots_after[1]
-    assert (left["science"], left["reason"], left["manufacturing"]) == (2, "no eligible job", 0)
+    assert (left["science"], left["science_reason"], left["manufacturing"]) == (2, "no eligible job", 0)
     assert left["character_name"] == "Pilot 1"
 
 
@@ -105,7 +105,7 @@ def test_free_slots_reason_wallet_when_the_budget_stopped_science():
     assigner, actions = _assign([row], [_pilot(research_slots=2)], WalletBudget(balance=1 * M, reserve_pct=0))
     assert not _of(actions, "me_research")
     assert "no science today: wallet" in row.decision_reason
-    assert assigner.free_slots_after[1]["reason"] == "wallet"
+    assert assigner.free_slots_after[1]["science_reason"] == "wallet"
 
 
 def test_unowned_t1_bpo_gets_no_jobs():
@@ -187,7 +187,7 @@ def test_free_slots_reason_names_an_unknown_science_cost():
     del row.overview_row["manufacturing_job"]["research_job_cost_by_level"]
     assigner, actions = _assign([row], [_pilot(research_slots=1)], WalletBudget(balance=1e12, reserve_pct=0))
     assert not _of(actions, "me_research")
-    reason = assigner.free_slots_after[1]["reason"]
+    reason = assigner.free_slots_after[1]["science_reason"]
     assert reason.startswith("no science today: me_research cost unknown (") and reason in row.decision_reason
 
 
@@ -207,5 +207,27 @@ def test_wallet_reason_only_for_the_pilot_who_could_run_the_job():
         [row], [_pilot(1, research_slots=1, extra=[science]), _pilot(2, research_slots=1)],
         WalletBudget(balance=1 * M, reserve_pct=0), _OnlyPilotOneResearches(),
     )
-    assert assigner.free_slots_after[1]["reason"] == "wallet"
-    assert assigner.free_slots_after[2]["reason"] == "no eligible job"
+    assert assigner.free_slots_after[1]["science_reason"] == "wallet"
+    assert assigner.free_slots_after[2]["science_reason"] == "no eligible job"
+
+
+def test_free_slots_reasons_when_the_budget_is_blocked():
+    budget = WalletBudget(balance=1e12, reserve_pct=0, blocked_reason="corp wallet unknown")
+    assigner, _actions = _assign([_parent(runs=1)], [_pilot(research_slots=2, mfg_slots=1)], budget)
+    left = assigner.free_slots_after[1]
+    assert (left["manufacturing"], left["manufacturing_reason"]) == (1, "corp wallet unknown")
+    assert (left["science"], left["science_reason"]) == (2, "corp wallet unknown")
+
+
+def test_free_mfg_reason_wallet_when_a_build_is_cut_for_money():
+    # Two pilots, one 10-run build cut to what 5M pays: pilot 2's mfg slot is left for lack of ISK.
+    budget = WalletBudget(balance=5 * M, reserve_pct=0)
+    assigner, actions = _assign([_parent(runs=10, materials={MAT: 10})], [_pilot(1), _pilot(2)], budget)
+    assert _of(actions, "manufacture")[0].runs < 10
+    assert {s["manufacturing_reason"] for s in assigner.free_slots_after.values() if s["manufacturing"]} == {"wallet"}
+
+
+def test_free_mfg_reason_no_eligible_job():
+    assigner, _actions = _assign([], [_pilot(mfg_slots=2)], WalletBudget(balance=1e12, reserve_pct=0))
+    left = assigner.free_slots_after[1]
+    assert (left["manufacturing"], left["manufacturing_reason"]) == (2, "no eligible job")

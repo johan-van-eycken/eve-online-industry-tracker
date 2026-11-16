@@ -26,6 +26,11 @@ class WalletBudget:
         return max(self._spendable - self._charged - self._pot, 0.0)
 
     @property
+    def spendable(self) -> float:
+        """balance x (1 - reserve_pct/100); 0 when blocked."""
+        return 0.0 if self._blocked_reason else self._spendable
+
+    @property
     def spent(self) -> float:
         return self._charged
 

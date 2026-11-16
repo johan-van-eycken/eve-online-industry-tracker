@@ -10,6 +10,7 @@ from typing import Any
 
 import streamlit as st
 
+from eve_online_industry_tracker.application.corporations.wallet_age import wallet_age_hours
 from eve_online_industry_tracker.config.admin_settings import ADMIN_SETTINGS_SCHEMA
 from streamlit_ui.api.admin_settings import planner_page_defaults
 from streamlit_ui.api.daily_planner import compute_plan, get_market_intel_status, get_plan, get_status
@@ -303,11 +304,13 @@ def plan_summary(plan_meta: dict[str, Any]) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
-def wallet_caption(summary_wallet: dict[str, Any] | None) -> str | None:
-    """Wallet age and plan budget; None for an old plan without the wallet block."""
+def wallet_caption(summary_wallet: dict[str, Any] | None, now: datetime | None = None) -> str | None:
+    """Wallet age (at display time) and plan budget; None for an old plan without the wallet block."""
     if not summary_wallet:
         return None
-    age = summary_wallet.get("age_hours")
+    age = wallet_age_hours(summary_wallet.get("refreshed_at"), now or datetime.now(timezone.utc))
+    if age is None:
+        age = summary_wallet.get("age_hours")
     age_text = f"{age:.1f} h ago" if age is not None else "never"
     text = (f"read {age_text} · budget {float(summary_wallet.get('budget') or 0):,.0f} ISK "
             f"after {float(summary_wallet.get('reserve_pct') or 0):g}% reserve")
@@ -316,14 +319,18 @@ def wallet_caption(summary_wallet: dict[str, Any] | None) -> str | None:
 
 
 def free_slots_lines(summary_free_slots: dict[str, Any] | None) -> list[str]:
-    """One line per character with free slots, e.g. "Duke X1: 2 mfg, 1 science free (reason)"."""
+    """One line per character with free slots, each count with its own reason,
+    e.g. "Duke X1: 3 mfg free (wallet), 2 science free (no eligible job)"."""
     lines = []
     for name, slot in (summary_free_slots or {}).items():
-        parts = [f"{slot[key]} {label}" for key, label in (("manufacturing", "mfg"), ("science", "science"))
-                 if slot.get(key)]
+        parts = []
+        for key, label in (("manufacturing", "mfg"), ("science", "science")):
+            if slot.get(key):
+                # An old plan has one "reason" (its science reason) instead.
+                reason = slot.get(f"{key}_reason", slot.get("reason") if key == "science" else None)
+                parts.append(f"{slot[key]} {label} free" + (f" ({reason})" if reason else ""))
         if parts:
-            reason = f" ({slot['reason']})" if slot.get("reason") else ""
-            lines.append(f"{slot.get('character_name') or name}: {', '.join(parts)} free{reason}")
+            lines.append(f"{slot.get('character_name') or name}: {', '.join(parts)}")
     return lines
 
 

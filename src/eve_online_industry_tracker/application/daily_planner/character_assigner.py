@@ -96,7 +96,8 @@ class CharacterAssigner:
     _RESEARCH_ACTIONS = ("invent", "copy", "me_research", "te_research")
 
     #: Per pilot after the last assign: {char_id: {"character_name", "manufacturing",
-    #: "science" (slots left), "reason" (why science slots are left, else None)}}.
+    #: "science" (slots left), "manufacturing_reason" / "science_reason" (why
+    #: those slots are left, else None)}}.
     free_slots_after: dict[int, dict[str, Any]] = {}
 
     def assign(
@@ -308,12 +309,15 @@ class CharacterAssigner:
             _reword_unused_research_claims(chain_plan.decisions, assigned_actions, fell_back)
         _reword_released_bpcs(chain_plan.decisions, bpc_pool)
         dropped = charger.science_dropped if charger is not None else {}
+        blocked = budget.blocked_reason if budget is not None else None
+        mfg_reason = blocked or ("wallet" if charger is not None and charger.wallet_limited else "no eligible job")
         self.free_slots_after = {
             cid: {
                 "character_name": slot["character_name"],
                 "manufacturing": int(slot["free_mfg"]),
                 "science": int(slot["free_research"]),
-                "reason": dropped.get(cid, "no eligible job") if slot["free_research"] > 0 else None,
+                "manufacturing_reason": mfg_reason if slot["free_mfg"] > 0 else None,
+                "science_reason": (blocked or dropped.get(cid, "no eligible job")) if slot["free_research"] > 0 else None,
             }
             for cid, slot in char_slots.items()
         }
@@ -2561,6 +2565,8 @@ class _BuildCharger:
         self.scale: dict[int, float] = {}
         #: {pilot: why a science job of theirs was dropped} (free_slots_after's reason).
         self.science_dropped: dict[int, str] = {}
+        #: A build was dropped or cut for money (free_slots_after's manufacturing reason).
+        self.wallet_limited = False
 
     def _unit_price(self, type_id: int) -> float | None:
         return price_map_unit_price(self._price_map.get(type_id))[0]
@@ -2692,9 +2698,13 @@ class _BuildCharger:
                 why = f"wallet charge unknown ({self._unknown_input(base, fee, action)})"
             else:
                 why = f"wallet ({budget.available:,.0f} ISK left, 1 run needs {one_run:,.0f})"
+                self.wallet_limited = True
             logger.info("CharacterAssigner: type_id=%s not built today: %s", decision.type_id, why)
             _append_reason(decision, f"not built today: {why}")
             return False
+        # Cut for money, not because one more run's charge is unknown.
+        if runs < target and cost_of(runs + 1) is not None:
+            self.wallet_limited = True
         cost = cost_of(runs, commit=True)
         if runs < batch_runs:
             cut_batch(action, runs, batch_runs)
