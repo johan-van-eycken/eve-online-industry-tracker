@@ -533,7 +533,11 @@ class CharacterAssigner:
         blocked.update(bp_of.get(int(a.type_id)) for a in planned if a.action_type == "sub_manufacture")
 
         gaps = _stock.stock_gaps(
-            bpo_type_ids=bpos.keys(), bpc_counts={int(t): len(ledger.free_bpcs(int(t))) for t in bpcs},
+            bpo_type_ids=bpos.keys(), bpc_counts={
+                # A BPC a running job or this plan uses up is not stock; a
+                # running job's output counts through in_progress.
+                int(t): sum(1 for e in ledger.free_bpcs(int(t)) if e[0] not in taken) for t in bpcs
+            },
             in_progress=in_progress, invention_source_index=sources,
             min_bpc=int(stock["min_bpc"]), min_invented=int(stock["min_invented"]), product_of=product_of.get,
         )

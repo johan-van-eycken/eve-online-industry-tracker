@@ -229,3 +229,42 @@ def test_plan_never_exceeds_budget_with_subs_stock_and_science():
     ])
     assert reserved.unpriced_purchases == 0 and reserved.unknown_fee_jobs == 0
     assert 0 < reserved.total <= balance
+
+
+def _stock_plan(balance):
+    """Phases 6-8 with the blueprint stock pass on: T1 BPO 998 with two T1
+    BPCs, a T2 product (skip row) inventable from it, an inventor and a copier."""
+    import test_daily_planner_blueprint_stock as S
+
+    svc = DailyPlannerService(
+        industry_service=SimpleNamespace(), corporations_service=SimpleNamespace(),
+        characters_service=_Chars([INV._best_inventor(), INV._copier()]), sales_history_service=SimpleNamespace(),
+        market_pricing_service=SimpleNamespace(), repo=SimpleNamespace(), admin_settings=_StockAdmin(),
+        session_provider=SimpleNamespace(),
+    )
+    phase1 = {
+        "wallet_budget": WalletBudget(balance=balance, reserve_pct=0), "corp_material_stock": {},
+        "industry_jobs": [], "price_map": dict(INV.PRICES), "market_depth_cache": dict(INV.PRICES),
+        "blueprint_data": S.BLUEPRINTS, "corp_assets": [],
+        "bpo_assets_by_type_id": {998: [L._bpo(77, 998)]},
+        "bpc_assets_by_type_id": {998: [L._bpc(i, 998, 10) for i in (701, 702)]},
+    }
+    chain = ChainPlan(decisions=[S._t2_skip_row()])
+    assigned = svc._phase_6_assign(chain, phase1)
+    rows = svc._phase_8_actions(assigned, svc._phase_7_shopping(assigned, phase1), phase1, chain)
+    return assigned, rows
+
+
+def test_plan_with_stock_jobs_never_exceeds_budget():
+    for balance in (1e3, 1e5, 1e7, 1e9):
+        assigned, rows = _stock_plan(balance)
+        reserved = compute_capital_reserved([
+            {"action_type": r.action_type, "status": "pending", "estimated_cost_isk": r.estimated_cost_isk,
+             "estimated_job_fee_isk": r.estimated_job_fee_isk} for r in rows
+        ])
+        assert reserved.total <= balance, balance
+        assert (reserved.unpriced_purchases, reserved.unknown_fee_jobs) == (0, 0), balance
+        assert any(a.action_type == "copy" and "stock:" in (a.notes or "") for a in assigned), balance
+        if balance == 1e9:
+            assert any(a.action_type == "invent" and "stock:" in (a.notes or "") for a in assigned)
+            assert any(r.action_type == "buy_materials" for r in rows)

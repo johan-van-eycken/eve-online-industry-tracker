@@ -191,6 +191,17 @@ def test_copy_gap_without_own_row_ranks_by_its_t2_dependant():
     assert [(a.action_type, a.type_id) for a in actions] == [("copy", 998)]
 
 
+def test_bpcs_this_plan_uses_up_are_not_stock():
+    # T2 blueprint 1999: 3 BPCs, 2 of them claimed by a manufacture in this plan -> 1 in stock, an invent gap.
+    t2 = _t2_skip_row()
+    t2.overview_row["ledger_claims"] = {"manufacture": [801, 802], "copy": [], "invention": [], "research": []}
+    bpcs = {998: [L._bpc(701, 998, 10)], 1999: [L._bpc(i, 1999, 10) for i in (801, 802, 803)]}
+    _assigner, actions = _stock_pass([t2], [A._best_inventor()], bpcs, min_bpc=0)
+    (action,) = actions
+    assert (action.action_type, action.blueprint_item_id) == ("invent", 701)
+    assert "stock: 1 of 3 BPCs" in action.notes
+
+
 def test_service_passes_the_stock_inputs():
     from types import SimpleNamespace
 
