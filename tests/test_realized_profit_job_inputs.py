@@ -340,3 +340,42 @@ def test_next_fifo_unit_costs_reads_every_type_from_one_replay(session_provider)
 
     assert costs[MODULE] == (13_500_000.0, "fifo: industry job 1003")
     assert len(blueprint_queries) == 1  # the three jobs' blueprints in one batched lookup
+
+
+def _transfer_out_case(app_session, sde_session) -> None:
+    """Character 1 builds 40, moves 24 to the corp (observed 1 April), then a job needs 20."""
+    _blueprints(sde_session)
+    char = {"character_id": 1}
+    app_session.add(CorporationModel(corporation_id=50, corporation_name="Corp"))
+    app_session.add(CharacterModel(character_id=1, character_name="Builder"))
+    app_session.add(_build(CharacterIndustryJobsModel, char, 1001, "2026-03-20T00:00:00Z", 40, 16_600_000.0))
+    app_session.add(CorporationAssetHistoryModel(
+        corporation_id=50, item_id=9001, observed_at="2026-04-01T00:00:00Z", snapshot_source="asset_refresh",
+        type_id=MODULE, quantity=24, acquisition_source="industry_build_transferred",
+        acquisition_unit_cost=16_600_000.0, acquisition_reference_type="industry_job",
+        acquisition_reference_id=1001, acquisition_date="2026-03-20T00:00:00Z"))
+    app_session.add(_t2_job(CharacterIndustryJobsModel, char, 1002, "2026-04-10T00:00:00Z", 20))
+    app_session.commit()
+
+
+def test_units_moved_to_the_corp_leave_the_character_queue(session_provider) -> None:
+    app_session, sde_session = session_provider.app_session(), session_provider.sde_session()
+    _transfer_out_case(app_session, sde_session)
+
+    inputs = _character_service(app_session, sde_session)._replay_owner(owner_id=1)["inputs"]
+
+    assert inputs["drained"] == 16
+    assert inputs["untracked"] == 4 + 40  # and the build's own 40 Tritanium, never bought
+    assert inputs["transferred"] == 24
+    assert inputs["draws"] == {(MODULE, "industry_job", 1001): 16}
+
+
+def test_a_transfer_the_character_ledger_drained_leaves_no_stamp_excess(session_provider) -> None:
+    app_session, sde_session = session_provider.app_session(), session_provider.sde_session()
+    _transfer_out_case(app_session, sde_session)
+    service = _corp_service(app_session, sde_session)
+
+    replay = service._replay_owner(owner_id=50)
+
+    assert replay["uncancelled_excess"] == {}
+    assert [(lot.reference_id, lot.quantity) for lot in replay["lots_by_type"][MODULE]] == [(1001, 24)]
