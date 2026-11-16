@@ -719,35 +719,7 @@ class _BaseRealizedProfitLedgerService:
         industry_jobs = self._load_industry_jobs(owner_id=int(owner_id))
         asset_history_lots = self._load_asset_history_lots(owner_id=int(owner_id))
 
-        # Char-job and char-buy lots cover char-built items sold before the transfer was
-        # captured in asset history (Manufacturing instead of opening_inventory). Each enters
-        # less what the characters' own jobs took from it (those units never left the
-        # character). A lot the asset history already stamped from the same job or buy is
-        # skipped: unconsumed leftovers stay in the queue and a later sale would take them as
-        # a second copy. Stamped units beyond what the character's replay left of that lot
-        # are the same units the replay left in a later lot, so they cancel those, oldest first.
-        supplemental_lots = self._load_supplemental_lots(owner_id=int(owner_id))
-        drawn = self._supplemental_draws() if supplemental_lots else {}
-        for supp_type_id, supp_lots in supplemental_lots.items():
-            type_lots = asset_history_lots.setdefault(int(supp_type_id), [])
-            stamped: dict[tuple[Any, Any], int] = defaultdict(int)
-            for lot in type_lots:
-                if lot.reference_id is not None:
-                    stamped[(lot.reference_type, lot.reference_id)] += int(lot.quantity)
-            residuals: list[FifoLot] = []
-            excess = 0
-            for lot in supp_lots:
-                key = (lot.reference_type, lot.reference_id)
-                left = max(0, int(lot.quantity) - drawn.get((int(supp_type_id), *key), 0))
-                if key in stamped:
-                    excess += max(0, stamped[key] - left)
-                elif left:
-                    residuals.append(replace(lot, quantity=left))
-            for lot in residuals:
-                cancelled = min(excess, int(lot.quantity))
-                excess -= cancelled
-                if int(lot.quantity) > cancelled:
-                    type_lots.append(replace(lot, quantity=int(lot.quantity) - cancelled))
+        uncancelled_excess = self._merge_character_lots(asset_history_lots)
 
         # A lot that points at an industry job is priced from the job's
         # current unit_build_cost, not the cost stamped when the lot was
@@ -898,9 +870,9 @@ class _BaseRealizedProfitLedgerService:
                     inputs["jobs"].add(int(event["sort_id"]))
                     inputs["drained"] += int(taken["priced_quantity"])
                     inputs["untracked"] += int(taken["unpriced_quantity"])
-                    for drawn in taken["allocations"]:
-                        if drawn["reference_id"] is not None:
-                            inputs["draws"][(int(type_id), drawn["reference_type"], int(drawn["reference_id"]))] += int(drawn["quantity"])
+                    for entry in taken["allocations"]:
+                        if entry["reference_id"] is not None:
+                            inputs["draws"][(int(type_id), entry["reference_type"], int(entry["reference_id"]))] += int(entry["quantity"])
                     continue
 
                 if kind != "sell":
@@ -931,7 +903,8 @@ class _BaseRealizedProfitLedgerService:
                     )
                 sales.append((tx, allocation))
 
-        return {"lots_by_type": lots_by_type, "sales": sales, "inputs": inputs}
+        return {"lots_by_type": lots_by_type, "sales": sales, "inputs": inputs,
+                "uncancelled_excess": uncancelled_excess}
 
     def _rebuild_owner(self, *, owner_id: int) -> list[Any]:
         self._app_session.query(self.ledger_model).filter(getattr(self.ledger_model, self.owner_id_field) == int(owner_id)).delete()
@@ -942,6 +915,13 @@ class _BaseRealizedProfitLedgerService:
             logger.info(
                 "%s %s ledger: %d industry job(s) took %d tracked input unit(s) from the FIFO queues, %d untracked",
                 self.owner_id_field, int(owner_id), len(inputs["jobs"]), inputs["drained"], inputs["untracked"],
+            )
+        if replay["uncancelled_excess"]:
+            excess = sorted(replay["uncancelled_excess"].items(), key=lambda item: -item[1])
+            logger.info(
+                "%s %s ledger: stamped transfer units with no character residual left, kept as stamped "
+                "(%d type(s), largest type:units %s)",
+                self.owner_id_field, int(owner_id), len(excess), ", ".join(f"{t}:{q}" for t, q in excess[:10]),
             )
         journal_by_id = self._load_journal_map(owner_id=int(owner_id))
         owner_context = self._load_owner_context(owner_id=int(owner_id))
@@ -1068,13 +1048,9 @@ class _BaseRealizedProfitLedgerService:
         """Return FifoLots sourced from asset history, keyed by type_id. Subclasses may override."""
         return {}
 
-    def _load_supplemental_lots(self, *, owner_id: int) -> dict[int, list[FifoLot]]:
-        """Return additional FifoLots to merge into the FIFO queue. Subclasses may override."""
-        return {}
-
-    def _supplemental_draws(self) -> dict[tuple[int, Any, int], int]:
-        """{(type_id, reference_type, reference_id): units} taken from the
-        supplemental lots elsewhere before they reach this queue."""
+    def _merge_character_lots(self, asset_history_lots: dict[int, list[FifoLot]]) -> dict[int, int]:
+        """Merge character-held lots into `asset_history_lots` (the corp
+        does); returns {type_id: stamped units left uncancelled}."""
         return {}
 
     def _load_owner_context(self, *, owner_id: int) -> dict[str, Any]:
@@ -1228,14 +1204,15 @@ class CorporationRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
     def list_rows(self, *, corporation_id: int | None = None) -> list[dict[str, Any]]:
         return super().list_rows(owner_id=corporation_id)
 
-    def _load_character_source_lots(self, corporation_id: int) -> dict[int, list[FifoLot]]:
-        """Return FifoLots from character industry jobs and character market buys.
+    def _load_character_source_lots(self) -> dict[int, dict[int, list[FifoLot]]]:
+        """Return {character_id: {type_id: FifoLots}} from character industry jobs and
+        character market buys, oldest first.
 
         These represent items manufactured or purchased by characters, then transferred to the
         corporation. Buys paid from the corp wallet are left out: the corp's own transactions
-        already hold them. _rebuild_owner skips a lot the corp asset history already stamped.
+        already hold them. _merge_character_lots nets them against the character's own replay.
         """
-        lots_by_type: dict[int, list[FifoLot]] = {}
+        lots_by_character: dict[int, dict[int, list[FifoLot]]] = {}
         completed_statuses = COMPLETED_JOB_STATUSES
 
         char_jobs = (
@@ -1258,7 +1235,7 @@ class CorporationRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
             if unit_build_cost is None or unit_build_cost <= 0 or not output_quantity or output_quantity <= 0:
                 continue
             completed_date = getattr(job, "completed_date", None) or getattr(job, "end_date", None)
-            lots_by_type.setdefault(int(product_type_id), []).append(
+            lots_by_character.setdefault(int(job.character_id), {}).setdefault(int(product_type_id), []).append(
                 FifoLot(
                     quantity=int(output_quantity),
                     unit_price=float(unit_build_cost),
@@ -1286,7 +1263,7 @@ class CorporationRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
             quantity = _safe_int(getattr(tx, "quantity", None))
             if unit_price is None or unit_price <= 0 or not quantity or quantity <= 0:
                 continue
-            lots_by_type.setdefault(int(type_id), []).append(
+            lots_by_character.setdefault(int(tx.character_id), {}).setdefault(int(type_id), []).append(
                 FifoLot(
                     quantity=int(quantity),
                     unit_price=float(unit_price),
@@ -1297,13 +1274,10 @@ class CorporationRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
                 )
             )
 
-        # Sort each type's lots oldest-first
-        for type_id_key in lots_by_type:
-            lots_by_type[type_id_key].sort(
-                key=lambda lot: (_parse_date(lot.acquisition_date) or datetime.min)
-            )
-
-        return lots_by_type
+        for lots_by_type in lots_by_character.values():
+            for lots in lots_by_type.values():
+                lots.sort(key=lambda lot: (_parse_date(lot.acquisition_date) or datetime.min))
+        return lots_by_character
 
     def _load_asset_history_lots(self, *, owner_id: int) -> dict[int, list[FifoLot]]:
         """Load FifoLots from CorporationAssetHistoryModel rows that have a stamped acquisition_unit_cost.
@@ -1436,21 +1410,57 @@ class CorporationRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
                     break
         return stale
 
-    def _load_supplemental_lots(self, *, owner_id: int) -> dict[int, list[FifoLot]]:
-        """Delegate to _load_character_source_lots for the corp service."""
-        return self._load_character_source_lots(corporation_id=int(owner_id))
+    def _merge_character_lots(self, asset_history_lots: dict[int, list[FifoLot]]) -> dict[int, int]:
+        """Char-job and char-buy lots cover char-built items sold before the transfer was
+        captured in asset history (Manufacturing instead of opening_inventory).
 
-    def _supplemental_draws(self) -> dict[tuple[int, Any, int], int]:
-        """What every character's own ledger replay let its jobs take, per lot:
-        the corp side never draws what the character side did not."""
+        Per character, each lot enters only what that character's own ledger replay left of
+        it: its jobs' inputs and its personal sales never reached the corp. A stamped
+        transfer lot from the character's job or buy is the character's units arriving in
+        the corp hangar: the stamp gives the quantity, the character's FIFO residual (oldest
+        first) the identity and cost, since the backfill's job is only a guess at which
+        build the stack came from. The rest of a stamped lot's residual stayed with the
+        character; other residuals stay in the queue. A placed residual keeps the stamp's
+        date (its place in the corp queue). Stamped units beyond the character's residuals
+        are kept as stamped and returned per type."""
         character_service = CharacterRealizedProfitLedgerService(
             app_session=self._app_session, sde_session=self._sde_session,
             market_prices=self._market_prices, admin_settings=self._admin_settings)
-        drawn: dict[tuple[int, Any, int], int] = defaultdict(int)
-        for character_id in character_service.owner_ids():
-            for key, quantity in character_service._replay_owner(owner_id=character_id)["inputs"]["draws"].items():
-                drawn[key] += int(quantity)
-        return drawn
+        uncancelled: dict[int, int] = defaultdict(int)
+        for character_id, lots_by_type in self._load_character_source_lots().items():
+            replay = character_service._replay_owner(owner_id=int(character_id))
+            taken: dict[tuple[int, Any, int], int] = defaultdict(int, replay["inputs"]["draws"])
+            for tx, allocation in replay["sales"]:
+                for entry in allocation["allocations"]:
+                    if entry["reference_id"] is not None:
+                        taken[(int(tx.type_id), entry["reference_type"], int(entry["reference_id"]))] += int(entry["quantity"])
+            for type_id, lots in lots_by_type.items():
+                type_lots = asset_history_lots.setdefault(int(type_id), [])
+                keys = {(lot.reference_type, lot.reference_id) for lot in lots}
+                stamps = [lot for lot in type_lots if (lot.reference_type, lot.reference_id) in keys]
+                stamped_keys = {(lot.reference_type, lot.reference_id) for lot in stamps}
+                stamp_ids = {id(lot) for lot in stamps}
+                type_lots[:] = [lot for lot in type_lots if id(lot) not in stamp_ids]
+                residuals = []
+                for lot in lots:
+                    left = int(lot.quantity) - taken.get((int(type_id), lot.reference_type, int(lot.reference_id or 0)), 0)
+                    if left > 0:
+                        residuals.append(replace(lot, quantity=left))
+                # Each stamp's units are the oldest residual units, at the stamp's place in the queue.
+                for stamp in stamps:
+                    to_place = int(stamp.quantity)
+                    while to_place and residuals:
+                        arrived = min(to_place, int(residuals[0].quantity))
+                        type_lots.append(replace(residuals[0], quantity=arrived, acquisition_date=stamp.acquisition_date))
+                        to_place -= arrived
+                        residuals[0] = replace(residuals[0], quantity=int(residuals[0].quantity) - arrived)
+                        if not residuals[0].quantity:
+                            residuals.pop(0)
+                    if to_place:
+                        uncancelled[int(type_id)] += to_place
+                        type_lots.append(replace(stamp, quantity=to_place))
+                type_lots.extend(lot for lot in residuals if (lot.reference_type, lot.reference_id) not in stamped_keys)
+        return dict(uncancelled)
 
     def _load_owner_context(self, *, owner_id: int) -> dict[str, Any]:
         """Pre-load journal entries and pre-compute per-unit broker fees for corp sells.

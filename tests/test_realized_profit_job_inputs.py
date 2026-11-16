@@ -209,9 +209,10 @@ def test_a_stamped_residual_transfer_lot_is_not_drained_again_by_character_jobs(
     assert [(a["reference_id"], a["quantity"]) for a in row["allocation_details"]] == [(1001, 24), (1003, 6)]
 
 
-def test_a_stamped_transfer_lot_cancels_the_character_residual_it_stands_for(session_provider) -> None:
+def test_a_stamped_transfer_lot_takes_the_identity_of_the_character_residual(session_provider) -> None:
     """The character's own FIFO leaves 24 of job 1005; the transfer backfill
-    stamped those same 24 units with job 1001. They count once in the corp queue."""
+    stamped those same 24 units with job 1001. They count once, as job 1005:
+    oldest first, job 1001's units went into the character's own T2 job."""
     app_session, sde_session = session_provider.app_session(), session_provider.sde_session()
     _blueprints(sde_session)
     char, corp = {"character_id": 1}, {"corporation_id": 50}
@@ -231,7 +232,54 @@ def test_a_stamped_transfer_lot_cancels_the_character_residual_it_stands_for(ses
 
     [row] = _corp_service(app_session, sde_session).rebuild(corporation_id=50)
 
-    assert [(a["reference_id"], a["quantity"]) for a in row["allocation_details"]] == [(1001, 24), (1003, 6)]
+    assert [(a["reference_id"], a["quantity"], a["unit_cost"]) for a in row["allocation_details"]] == [
+        (1005, 24, 16_000_000.0), (1003, 6, 15_000_000.0)]
+
+
+def _character_buy(character_id: int, transaction_id: int, date: str, quantity: int, unit_price: float):
+    return CharacterWalletTransactionsModel(
+        character_id=character_id, transaction_id=transaction_id, client_name="Seller", date=date, is_buy=True,
+        is_personal=True, quantity=quantity, type_id=MODULE, type_name="Module", unit_price=unit_price,
+        total_price=unit_price * quantity)
+
+
+def test_a_lot_the_character_sold_personally_never_reaches_the_corp_queue(session_provider) -> None:
+    app_session, sde_session = session_provider.app_session(), session_provider.sde_session()
+    app_session.add(CorporationModel(corporation_id=50, corporation_name="Corp"))
+    app_session.add(CharacterModel(character_id=1, character_name="Trader"))
+    app_session.add(_character_buy(1, 4001, "2026-03-01T00:00:00Z", 3, 15_000_000.0))
+    app_session.add(_character_sale(2001, "2026-03-10T00:00:00Z", 3))
+    app_session.add(_corp_sale(3001, "2026-04-01T00:00:00Z", 3))
+    app_session.commit()
+
+    [row] = _corp_service(app_session, sde_session).rebuild(corporation_id=50)
+
+    assert row["priced_quantity"] == 0
+    assert row["unpriced_quantity"] == 3
+
+
+def test_one_characters_stamp_excess_never_cancels_another_characters_residual(session_provider) -> None:
+    """Character 1 used all of job 1001 itself, yet 24 of it are stamped in the
+    corp hangar: that excess stays its own and leaves character 2's buy alone."""
+    app_session, sde_session = session_provider.app_session(), session_provider.sde_session()
+    _blueprints(sde_session)
+    app_session.add(CorporationModel(corporation_id=50, corporation_name="Corp"))
+    app_session.add(CharacterModel(character_id=1, character_name="Builder"))
+    app_session.add(CharacterModel(character_id=2, character_name="Trader"))
+    app_session.add(_build(CharacterIndustryJobsModel, {"character_id": 1}, 1001, "2026-03-20T00:00:00Z", 40, 16_600_000.0))
+    app_session.add(_t2_job(CharacterIndustryJobsModel, {"character_id": 1}, 1002, "2026-04-01T00:00:00Z", 40))
+    app_session.add(CorporationAssetHistoryModel(
+        corporation_id=50, item_id=9001, observed_at="2026-06-29T00:00:00Z", snapshot_source="asset_refresh",
+        type_id=MODULE, quantity=24, acquisition_source="industry_build_transferred",
+        acquisition_unit_cost=16_600_000.0, acquisition_reference_type="industry_job",
+        acquisition_reference_id=1001, acquisition_date="2026-03-20T09:41:24Z"))
+    app_session.add(_character_buy(2, 4001, "2026-05-01T00:00:00Z", 30, 15_000_000.0))
+    app_session.add(_corp_sale(3001, "2026-11-16T00:00:00Z", 40))
+    app_session.commit()
+
+    [row] = _corp_service(app_session, sde_session).rebuild(corporation_id=50)
+
+    assert [(a["reference_id"], a["quantity"]) for a in row["allocation_details"]] == [(1001, 24), (4001, 16)]
 
 
 def test_a_character_job_never_drains_corp_lots_its_own_ledger_did_not_have(session_provider) -> None:
