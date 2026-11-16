@@ -34,6 +34,7 @@ from eve_online_industry_tracker.infrastructure.models import (
 from eve_online_industry_tracker.infrastructure.sde.blueprints import (
     get_blueprint_manufacturing_data,
     get_invention_source_blueprint_ids,
+    me_adjusted_batch_quantity,
     round_material_quantity as _round_material_quantity,
 )
 from eve_online_industry_tracker.infrastructure.sde.decryptors import get_t2_invention_decryptors
@@ -437,6 +438,36 @@ def industry_job_material_type_ids(
         type_id = _safe_int(material.get("typeID"))
         if type_id is not None:
             out.append(int(type_id))
+    return out
+
+
+def industry_job_input_quantities(job: Any, *, sde_session: Any) -> dict[int, int]:
+    """{input type: units a manufacturing job took when it started}: the SDE
+    materials x runs at the job's ME, raised to what the job's
+    historical_input_costs recorded where that is more (a recorded quantity
+    covers only the tracked stock, so it is a floor). {} for any other
+    activity: their historical_input_costs hold the blueprint's manufacturing
+    materials, not what the job used."""
+    raw = _industry_job_raw_payload(job)
+    activity_id = _safe_int(getattr(job, "activity_id", None)) or _safe_int(raw.get("activity_id"))
+    if activity_id not in {None, 1}:
+        return {}
+    blueprint_type_id = _safe_int(getattr(job, "blueprint_type_id", None))
+    me = _safe_int(getattr(job, "blueprint_material_efficiency", None)
+                   or raw.get("blueprint_material_efficiency") or raw.get("material_efficiency")) or 0
+    runs = _industry_job_runs(job)
+    out: dict[int, int] = {}
+    bp = sde_session.query(Blueprints).filter_by(blueprintTypeID=int(blueprint_type_id)).first() if blueprint_type_id else None
+    for material in (_get_mfg_activity(getattr(bp, "activities", None)) or {}).get("materials") or []:
+        type_id = _safe_int(material.get("typeID")) if isinstance(material, dict) else None
+        quantity = me_adjusted_batch_quantity(_safe_int(material.get("quantity")) or 0, runs, me) if type_id else 0
+        if quantity > 0:
+            out[int(type_id)] = out.get(int(type_id), 0) + quantity
+    recorded = getattr(job, "historical_input_costs", None)
+    for type_key, detail in (recorded.items() if isinstance(recorded, dict) else ()):
+        type_id, quantity = _safe_int(type_key), _safe_int(detail.get("quantity")) if isinstance(detail, dict) else None
+        if type_id and quantity and quantity > out.get(type_id, 0):
+            out[type_id] = int(quantity)
     return out
 
 

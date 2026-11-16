@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 from collections import defaultdict
 from dataclasses import asdict, replace
@@ -18,6 +19,7 @@ from eve_online_industry_tracker.application.characters.asset_provenance import 
     _safe_float,
     _safe_int,
     completed_job_output_lot,
+    industry_job_input_quantities,
 )
 from eve_online_industry_tracker.db_models import (
     CharacterIndustryJobsModel,
@@ -33,6 +35,8 @@ from eve_online_industry_tracker.db_models import (
     CorporationWalletTransactionsModel,
 )
 
+
+logger = logging.getLogger(__name__)
 
 ASSET_SOURCE_UNTRACKED = "untracked_inventory"
 
@@ -653,9 +657,42 @@ class _BaseRealizedProfitLedgerService:
         rows = query.order_by(self.ledger_model.date.desc(), self.ledger_model.transaction_id.desc()).all()
         return [_normalize_untracked_payload(self._serialize_row(row)) for row in rows]
 
-    def _rebuild_owner(self, *, owner_id: int) -> list[Any]:
-        self._app_session.query(self.ledger_model).filter(getattr(self.ledger_model, self.owner_id_field) == int(owner_id)).delete()
+    def next_fifo_unit_cost(
+        self, *, owner_scope: str, owner_id: int, type_id: int,
+    ) -> tuple[float | None, str | None]:
+        """Unit cost of `type_id`'s oldest lot still open in the owner's FIFO
+        queue after replaying every buy, build, sale and job input, with a
+        short source label; (None, reason) when the queue is empty or
+        unpriced. Read-only: no ledger rows are written."""
+        service_class = _SERVICE_BY_SCOPE.get(str(owner_scope))
+        if service_class is None:
+            raise ValueError(f"owner_scope must be 'character' or 'corporation', not {owner_scope!r}")
+        service = self if isinstance(self, service_class) else service_class(
+            app_session=self._app_session, sde_session=self._sde_session,
+            market_prices=self._market_prices, admin_settings=self._admin_settings)
+        lots = service._replay_owner(owner_id=int(owner_id))["lots_by_type"].get(int(type_id)) or []
+        head = next((lot for lot in lots if int(lot.quantity or 0) > 0), None)
+        if head is None:
+            return None, f"fifo: no open lot of type {int(type_id)} for {owner_scope} {int(owner_id)}"
+        if _safe_float(head.unit_price) is None or float(head.unit_price) <= 0:
+            return None, f"fifo: oldest lot of type {int(type_id)} has no cost"
+        if head.reference_id is not None:
+            label = f"fifo: {str(head.reference_type or head.source).replace('_', ' ')} {int(head.reference_id)}"
+        else:
+            label = f"fifo: {head.source or 'unknown'}"
+        return float(head.unit_price), label
 
+    def _load_input_consuming_jobs(self, *, owner_id: int) -> list[Any]:
+        """The jobs whose inputs left this owner's queue: its own jobs."""
+        return self._load_industry_jobs(owner_id=int(owner_id))
+
+    def _replay_owner(self, *, owner_id: int) -> dict[str, Any]:
+        """Replay the owner's events per item in (date, id) order through one
+        FIFO queue: buys, finished jobs and asset-history lots fill it; sales
+        and industry job inputs (taken when the job starts) drain it, oldest
+        first. Returns the queues left (`lots_by_type`), each sale with its
+        allocation (`sales`, in order) and the job-input counts (`inputs`).
+        Writes nothing."""
         wallet_transactions = self._load_wallet_transactions(owner_id=int(owner_id))
         industry_jobs = self._load_industry_jobs(owner_id=int(owner_id))
         asset_history_lots = self._load_asset_history_lots(owner_id=int(owner_id))
@@ -681,9 +718,7 @@ class _BaseRealizedProfitLedgerService:
             for type_id, lots in asset_history_lots.items()
         }
 
-        journal_by_id = self._load_journal_map(owner_id=int(owner_id))
         cost_unknown_reason_by_job_id = self._load_cost_unknown_reason_by_job_id()
-        owner_context = self._load_owner_context(owner_id=int(owner_id))
 
         lots_by_type: dict[int, list[FifoLot]] = {}
         events_by_type: dict[int, list[dict[str, Any]]] = {}
@@ -729,6 +764,21 @@ class _BaseRealizedProfitLedgerService:
                 }
             )
 
+        # Inputs leave when the job starts, from the same queue a sale takes from.
+        for job in self._load_input_consuming_jobs(owner_id=int(owner_id)):
+            start_date = _parse_date(getattr(job, "start_date", None))
+            if start_date is None:
+                continue
+            for input_type_id, input_quantity in industry_job_input_quantities(job, sde_session=self._sde_session).items():
+                events_by_type.setdefault(int(input_type_id), []).append(
+                    {
+                        "kind": "consume",
+                        "dt": start_date,
+                        "sort_id": int(_safe_int(getattr(job, "job_id", None)) or 0),
+                        "quantity": int(input_quantity),
+                    }
+                )
+
         for ah_type_id, ah_lots in asset_history_lots.items():
             for lot in ah_lots:
                 events_by_type.setdefault(int(ah_type_id), []).append(
@@ -740,7 +790,8 @@ class _BaseRealizedProfitLedgerService:
                     }
                 )
 
-        persisted_rows: list[Any] = []
+        sales: list[tuple[Any, dict[str, Any]]] = []
+        inputs = {"jobs": set(), "drained": 0, "untracked": 0}
         for type_id, events in events_by_type.items():
             events.sort(key=lambda item: (item.get("dt") or datetime.min, int(item.get("sort_id") or 0)))
             lots = lots_by_type.setdefault(int(type_id), [])
@@ -795,6 +846,14 @@ class _BaseRealizedProfitLedgerService:
                         _append_lot(lots_by_type, type_id=int(type_id), lot=lot)
                     continue
 
+                if kind == "consume":
+                    # Like a sale, without a row; units beyond the queue came from untracked stock.
+                    taken = _consume_lots(lots, quantity=int(event["quantity"]))
+                    inputs["jobs"].add(int(event["sort_id"]))
+                    inputs["drained"] += int(taken["priced_quantity"])
+                    inputs["untracked"] += int(taken["unpriced_quantity"])
+                    continue
+
                 if kind != "sell":
                     continue
 
@@ -802,10 +861,6 @@ class _BaseRealizedProfitLedgerService:
                 quantity = _safe_int(getattr(tx, "quantity", None)) or 0
                 if quantity <= 0:
                     continue
-                gross_revenue = _safe_float(getattr(tx, "total_price", None))
-                if gross_revenue is None:
-                    unit_price = _safe_float(getattr(tx, "unit_price", None)) or 0.0
-                    gross_revenue = float(unit_price) * float(quantity)
                 allocation = _consume_lots(
                     lots, quantity=int(quantity), cost_unknown_reason_by_job_id=cost_unknown_reason_by_job_id,
                 )
@@ -825,62 +880,86 @@ class _BaseRealizedProfitLedgerService:
                             "reference_type": "untracked_inventory",
                         }
                     )
-                journal_ref_id = _safe_int(getattr(tx, "journal_ref_id", None))
-                journal = journal_by_id.get(int(journal_ref_id)) if journal_ref_id is not None else None
-                owner_context["current_tx"] = tx
-                other_fees_amount, sales_tax_amount, net_revenue, fee_capture_mode, notes = self._fee_breakdown(
-                    gross_revenue=float(gross_revenue),
-                    journal=journal,
-                    owner_context=owner_context,
-                )
-                if ASSET_SOURCE_OPENING_INVENTORY in allocation["by_source"]:
-                    opening_slot = allocation["by_source"][ASSET_SOURCE_OPENING_INVENTORY]
-                    notes.append(
-                        "{quantity} unit(s) were matched to estimated opening inventory using the earliest known tracked unit cost for this item.".format(
-                            quantity=int(opening_slot.get("quantity") or 0)
-                        )
-                    )
-                if allocation["unpriced_quantity"] > 0:
-                    notes.append(f"{allocation['unpriced_quantity']} unit(s) have no recorded purchase "
-                                 "(stock from before tracking, trades, loot, gifts) and are counted at cost 0.")
-                # Units without a cost basis count at cost 0; the note and Low confidence say so.
-                realized_profit = float(net_revenue) - float(allocation["total_cost"])
-                realized_margin_fraction = float(realized_profit) / float(net_revenue) if net_revenue > 0 else None
+                sales.append((tx, allocation))
 
-                row = self.ledger_model(
-                    **self._owner_fields(owner_id=int(owner_id)),
-                    transaction_id=int(_safe_int(getattr(tx, "transaction_id", None)) or 0),
-                    journal_ref_id=journal_ref_id,
-                    date=getattr(tx, "date", None),
-                    type_id=_safe_int(getattr(tx, "type_id", None)),
-                    type_name=getattr(tx, "type_name", None),
-                    type_group_name=getattr(tx, "type_group_name", None),
-                    type_category_name=getattr(tx, "type_category_name", None),
-                    quantity=int(quantity),
-                    unit_price=_safe_float(getattr(tx, "unit_price", None)),
-                    gross_revenue=float(gross_revenue),
-                    sales_tax_amount=float(sales_tax_amount),
-                    other_fees_amount=float(other_fees_amount),
-                    total_fees_amount=float(sales_tax_amount) + float(other_fees_amount),
-                    net_revenue=float(net_revenue),
-                    allocated_cost=float(allocation["total_cost"]),
-                    realized_profit=realized_profit,
-                    realized_margin_fraction=realized_margin_fraction,
+        return {"lots_by_type": lots_by_type, "sales": sales, "inputs": inputs}
+
+    def _rebuild_owner(self, *, owner_id: int) -> list[Any]:
+        self._app_session.query(self.ledger_model).filter(getattr(self.ledger_model, self.owner_id_field) == int(owner_id)).delete()
+
+        replay = self._replay_owner(owner_id=int(owner_id))
+        inputs = replay["inputs"]
+        if inputs["jobs"]:
+            logger.info(
+                "%s %s ledger: %d industry job(s) took %d tracked input unit(s) from the FIFO queues, %d untracked",
+                self.owner_id_field, int(owner_id), len(inputs["jobs"]), inputs["drained"], inputs["untracked"],
+            )
+        journal_by_id = self._load_journal_map(owner_id=int(owner_id))
+        owner_context = self._load_owner_context(owner_id=int(owner_id))
+
+        persisted_rows: list[Any] = []
+        for tx, allocation in replay["sales"]:
+            quantity = _safe_int(getattr(tx, "quantity", None)) or 0
+            gross_revenue = _safe_float(getattr(tx, "total_price", None))
+            if gross_revenue is None:
+                unit_price = _safe_float(getattr(tx, "unit_price", None)) or 0.0
+                gross_revenue = float(unit_price) * float(quantity)
+            journal_ref_id = _safe_int(getattr(tx, "journal_ref_id", None))
+            journal = journal_by_id.get(int(journal_ref_id)) if journal_ref_id is not None else None
+            owner_context["current_tx"] = tx
+            other_fees_amount, sales_tax_amount, net_revenue, fee_capture_mode, notes = self._fee_breakdown(
+                gross_revenue=float(gross_revenue),
+                journal=journal,
+                owner_context=owner_context,
+            )
+            if ASSET_SOURCE_OPENING_INVENTORY in allocation["by_source"]:
+                opening_slot = allocation["by_source"][ASSET_SOURCE_OPENING_INVENTORY]
+                notes.append(
+                    "{quantity} unit(s) were matched to estimated opening inventory using the earliest known tracked unit cost for this item.".format(
+                        quantity=int(opening_slot.get("quantity") or 0)
+                    )
+                )
+            if allocation["unpriced_quantity"] > 0:
+                notes.append(f"{allocation['unpriced_quantity']} unit(s) have no recorded purchase "
+                             "(stock from before tracking, trades, loot, gifts) and are counted at cost 0.")
+            # Units without a cost basis count at cost 0; the note and Low confidence say so.
+            realized_profit = float(net_revenue) - float(allocation["total_cost"])
+            realized_margin_fraction = float(realized_profit) / float(net_revenue) if net_revenue > 0 else None
+
+            row = self.ledger_model(
+                **self._owner_fields(owner_id=int(owner_id)),
+                transaction_id=int(_safe_int(getattr(tx, "transaction_id", None)) or 0),
+                journal_ref_id=journal_ref_id,
+                date=getattr(tx, "date", None),
+                type_id=_safe_int(getattr(tx, "type_id", None)),
+                type_name=getattr(tx, "type_name", None),
+                type_group_name=getattr(tx, "type_group_name", None),
+                type_category_name=getattr(tx, "type_category_name", None),
+                quantity=int(quantity),
+                unit_price=_safe_float(getattr(tx, "unit_price", None)),
+                gross_revenue=float(gross_revenue),
+                sales_tax_amount=float(sales_tax_amount),
+                other_fees_amount=float(other_fees_amount),
+                total_fees_amount=float(sales_tax_amount) + float(other_fees_amount),
+                net_revenue=float(net_revenue),
+                allocated_cost=float(allocation["total_cost"]),
+                realized_profit=realized_profit,
+                realized_margin_fraction=realized_margin_fraction,
+                priced_quantity=int(allocation["priced_quantity"]),
+                unpriced_quantity=int(allocation["unpriced_quantity"]),
+                source_mix=allocation["by_source"],
+                allocation_details=allocation["allocations"],
+                fee_capture_mode=fee_capture_mode,
+                confidence=_confidence(
                     priced_quantity=int(allocation["priced_quantity"]),
                     unpriced_quantity=int(allocation["unpriced_quantity"]),
-                    source_mix=allocation["by_source"],
-                    allocation_details=allocation["allocations"],
                     fee_capture_mode=fee_capture_mode,
-                    confidence=_confidence(
-                        priced_quantity=int(allocation["priced_quantity"]),
-                        unpriced_quantity=int(allocation["unpriced_quantity"]),
-                        fee_capture_mode=fee_capture_mode,
-                    ),
-                    notes=notes,
-                    **self._extra_row_fields(owner_context),
-                )
-                self._app_session.add(row)
-                persisted_rows.append(row)
+                ),
+                notes=notes,
+                **self._extra_row_fields(owner_context),
+            )
+            self._app_session.add(row)
+            persisted_rows.append(row)
 
         self._app_session.flush()
         return persisted_rows
@@ -1303,6 +1382,17 @@ class CorporationRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
                     break
         return stale
 
+    def _load_input_consuming_jobs(self, *, owner_id: int) -> list[Any]:
+        """The corp's jobs and every character job: _load_character_source_lots
+        puts every character's built and bought lots in the corp queue, so the
+        character jobs that used them as inputs take them out again."""
+        jobs = self._load_industry_jobs(owner_id=int(owner_id))
+        seen = {_safe_int(getattr(job, "job_id", None)) for job in jobs}
+        return jobs + [
+            job for job in self._app_session.query(CharacterIndustryJobsModel).all()
+            if _safe_int(getattr(job, "job_id", None)) not in seen
+        ]
+
     def _load_supplemental_lots(self, *, owner_id: int) -> dict[int, list[FifoLot]]:
         """Delegate to _load_character_source_lots for the corp service."""
         return self._load_character_source_lots(corporation_id=int(owner_id))
@@ -1502,6 +1592,12 @@ class CorporationRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
             used_journal_ids=used_journal_ids,
             pre_computed_broker_fee=pre_computed_broker_fee,
         )
+
+
+_SERVICE_BY_SCOPE: dict[str, type[_BaseRealizedProfitLedgerService]] = {
+    "character": CharacterRealizedProfitLedgerService,
+    "corporation": CorporationRealizedProfitLedgerService,
+}
 
 
 def summarize_realized_profit_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
