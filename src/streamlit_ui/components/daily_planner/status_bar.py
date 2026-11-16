@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import math
 import time
@@ -292,6 +293,40 @@ def wallet_snapshot(plan_meta: dict[str, Any]) -> float | None:
     return value if math.isfinite(value) else None
 
 
+def plan_summary(plan_meta: dict[str, Any]) -> dict[str, Any]:
+    """The plan's plan_summary_json parsed; {} for an old plan or an unreadable summary."""
+    raw = plan_meta.get("plan_summary_json")
+    try:
+        parsed = json.loads(raw) if isinstance(raw, str) and raw else raw
+    except ValueError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def wallet_caption(summary_wallet: dict[str, Any] | None) -> str | None:
+    """Wallet age and plan budget; None for an old plan without the wallet block."""
+    if not summary_wallet:
+        return None
+    age = summary_wallet.get("age_hours")
+    age_text = f"{age:.1f} h ago" if age is not None else "never"
+    text = (f"read {age_text} · budget {float(summary_wallet.get('budget') or 0):,.0f} ISK "
+            f"after {float(summary_wallet.get('reserve_pct') or 0):g}% reserve")
+    blocked = summary_wallet.get("blocked_reason")
+    return f"⚠ {blocked} · {text}" if blocked else text
+
+
+def free_slots_lines(summary_free_slots: dict[str, Any] | None) -> list[str]:
+    """One line per character with free slots, e.g. "Duke X1: 2 mfg, 1 science free (reason)"."""
+    lines = []
+    for name, slot in (summary_free_slots or {}).items():
+        parts = [f"{slot[key]} {label}" for key, label in (("manufacturing", "mfg"), ("science", "science"))
+                 if slot.get(key)]
+        if parts:
+            reason = f" ({slot['reason']})" if slot.get("reason") else ""
+            lines.append(f"{slot.get('character_name') or name}: {', '.join(parts)} free{reason}")
+    return lines
+
+
 def _fmt_age(hours: float) -> str:
     if hours < 1.0:
         return f"{int(hours * 60)}m ago"
@@ -545,6 +580,7 @@ def render_status_bar(page_state: DailyPlannerPageState, planner_settings: dict[
     freshness_display, freshness_score = freshness_summary(
         page_state.plan, warning_level=planner_settings["planner_freshness_warning_level"])
     corp_wallet = wallet_snapshot(plan_meta)
+    summary = plan_summary(plan_meta)
     created_at = plan_meta.get("created_at")
 
     plan_age_hours: float | None = None
@@ -588,6 +624,9 @@ def render_status_bar(page_state: DailyPlannerPageState, planner_settings: dict[
             st.metric("Last Computed", age_str)
         with c3:
             st.metric("Corp Wallet", _fmt_isk(corp_wallet))
+            wallet_text = wallet_caption(summary.get("wallet"))
+            if wallet_text:
+                st.caption(wallet_text)
         with c4:
             actions = (page_state.plan or {}).get("actions") or []
             value, caption = capital_reserved_display(compute_capital_reserved(actions))
@@ -610,6 +649,9 @@ def render_status_bar(page_state: DailyPlannerPageState, planner_settings: dict[
                 else:
                     market_label = f"{age_text} 🔴"
             st.metric("Market Data", market_label)
+
+    for line in free_slots_lines(summary.get("free_slots")):
+        st.caption(f"Free slots: {line}")
 
     market_warning = market_intel_warning(market_status)
     if market_warning:

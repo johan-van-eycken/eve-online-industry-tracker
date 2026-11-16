@@ -3,6 +3,7 @@ import logging
 import streamlit as st # pyright: ignore[reportMissingImports]
 import pandas as pd # pyright: ignore[reportMissingModuleSource, reportMissingImports]
 import json
+from datetime import datetime, timezone
 from typing import Any, cast
 
 from streamlit_ui.components.assets_ui import (
@@ -16,6 +17,8 @@ from streamlit_ui.components.assets_ui import (
     render_ship_cards,
     summarize_asset_items,
 )
+from eve_online_industry_tracker.application.corporations.wallet_age import wallet_age_hours, wallet_stale_reason
+from streamlit_ui.api.admin_settings import settings_values
 from streamlit_ui.api.client import api_get
 from streamlit_ui.components.batch_errors import show_batch_errors
 from streamlit_ui.components.formatters import format_datetime, format_date_countdown, format_isk, format_date_into_age
@@ -61,6 +64,14 @@ def _master_wallet_balance_and_reason(wallets_raw) -> tuple[float | None, str | 
 def _extract_master_wallet_balance(wallets_raw) -> float | None:
     """The master wallet (division 1) balance; None when there is none to show."""
     return _master_wallet_balance_and_reason(wallets_raw)[0]
+
+
+def _wallet_age(refreshed_at, max_age_hours: float) -> tuple[str, str | None]:
+    """("read 1.5 h ago" | "never read", stale reason or None); a NaN/missing value counts as never read."""
+    refreshed_at = refreshed_at if isinstance(refreshed_at, str) else None
+    now = datetime.now(timezone.utc)
+    age = wallet_age_hours(refreshed_at, now)
+    return (f"read {age:.1f} h ago" if age is not None else "never read"), wallet_stale_reason(refreshed_at, now, max_age_hours)
 
 
 def _master_wallet_label(balance: float | None, reason: str | None = None) -> str:
@@ -461,6 +472,7 @@ def render():
         st.stop()
 
     df = pd.DataFrame(corporations_list)
+    wallet_max_age = settings_values("daily_planner", ("wallet_max_age_hours",))[0]["wallet_max_age_hours"]
 
     # Voeg een logo-url toe indien gewenst (EVE image server)
     if "logo_url" not in df.columns:
@@ -485,11 +497,13 @@ def render():
 
             # --- Extract Master Wallet balance ---
             master_wallet_balance, master_wallet_reason = _master_wallet_balance_and_reason(row.get("wallets", None))
+            age_text, stale_reason = _wallet_age(row.get("wallets_refreshed_at"), wallet_max_age)
 
             border_style = "2px solid #444" if has_director else "2px dashed #666"
             access_badge = "" if has_director else '<div style="font-size:11px; color:#f59e0b; margin-bottom:6px;">⚠ Limited Access</div>'
             ceo_html = f"CEO: {ceo_name}<br>" if ceo_name else ""
-            wallet_html = f"<b>Master Wallet Balance:</b><br><b>{_master_wallet_label(master_wallet_balance, master_wallet_reason)}</b>" if has_director else ""
+            wallet_html = (f"<b>Master Wallet Balance:</b><br><b>{_master_wallet_label(master_wallet_balance, master_wallet_reason)}</b>"
+                           f"<br>{age_text}") if has_director else ""
 
             tile_html = (
                 f'<div style="background-color: rgba(30,30,30,0.95); padding: 20px; border-radius: 10px; border: {border_style}; box-shadow: 2px 2px 10px rgba(0,0,0,0.5); text-align: center; margin-bottom: 10px;">'
@@ -510,6 +524,8 @@ def render():
 
             with col:
                 st.markdown(tile_html, unsafe_allow_html=True)
+                if has_director and stale_reason:
+                    st.warning(stale_reason)
 
     st.divider()
 
