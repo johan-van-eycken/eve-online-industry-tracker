@@ -1,7 +1,7 @@
 # Daily Planner: fill every slot within the corp wallet
 
 Date: 2026-11-16
-Status: awaiting approval
+Status: approved 2026-11-16
 
 ## Why
 
@@ -126,13 +126,17 @@ balance minus the reserve:
   allows (at least 1), and the sub-components are resized. If even 1 run does
   not fit, the product gets no job today, and its reason says
   "not built today: wallet (X ISK left, 1 run needs Y)".
-- Sub-components (designer's call, so the wallet can never be exceeded):
-  a parent books its whole chain at its own turn, with every component priced
-  as if it is **bought**. When a sub-component later gets a slot in the second
-  pass and is built in-house, the difference between purchase price and its
-  own inputs goes back to the budget. If it gets no slot, the purchase is
-  already paid for. A component request merged over several parents is
-  booked by each parent for its own share.
+- Sub-components (the user's decision): a parent books its whole chain at its
+  own turn, each component at the cheapest of what the chain planner already
+  compares (`ChainPlanner._resolve_sub_manufacture`): corp stock first (already paid, 0 ISK
+  from the wallet), then building (its own inputs to buy plus its fee) or
+  buying at market, whichever is less. A component request merged over
+  several parents is booked by each parent for its own share.
+- If a component booked as "build" gets no slot in the second pass, it is
+  bought instead (as today, `_component_buy_reasons`). The extra cost over its
+  build cost is charged then; if the budget cannot carry it, the parent's runs
+  are cut until it fits (resizing its components again). The wallet is never
+  exceeded.
 - Pause decisions get no new job today (only their deliveries,
   `character_assigner.py` `_assign_decision`), so they take no budget.
 - Research and copy jobs cost their fee; invention costs its fee plus the
@@ -181,6 +185,24 @@ eligible blueprint").
 status bar adds "free slots left" per character and activity, so an unfilled
 slot is visible with its reason.
 
+### 6. Wallet age warning (the whole app, same branch)
+
+Today a failed corp wallet refresh (expired token, missing
+`esi-wallet.read_corporation_wallets.v1` scope or Accountant/Director role,
+ESI down) raises in `Corporation.refresh_corporation`, but the last stored
+balance stays and is shown and planned with as if it were current.
+
+- Store when the wallet balances were last read successfully
+  (`corporations.wallets_refreshed_at`, additive nullable column), set only
+  when the ESI wallet call succeeds.
+- Every place that shows the corp wallet (status bar, shopping tab,
+  corporation page) shows its age, and a warning when it is older than
+  `wallet_max_age_hours` (new setting, default 6).
+- The daily planner records the balance's age on the plan
+  (`plan_summary_json`) and treats a balance older than that limit like an
+  unknown one: no paid job, and the status bar says the wallet is stale and
+  since when.
+
 ## Constraints
 
 - The planner's existing rules: fail loud on contract violations, unknown is
@@ -189,9 +211,12 @@ slot is visible with its reason.
   (`None`), zero or negative, no job that costs ISK is planned (manufacture,
   research, copy, invention all have a fee), and the status bar says why:
   no budget is not an infinite budget. Deliveries are still listed.
-- BPO purchase advice (`buy_bpo` rows from `bpo_opportunities`) stays
-  outside the budget: it is advice the user acts on by hand, not a job
-  (designer's call). It is shown next to the wallet left after the plan.
+- A product that needs a blueprint the corp does not own (a new BPO must be
+  bought, e.g. `needs_t1_bpo` for a T2 product without its T1 BPO) gets no job
+  in this plan: no manufacture, research, copy or invention, and its reason
+  says which BPO is missing (the user's decision). The BPO purchase advice
+  (`buy_bpo` rows) is still listed, outside the budget, next to the wallet
+  left after the plan.
 - Existing tests must keep passing; tests that assert the old gates change
   with the rules.
 
