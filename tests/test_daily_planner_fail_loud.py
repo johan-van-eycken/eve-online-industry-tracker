@@ -482,7 +482,7 @@ def test_a_failed_sell_history_query_is_recorded_per_item():
 def test_a_failed_input_is_named_in_the_compute_banner():
     svc = _svc_with_broken_db()
     svc._feedback_processor = SimpleNamespace(process_pending_feedback=lambda: 0)
-    svc._get_corp_wallet = lambda: None
+    svc._get_corp_wallet = lambda: (None, None)
     svc._get_overview_rows = lambda: [{"type_id": 1}]
     svc._build_input_rows = lambda rows: [SimpleNamespace(type_id=1, raw={"type_id": 1})]
     svc._get_industry_jobs = lambda: []

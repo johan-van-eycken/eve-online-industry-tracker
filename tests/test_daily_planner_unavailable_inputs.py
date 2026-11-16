@@ -100,7 +100,7 @@ def _no_settings():
 def _service(session_provider, repo=None):
     return DailyPlannerService(
         industry_service=SimpleNamespace(get_cached_overview_rows=lambda: [GOOD_ROW]),
-        corporations_service=SimpleNamespace(list_corporations=lambda: []),
+        corporations_service=SimpleNamespace(list_corporations=lambda: [], refresh_wallet_balances=lambda: None),
         characters_service=SimpleNamespace(list_characters=lambda: []),
         sales_history_service=SimpleNamespace(),
         market_pricing_service=SimpleNamespace(),
