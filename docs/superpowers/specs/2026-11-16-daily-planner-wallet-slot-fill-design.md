@@ -199,6 +199,9 @@ balance stays and is shown and planned with as if it were current.
 - Every place that shows the corp wallet (status bar, shopping tab,
   corporation page) shows its age, and a warning when it is older than
   `wallet_max_age_hours` (new setting, default 6).
+- The daily planner refreshes the corp wallet balances itself at the start of
+  every compute (one ESI call, a new wallet-only refresh). If that refresh
+  fails, it goes on with the stored balance, and the age rule decides.
 - The daily planner records the balance's age on the plan
   (`plan_summary_json`) and treats a balance older than that limit like an
   unknown one: no paid job, and the status bar says the wallet is stale and

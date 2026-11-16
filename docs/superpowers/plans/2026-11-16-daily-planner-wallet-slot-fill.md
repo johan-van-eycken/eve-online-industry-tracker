@@ -49,6 +49,8 @@
 - Produces: `get_corporation()` dict key `"wallets_refreshed_at"`: ISO string or None.
 - Produces: `wallet_age_hours(refreshed_at: datetime | str | None, now: datetime) -> float | None` in `wallet_age.py`. None when `refreshed_at` is None or unparseable.
 - Produces: `wallet_stale_reason(refreshed_at: datetime | str | None, now: datetime, max_age_hours: float) -> str | None`. Returns None when fresh, else `"corp wallet last read {age:.1f} h ago (limit {max_age_hours:g} h)"`, or `"corp wallet never read successfully"` when `refreshed_at` is None.
+- Produces: `Corporation.refresh_wallet_balances(self) -> None`. One ESI call (`ESI_CORP_WALLETS`), after `ensure_esi()` the way `refresh_wallet_journal` does it. It sets `self.wallets` (division names kept from the stored wallets, else `"Master Wallet"` / `f"Division {n}"`) and `self.wallets_refreshed_at`, then `save_corporation()`. It raises on failure. `refresh_corporation` calls it instead of its own wallet code.
+- Produces: `CorporationManager.refresh_wallet_balances(corporation_name=None, corporation_id=None)` via `_refresh_batch("refresh_wallet_balances", ...)`, and `CorporationsService.refresh_wallet_balances() -> None`, which calls `self._state.corp_manager.refresh_wallet_balances()`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -68,10 +70,14 @@ def test_refresh_sets_wallets_refreshed_at_only_on_success(...):
     # Fake ESI client as in tests/test_corporation_wallets_json_normalization.py.
     # Successful refresh -> record.wallets_refreshed_at set.
     # Wallet ESI call raising -> refresh raises and wallets_refreshed_at keeps its old value.
+
+def test_refresh_wallet_balances_makes_one_esi_call(...):
+    # Fake ESI client records endpoints: exactly [ESI_CORP_WALLETS]; balance and wallets_refreshed_at updated,
+    # division name "Master Wallet" kept from the stored wallets.
 ```
 
 - [ ] **Step 2: Run** `pytest tests/test_corp_wallet_age.py -v`. Expected: FAIL (ImportError).
-- [ ] **Step 3: Implement.** Add the column, the `_ensure_column(db_app, table="corporations", column="wallets_refreshed_at", ddl_type="DATETIME")` call and the setting. In `refresh_corporation`, set `self.wallets_refreshed_at = datetime.now(timezone.utc)` right after `self.wallets = [...]`. `save_corporation` copies model columns from attributes, so nothing else is needed there. Load it in the constructor the way `updated_at` is loaded, and add it to `get_corporation()`. Write `wallet_age.py`.
+- [ ] **Step 3: Implement.** Add the column, the `_ensure_column(db_app, table="corporations", column="wallets_refreshed_at", ddl_type="DATETIME")` call and the setting. In `refresh_corporation`, set `self.wallets_refreshed_at = datetime.now(timezone.utc)` right after `self.wallets = [...]`. `save_corporation` copies model columns from attributes, so nothing else is needed there. Load it in the constructor the way `updated_at` is loaded, and add it to `get_corporation()`. Write `wallet_age.py`. Add `refresh_wallet_balances` on Corporation, CorporationManager and CorporationsService.
 - [ ] **Step 4: Run** the new tests plus `pytest tests/test_corporation_wallets_json_normalization.py -q`. Expected: PASS.
 - [ ] **Step 5: Commit** `feat(corp): record when the corp wallet was last read`.
 
@@ -161,6 +167,7 @@ def test_max_affordable_runs():
 Rules, replacing the SKIP block's ISK/hour and batch-profit gates and the WATCH block's `pipeline_days >= 3.0`. The competition gate and PAUSE stay.
 - `pipeline_units = pipeline.total_pipeline_days * pipeline.effective_velocity`.
 - `pipeline.velocity_unknown_reason` set → skip, reason `"not built: sell velocity unknown ({reason})"`.
+- The row's margin unknown (`PlannerInputRow.profit_margin_fraction is None`; the scorer then puts a placeholder 0.0 in `margin_pct`) → skip, reason `"not built: margin unknown"`. Read it from the input row in `_phase_4_decide` and pass it in as `margin_known: bool`.
 - `scored.margin_pct < min_margin` → skip, reason `f"margin {m:.1f}% below {min_margin:g}%"`.
 - `cap = market_cap_runs(...)`, with `units_per_run = orow.get_product_quantity(row) / batch_runs`. If cap == 0 → watch, reason `f"market full: {pipeline_days:.0f} days of supply already, max {max_days:g}"`.
 - `expected_days = (pipeline_units + cap * units_per_run) / velocity`.
@@ -173,6 +180,7 @@ Rules, replacing the SKIP block's ISK/hour and batch-profit gates and the WATCH 
 ```python
 def test_margin_below_10_is_skipped():          # margin_pct=6 -> decision "skip", reason "margin 6.0% below 10%"
 def test_unknown_velocity_not_built():          # velocity_unknown_reason="no sales" -> "skip", reason starts "not built: sell velocity unknown"
+def test_unknown_margin_not_built():            # margin_known=False -> "skip", reason "not built: margin unknown" (not "margin 0.0% below")
 def test_market_full_is_watched():              # velocity 1/day, pipeline 50 days -> "watch", reason starts "market full"
 def test_build_ranks_by_capital_return():       # profit 20M, total_cost 100M, velocity 10/day, 0 pipeline, 300 units in 30 runs
     # cap = min(30, floor(450/10)) = 30; expected_days = 30
@@ -183,7 +191,7 @@ def test_market_cap_runs():
 ```
 
 - [ ] **Step 2: Run** `pytest tests/test_daily_planner_build_rules.py -v`. Expected: FAIL.
-- [ ] **Step 3: Implement.** Do the rules, the fields, the persistence (`_build_plan_items` also writes the two new columns), and the settings. In `DailyPlannerService._phase_4_decide`, nothing changes: the engine reads the row and the pipeline it already gets.
+- [ ] **Step 3: Implement.** Mark the help text of `planner_min_isk_per_hour` and `planner_min_profit_per_batch` "No longer used by the daily planner." Do the rules, the fields, the persistence (`_build_plan_items` also writes the two new columns), and the settings. In `DailyPlannerService._phase_4_decide`, nothing changes: the engine reads the row and the pipeline it already gets.
 - [ ] **Step 4: Update** the old-gate tests in `test_daily_planner_decisions.py` and `test_daily_planner_thresholds.py` to the new reasons, then run the full suite. Expected: PASS.
 - [ ] **Step 5: Commit** `feat(planner): build on margin and sell time, rank by capital return`.
 
@@ -219,11 +227,14 @@ Behaviour:
 1. Top-level order becomes `-(d.capital_return_per_day or 0)`, with ties broken by `-d.adjusted_score`.
 2. For a manufacture action, `target = min(batch_runs, d.market_cap_runs or batch_runs)`.
 3. `cost_of(runs)` = fee for those runs + `StockLedger.purchase_cost(scaled materials, price, commit=False)`.
+   - Materials come from the same source as the shopping list, so the charge and the list agree: the action's `materials`, or when None, the shopping list's SDE fallback. Expose that fallback as the module function `action_material_needs(action, blueprint_data, product_to_blueprint) -> dict[int, int] | None` in `shopping_list_builder.py`, extracted from `ShoppingListBuilder._material_needs`, which then calls it.
+   - Price is `price_map_unit_price(price_map.get(type_id))[0]` (`shopping_list_builder.py`).
+   - Both manufacture branches are cut the same way. The owned-BPC "part" branch uses `batch_runs = first["runs"]`, and its None `estimated_cost_isk` stays None.
    - A component that a sub decision builds (`requested_by_type_ids` contains the parent) is priced at that sub's build cost per unit, `(sub_manufacture_cost + sub_install_fee) / quantity_needed`, for the units its reserved jobs cover. The rest is priced at market.
    - Use `max_affordable_runs(cost_of, target, budget.available)`. 0 → no manufacture action; append the reason `f"not built today: wallet ({budget.available:,.0f} ISK left, 1 run needs {cost_of(1):,.0f})"` (or `budget.blocked_reason`), and release the slot.
    - Otherwise `cut_batch`, `purchase_cost(..., commit=True)` and `budget.charge(...)`.
 4. Sub-job slots are reserved at the parent's turn. For each sub decision requested by this parent that is not yet reserved, take one free manufacturing slot per job in its `sub_job_batches`. Use a pilot who passes `skill_gate.check(sub bp, "manufacturing")`, take it with `_take_slot`, and record it in `reserved_sub_pilots`. Jobs with no reservable pilot are priced at market for the parent.
-5. After the top-level pass, any parent built with fewer runs than its batch goes into `scale`, and sub-components are re-sized with `resize(fell_back, dropped=no_build, scale=scale)`. Reserved pilots for jobs that are no longer needed get their slot back (`_release_slot`).
+5. After the top-level pass, any parent built with fewer runs than its batch goes into `scale`, and sub-components are re-sized with `resize(fell_back, dropped=no_build, scale=scale)`. Reservations are matched by count per sub type_id, not by job index. Reserved pilots beyond the new job count get their slot back (`_release_slot`). A re-size that needs more jobs than were reserved (research-first fallback) gets the extra jobs from `_best_mfg_char` as today, and their components are charged at market when no slot is found.
 6. In the sub pass, a sub job uses its reserved pilot instead of `_best_mfg_char`.
 
 - [ ] **Step 1: Write the failing tests** with the `tests/fakes.py` and `planner_skill_fakes.py` helpers used by `tests/test_daily_planner_assignment.py`:
@@ -290,6 +301,7 @@ def test_unowned_t1_bpo_gets_no_jobs():       # T2 row needs_t1_bpo -> no invent
 
 **Interfaces:**
 - Consumes: `wallet_stale_reason` (Task 1), `WalletBudget` (Task 2), `assign(budget=, corp_material_stock=)` (Task 5), `free_slots_after` (Task 6).
+- Produces: phase 1 begins with a wallet refresh. `self._corporations.refresh_wallet_balances()` runs inside `_ComputeStep(self, "refreshing the corp wallet")`. `CorporationRefreshError` and `ESI_REQUEST_ERRORS` are caught and logged at WARNING; the stored balance is used, and its age decides (no crash, no silent fresh balance).
 - Produces: phase 1 keys `"corp_wallet_refreshed_at"` and `"wallet_budget": WalletBudget`. The budget uses the `planner_wallet_reserve_pct` reserve and gets `blocked_reason=wallet_stale_reason(...)` with the `wallet_max_age_hours` setting.
 - Produces: plan summary (`plan_summary_json`) keys:
   - `"wallet": {"balance", "refreshed_at", "age_hours", "reserve_pct", "budget", "spent", "blocked_reason"}`;
@@ -300,7 +312,12 @@ def test_unowned_t1_bpo_gets_no_jobs():       # T2 row needs_t1_bpo -> no invent
 ```python
 def test_plan_never_exceeds_budget():
     # wallet 100M, reserve 10%, overview rows worth 500M of builds.
-    # shopping total (buy_materials estimated_cost_isk) + every job's estimated_job_fee_isk <= 90M
+    # compute_capital_reserved(actions) (streamlit_ui/components/daily_planner/status_bar.py, the status bar's own sum):
+    # .total <= 90M, .unpriced_purchases == 0, .unknown_fee_jobs == 0
+def test_compute_refreshes_wallet_first():
+    # fake corporations service records refresh_wallet_balances() before list_corporations()
+def test_wallet_refresh_failure_uses_stored_balance():
+    # refresh raises CorporationRefreshError -> compute succeeds; stored balance with its age is used
 def test_service_passes_stale_wallet_as_blocked():
     # wallets_refreshed_at 7 h ago -> no manufacture/research/copy/invent actions;
     # summary["wallet"]["blocked_reason"] starts "corp wallet last read"
