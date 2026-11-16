@@ -404,6 +404,16 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
                 "label": "Maximum corp wallet age (hours)",
                 "help": "The planner treats the corp wallet as unknown when it was last read successfully longer ago than this.",
             },
+            "planner_wallet_reserve_pct": {
+                "type": "float",
+                "default": 10.0,
+                "min": 0.0,
+                "max": 90.0,
+                "step": 1.0,
+                "format": "%.0f",
+                "label": "Wallet reserve (%)",
+                "help": "Share of the corp wallet the planner never spends.",
+            },
             "planner_min_isk_per_hour": {
                 "type": "int",
                 "default": 2_000_000,
