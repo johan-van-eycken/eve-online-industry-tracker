@@ -121,16 +121,16 @@ def _wallet_service(list_corporations):
 def test_a_failed_corporation_listing_makes_the_wallet_unknown():
     def boom():
         raise ValueError("no corporations cached")
-    assert _wallet_service(boom)._get_corp_wallet() is None
+    assert _wallet_service(boom)._get_corp_wallet()[0] is None
 
 
 def test_no_corporation_makes_the_wallet_unknown():
-    assert _wallet_service(lambda: [])._get_corp_wallet() is None
+    assert _wallet_service(lambda: [])._get_corp_wallet()[0] is None
 
 
 def test_a_corp_without_division_one_has_an_unknown_wallet():
     corps = [{"wallets": [{"division": 2, "balance": "5"}]}]
-    assert _wallet_service(lambda: corps)._get_corp_wallet() is None
+    assert _wallet_service(lambda: corps)._get_corp_wallet()[0] is None
 
 
 # Real `corporations.wallets` rows store division/balance as strings (e.g.
@@ -202,7 +202,7 @@ def test_wallet_balance_zero_is_still_a_real_zero():
 @pytest.mark.parametrize("balance", ["nan", "inf", "-inf", float("nan"), float("inf")])
 def test_a_non_finite_division_one_balance_makes_the_wallet_unknown(balance):
     corps = [{"wallets": [{"division": 1, "balance": balance}]}]
-    assert _wallet_service(lambda: corps)._get_corp_wallet() is None
+    assert _wallet_service(lambda: corps)._get_corp_wallet()[0] is None
 
 
 def test_a_failed_corporation_id_lookup_names_that_reason_for_every_type():

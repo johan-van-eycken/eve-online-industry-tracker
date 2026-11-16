@@ -99,7 +99,8 @@ def test_feedback_skips_the_cost_update_on_a_none_build_cost():
 
 
 def test_the_decision_reason_names_the_upper_bound():
-    row = {**dec._make_overview_row(), "manufacturing_job": {"job_fee_unknown_reasons": ["invention (x)"],
+    row = {**dec._make_overview_row(), "manufacturing_job": {**dec._make_overview_row()["manufacturing_job"],
+                                                             "job_fee_unknown_reasons": ["invention (x)"],
                                                              "profit_is_upper_bound": True}}
     decision = ItemDecisionEngine().decide(
         scored=dec._make_scored(), pipeline=dec._make_pipeline(), overview_row=row, admin_settings=dec._make_admin(),
@@ -365,7 +366,8 @@ def test_a_the_decision_and_the_plan_item_carry_the_upper_bound_flag(app_session
     import test_daily_planner_repo as rp
     from eve_online_industry_tracker.infrastructure.models import BuildPlanItemModel
 
-    row = {**dec._make_overview_row(), "manufacturing_job": {"job_fee_unknown_reasons": ["invention (x)"]}}
+    row = {**dec._make_overview_row(), "manufacturing_job": {**dec._make_overview_row()["manufacturing_job"],
+                                                             "job_fee_unknown_reasons": ["invention (x)"]}}
     decision = ItemDecisionEngine().decide(
         scored=dec._make_scored(), pipeline=dec._make_pipeline(), overview_row=row, admin_settings=dec._make_admin(),
     )

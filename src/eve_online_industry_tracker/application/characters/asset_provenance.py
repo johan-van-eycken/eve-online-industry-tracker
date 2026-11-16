@@ -1551,6 +1551,8 @@ def resolve_industry_job_cost_snapshot(
 
     blueprint_item_id = _safe_int(
         getattr(job, "blueprint_item_id", None)
+        # The ESI payload object the job sync passes names it blueprint_id.
+        or getattr(job, "blueprint_id", None)
         or raw.get("blueprint_id")
         or (blueprint_provenance or {}).get("item_id")
     )

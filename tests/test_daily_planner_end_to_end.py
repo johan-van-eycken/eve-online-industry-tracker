@@ -65,7 +65,7 @@ def test_run_compute_completes_end_to_end_and_persists_a_plan_with_items(
         industry_service=SimpleNamespace(
             get_cached_overview_rows=lambda: [GOOD_ROW],
         ),
-        corporations_service=SimpleNamespace(list_corporations=lambda: []),
+        corporations_service=SimpleNamespace(list_corporations=lambda: [], refresh_wallet_balances=lambda: None),
         characters_service=SimpleNamespace(list_characters=lambda: []),
         sales_history_service=SimpleNamespace(),
         market_pricing_service=SimpleNamespace(),
@@ -108,6 +108,7 @@ def test_a_malformed_wallet_balance_persists_as_unknown_not_a_real_zero(
             get_cached_overview_rows=lambda: [GOOD_ROW],
         ),
         corporations_service=SimpleNamespace(
+            refresh_wallet_balances=lambda: None,
             list_corporations=lambda: [
                 {"wallets": [{"division": 1, "balance": "not-a-number"}]}
             ]
@@ -143,7 +144,7 @@ def test_two_variants_of_one_product_yield_exactly_one_plan_item(
 
     svc = DailyPlannerService(
         industry_service=SimpleNamespace(get_cached_overview_rows=lambda: [high, low]),
-        corporations_service=SimpleNamespace(list_corporations=lambda: []),
+        corporations_service=SimpleNamespace(list_corporations=lambda: [], refresh_wallet_balances=lambda: None),
         characters_service=SimpleNamespace(list_characters=lambda: []),
         sales_history_service=SimpleNamespace(),
         market_pricing_service=SimpleNamespace(),
@@ -168,7 +169,7 @@ def test_a_compute_logs_no_pricing_suggestion_or_relist_warning(
     admin = AdminSettingsManager(file_path=str(tmp_path / "admin.json"))
     svc = DailyPlannerService(
         industry_service=SimpleNamespace(get_cached_overview_rows=lambda: [GOOD_ROW]),
-        corporations_service=SimpleNamespace(list_corporations=lambda: []),
+        corporations_service=SimpleNamespace(list_corporations=lambda: [], refresh_wallet_balances=lambda: None),
         characters_service=SimpleNamespace(list_characters=lambda: []),
         sales_history_service=SimpleNamespace(),
         market_pricing_service=SimpleNamespace(),
@@ -216,7 +217,7 @@ def _invention_planner(session_provider, planner_repo, tmp_path, *, prices):
 
     svc = DailyPlannerService(
         industry_service=SimpleNamespace(get_cached_overview_rows=lambda: [t2_row]),
-        corporations_service=SimpleNamespace(list_corporations=lambda: []),
+        corporations_service=SimpleNamespace(list_corporations=lambda: [], refresh_wallet_balances=lambda: None),
         characters_service=SimpleNamespace(list_characters=lambda: []),
         sales_history_service=SimpleNamespace(),
         market_pricing_service=SimpleNamespace(get_type_price_map=get_type_price_map),
@@ -292,7 +293,7 @@ def _material_planner(session_provider, planner_repo, tmp_path, *, prices):
 
     svc = DailyPlannerService(
         industry_service=SimpleNamespace(get_cached_overview_rows=lambda: [row]),
-        corporations_service=SimpleNamespace(list_corporations=lambda: []),
+        corporations_service=SimpleNamespace(list_corporations=lambda: [], refresh_wallet_balances=lambda: None),
         characters_service=SimpleNamespace(list_characters=lambda: []),
         sales_history_service=SimpleNamespace(),
         market_pricing_service=SimpleNamespace(get_type_price_map=get_type_price_map),
@@ -396,7 +397,7 @@ def _sub_manufacture_planner(session_provider, planner_repo, tmp_path, *, depth_
 
     svc = DailyPlannerService(
         industry_service=SimpleNamespace(get_cached_overview_rows=lambda: [row]),
-        corporations_service=SimpleNamespace(list_corporations=lambda: []),
+        corporations_service=SimpleNamespace(list_corporations=lambda: [], refresh_wallet_balances=lambda: None),
         characters_service=SimpleNamespace(list_characters=lambda: []),
         sales_history_service=SimpleNamespace(),
         market_pricing_service=SimpleNamespace(get_type_price_map=get_type_price_map),

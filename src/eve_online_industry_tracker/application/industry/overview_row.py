@@ -395,6 +395,17 @@ def get_source_copy_fee_per_run(row: dict[str, Any]) -> float | None:
     return _invention_fee_rate(row, "source_copy_job_cost_per_run")
 
 
+def get_copy_job_cost_per_run(row: dict[str, Any]) -> float | None:
+    """The install fee of one copy run of the row's own owned BPO
+    (manufacturing_job.copy_job_cost_per_run), or None (unknown)."""
+    return _non_negative_float(get_manufacturing_job(row).get("copy_job_cost_per_run"))
+
+
+def get_copy_job_cost_unknown_reason(row: dict[str, Any]) -> str | None:
+    """Why the row's own copy fee is unknown; None = no published reason (refresh)."""
+    return _published_reason(get_manufacturing_job(row).get("copy_job_cost_unknown_reason"))
+
+
 def get_research_fee(row: dict[str, Any], activity: str, from_level: int, to_level: int) -> float | None:
     """The install fee of researching the row's owned BPO from `from_level`
     to `to_level` (activity 'research_material' or 'research_time', levels

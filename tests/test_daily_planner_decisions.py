@@ -12,6 +12,8 @@ def _make_admin(
     min_profit=20_000_000,
     competition_gate=4.0,
     momentum_pause=-6.0,
+    min_margin=10.0,
+    max_days=45.0,
 ):
     admin = MagicMock()
     settings = {
@@ -19,6 +21,8 @@ def _make_admin(
         "planner_min_profit_per_batch": min_profit,
         "planner_competition_index_gate": competition_gate,
         "planner_momentum_pause_threshold": momentum_pause,
+        "planner_min_margin_pct": min_margin,
+        "planner_max_days_to_sell": max_days,
     }
     admin.get.side_effect = lambda section, key: settings.get(key, None)
     return admin
@@ -32,10 +36,11 @@ def _make_pipeline(
     momentum_signal: float = 0.0,
     has_active_jobs: bool = False,
     days_of_supply: float = 1.0,
+    velocity: float = 10.0,
 ) -> PipelineState:
     return PipelineState(
         type_id=type_id,
-        effective_velocity=10.0,
+        effective_velocity=velocity,
         total_pipeline_days=total_pipeline_days,
         competition_index=competition_index,
         competitor_units=0,
@@ -67,7 +72,7 @@ def _make_scored(
         mineral_squeeze_penalty=1.0,
         confidence_tier_bonus=1.0,
         isk_per_hour=10_000_000,
-        margin_pct=0.15,
+        margin_pct=15.0,
         unscoreable_reason=unscoreable_reason,
     )
 
@@ -78,6 +83,8 @@ def _make_overview_row(type_id: int = 1) -> dict:
         "type_name": "TestItem",
         "meta_group_id": 1,
         "blueprint_type_id": 1000 + type_id,
+        "quantity": 300,
+        "manufacturing_job": {"runs": 30, "total_cost": 100_000_000.0},
     }
 
 
@@ -95,9 +102,9 @@ class TestItemDecisionEngine:
         decision = self.engine.decide(scored, pipeline, row, admin)
         assert decision.decision == "build", f"Expected build, got {decision.decision}: {decision.decision_reason}"
 
-    def test_watch_when_pipeline_saturated(self):
-        """total_pipeline_days >= 3 → watch."""
-        pipeline = _make_pipeline(total_pipeline_days=5.0, competition_index=None)
+    def test_watch_when_market_full(self):
+        """Pipeline already holds more than max_days of sales → watch (market full)."""
+        pipeline = _make_pipeline(total_pipeline_days=50.0, competition_index=None)
         scored = _make_scored(adjusted_score=10_000_000, absolute_profit=50_000_000)
         admin = _make_admin()
         row = _make_overview_row()
@@ -106,7 +113,7 @@ class TestItemDecisionEngine:
         assert decision.decision == "watch", f"Expected watch, got {decision.decision}"
 
     def test_watch_when_competition_flooded(self):
-        """competition_index >= 4.0 → watch (even if pipeline < 3d)."""
+        """competition_index >= 4.0 → watch (even with room on the market)."""
         pipeline = _make_pipeline(total_pipeline_days=1.0, competition_index=4.5)
         scored = _make_scored(adjusted_score=10_000_000, absolute_profit=50_000_000)
         admin = _make_admin(competition_gate=4.0)
@@ -158,25 +165,19 @@ class TestItemDecisionEngine:
         # The key is: it should NOT be 'pause'
         assert decision.decision != "pause", f"Should not pause without active jobs"
 
-    def test_skip_when_score_below_threshold(self):
-        """adjusted_score <= min_isk → skip."""
+    def test_low_score_no_longer_skips(self):
+        """adjusted_score below the old ISK/hour threshold no longer gates: margin and sell time do."""
         pipeline = _make_pipeline(total_pipeline_days=1.0, price_trend_7d=0.0)
-        scored = _make_scored(adjusted_score=1_000_000, absolute_profit=50_000_000)  # below 5M threshold
-        admin = _make_admin(min_isk=5_000_000)
-        row = _make_overview_row()
+        scored = _make_scored(adjusted_score=1_000_000, absolute_profit=50_000_000)
+        decision = self.engine.decide(scored, pipeline, _make_overview_row(), _make_admin(min_isk=5_000_000))
+        assert decision.decision == "build", decision.decision_reason
 
-        decision = self.engine.decide(scored, pipeline, row, admin)
-        assert decision.decision == "skip", f"Expected skip, got {decision.decision}"
-
-    def test_skip_when_profit_below_threshold(self):
-        """absolute_profit <= min_profit → skip."""
+    def test_low_profit_no_longer_skips(self):
+        """absolute_profit below the old batch-profit threshold no longer gates."""
         pipeline = _make_pipeline(total_pipeline_days=1.0, price_trend_7d=0.0)
-        scored = _make_scored(adjusted_score=10_000_000, absolute_profit=5_000_000)  # below 20M threshold
-        admin = _make_admin(min_profit=20_000_000)
-        row = _make_overview_row()
-
-        decision = self.engine.decide(scored, pipeline, row, admin)
-        assert decision.decision == "skip", f"Expected skip, got {decision.decision}"
+        scored = _make_scored(adjusted_score=10_000_000, absolute_profit=5_000_000)
+        decision = self.engine.decide(scored, pipeline, _make_overview_row(), _make_admin(min_profit=20_000_000))
+        assert decision.decision == "build", decision.decision_reason
 
     def test_pause_on_trend_below_minus_8(self):
         """price_trend_7d < -8% + active jobs → pause (regardless of momentum)."""
@@ -208,31 +209,25 @@ class TestItemDecisionEngine:
         decision = self.engine.decide(scored, pipeline, row, admin)
         assert decision.decision == "pause", f"Expected pause, got {decision.decision}"
 
-    def test_watch_exactly_at_3_days(self):
-        """total_pipeline_days exactly 3.0 → watch (>= 3)."""
-        pipeline = _make_pipeline(total_pipeline_days=3.0)
-        scored = _make_scored(adjusted_score=10_000_000, absolute_profit=50_000_000)
-        admin = _make_admin()
-        row = _make_overview_row()
-
-        decision = self.engine.decide(scored, pipeline, row, admin)
+    def test_watch_when_no_room_left_at_max_days(self):
+        """Pipeline of 45 days at max 45 → not even one run fits → watch."""
+        pipeline = _make_pipeline(total_pipeline_days=45.0)
+        decision = self.engine.decide(_make_scored(), pipeline, _make_overview_row(), _make_admin())
         assert decision.decision == "watch"
+        assert decision.market_cap_runs == 0
 
-    def test_build_just_below_3_days(self):
-        """total_pipeline_days=2.99 → build (still < 3d)."""
-        pipeline = _make_pipeline(total_pipeline_days=2.99)
-        scored = _make_scored(adjusted_score=10_000_000, absolute_profit=50_000_000)
-        admin = _make_admin()
-        row = _make_overview_row()
-
-        decision = self.engine.decide(scored, pipeline, row, admin)
+    def test_build_when_one_run_still_fits(self):
+        """Pipeline of 44 days: 10 units of room = one run of 10 units → build, capped at 1 run."""
+        pipeline = _make_pipeline(total_pipeline_days=44.0)
+        decision = self.engine.decide(_make_scored(), pipeline, _make_overview_row(), _make_admin())
         assert decision.decision == "build"
+        assert decision.market_cap_runs == 1
 
     def test_unscoreable_item_skips_with_reason_before_any_threshold_check(self):
-        """An unscoreable ScoredItem must skip on that reason, not on the score/profit gate.
+        """An unscoreable ScoredItem must skip on that reason, not on the margin/sell-time rules.
 
         Pipeline/admin values here would normally satisfy the 'build' path outright
-        (high score, high profit, no saturation) -- proving the unscoreable check runs
+        (high margin, room on the market) -- proving the unscoreable check runs
         first, before any threshold comparison or /1e6 formatting.
         """
         pipeline = _make_pipeline(total_pipeline_days=1.0, competition_index=None, price_trend_7d=0.0)
