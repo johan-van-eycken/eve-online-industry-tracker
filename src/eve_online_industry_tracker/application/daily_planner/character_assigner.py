@@ -178,9 +178,15 @@ class CharacterAssigner:
         if budget is not None:
             # Science first: what the candidates for the free research slots
             # cost is set aside before any build takes the wallet.
+            # Greedy in rank order: a job the wallet cannot pay reserves nothing.
             slots = sum(int(s.get("free_research", 0)) for s in char_slots.values())
-            priced = [cost for _d, _kind, cost in _candidates() if cost is not None]
-            budget.set_aside(sum(priced[:slots]))
+            total, taken = 0.0, 0
+            for _d, _kind, cost in _candidates():
+                if taken >= slots:
+                    break
+                if cost is not None and total + cost <= budget.available:
+                    total, taken = total + cost, taken + 1
+            budget.set_aside(total)
 
         def _assign_one(decision: ItemDecision) -> list[AssignedAction]:
             actions = self._assign_decision(
@@ -301,13 +307,13 @@ class CharacterAssigner:
         if fell_back:
             _reword_unused_research_claims(chain_plan.decisions, assigned_actions, fell_back)
         _reword_released_bpcs(chain_plan.decisions, bpc_pool)
-        wallet_reason = (budget.blocked_reason or "wallet") if charger is not None and charger.science_stopped else None
+        dropped = charger.science_dropped if charger is not None else {}
         self.free_slots_after = {
             cid: {
                 "character_name": slot["character_name"],
                 "manufacturing": int(slot["free_mfg"]),
                 "science": int(slot["free_research"]),
-                "reason": (wallet_reason or "no eligible job") if slot["free_research"] > 0 else None,
+                "reason": dropped.get(cid, "no eligible job") if slot["free_research"] > 0 else None,
             }
             for cid, slot in char_slots.items()
         }
@@ -2553,8 +2559,8 @@ class _BuildCharger:
         self.rounding: dict[int, float | None] = {}
         #: {parent type_id: runs built / batch runs} for the sub re-size.
         self.scale: dict[int, float] = {}
-        #: A science job was dropped for lack of wallet (free_slots_after's reason).
-        self.science_stopped = False
+        #: {pilot: why a science job of theirs was dropped} (free_slots_after's reason).
+        self.science_dropped: dict[int, str] = {}
 
     def _unit_price(self, type_id: int) -> float | None:
         return price_map_unit_price(self._price_map.get(type_id))[0]
@@ -2706,9 +2712,10 @@ class _BuildCharger:
             return True
         if cost is None:
             why = f"{action.action_type} cost unknown ({action.estimated_job_fee_unknown_reason or 'fee or inputs unpriced'})"
+            self.science_dropped.setdefault(int(action.character_id), f"no science today: {why}")
         else:
-            self.science_stopped = True
             why = "wallet"
+            self.science_dropped.setdefault(int(action.character_id), self._budget.blocked_reason or "wallet")
         logger.info("CharacterAssigner: type_id=%s: no %s today: %s", decision.type_id, action.action_type, why)
         _append_reason(decision, f"no science today: {why}")
         return False

@@ -14,10 +14,11 @@ from test_daily_planner_budget_assignment import MAT, M, _AdminStub, _parent
 PRICES = {MAT: {"vwap_5d": 1.0 * M}}
 
 
-def _pilot(char_id=1, research_slots=2, mfg_slots=1):
+def _pilot(char_id=1, research_slots=2, mfg_slots=1, extra=()):
     skills = [
         {"skill_id": 3406, "skill_name": "Laboratory Operation", "trained_skill_level": research_slots - 1},
         {"skill_id": 3387, "skill_name": "Mass Production", "trained_skill_level": mfg_slots - 1},
+        *extra,
     ]
     return {"character_id": char_id, "character_name": f"Pilot {char_id}", "skills": {"skills": skills, "total_sp": 0}}
 
@@ -122,3 +123,89 @@ def test_unowned_t1_bpo_gets_no_jobs():
     )
     assert not [a for a in actions if a.action_type in ("invent", "copy", "manufacture")]
     assert "T1 BPO 999 not owned: buy it first (see BPO advice)" in decision.decision_reason
+
+
+def test_science_the_wallet_cannot_pay_reserves_nothing():
+    # ME research at 12M never fits a 10M wallet; the 5M build must not starve for it.
+    row = _researching(_parent(runs=5, materials={MAT: 5}), fee=12 * M)
+    budget = WalletBudget(balance=10 * M, reserve_pct=0)
+    _assigner, actions = _assign([row], [_pilot(research_slots=1, mfg_slots=1)], budget)
+    (mfg,) = _of(actions, "manufacture")
+    assert mfg.runs == 5 and budget.spent == 5 * M
+    assert not _of(actions, "me_research")
+    assert "no science today: wallet" in row.decision_reason
+
+
+def test_fill_pass_copies_the_t1_bpo_the_build_pass_sized_to_nothing():
+    """Seed 52's shape: W0 holds corp T1 BPC 700 but nobody free can run its
+    invention, so 700 goes to the pool; W1's copy of pilot 1's T1 BPO 70 is
+    then sized to 0 jobs (the pooled BPC covers the attempts) and W1 cannot
+    invent either. The fill pass copies BPO 70 on pilot 1's free slot."""
+    import test_blueprint_ledger as L
+    import test_daily_planner_assigned_inventor as A
+    import test_daily_planner_character_blueprints as C
+    import test_daily_planner_release_replan as T
+
+    rows = [T._planned_t2(12345, "W0", 8.8, T.OTHER_ENCRYPTION), T._planned_t2(12346, "W1", 8.5, T.OTHER_ENCRYPTION)]
+    pilots = [T._pilot(1, "P1", A.ENCRYPTION, lab=1, mass=1), T._pilot(2, "P2", A.ENCRYPTION, mass=1),
+              T._pilot(3, "P3", T.OTHER_ENCRYPTION)]
+    jobs = [T._busy(1, 1), T._busy(2, 8), T._busy(3, 8)]
+    _plan, actions = T._plan_and_assign(
+        rows, {998: [C._owned_bpo(70, 998, owner=1)]}, {998: [L._bpc(700, 998, 10)]}, pilots, jobs,
+    )
+    assert [(a.action_type, a.type_id, a.character_id) for a in actions] == [("copy", 998, 1)]
+
+
+def _research_fill(manufactured):
+    """_fill_science on a research row, one research slot free, with or
+    without a manufacture action of its own from the build pass."""
+    from datetime import datetime
+
+    from eve_online_industry_tracker.application.daily_planner.character_assigner import _SkillGate
+    from eve_online_industry_tracker.application.daily_planner.models import AssignedAction
+
+    row = _researching(_parent(runs=1))
+    assigner = CharacterAssigner()
+    slots = assigner._compute_available_slots([_pilot(research_slots=1)], [], datetime.now())
+    emitted = {id(row): [AssignedAction(
+        type_id=100, type_name="Product 100", action_type="manufacture", character_id=1, character_name="Pilot 1",
+        quantity=1, runs=1, estimated_cost_isk=None, estimated_profit_isk=None, estimated_completion=None, notes="",
+    )] if manufactured else []}
+    return assigner._fill_science(
+        row, "me_research", [row], emitted, slots, [_pilot()], _SkillGate(NO_SKILL_REQUIREMENTS, slots), {},
+        now=datetime.now(), probability_floor=0.0, price_map={}, charger=None,
+    )
+
+
+def test_fill_pass_never_researches_a_bpo_built_from_today():
+    assert [a.action_type for a in _research_fill(manufactured=False)] == ["me_research"]
+    assert _research_fill(manufactured=True) == []
+
+
+def test_free_slots_reason_names_an_unknown_science_cost():
+    row = _researching(_parent(runs=1))
+    del row.overview_row["manufacturing_job"]["research_job_cost_by_level"]
+    assigner, actions = _assign([row], [_pilot(research_slots=1)], WalletBudget(balance=1e12, reserve_pct=0))
+    assert not _of(actions, "me_research")
+    reason = assigner.free_slots_after[1]["reason"]
+    assert reason.startswith("no science today: me_research cost unknown (") and reason in row.decision_reason
+
+
+class _OnlyPilotOneResearches:
+    """Blueprint 101's ME research needs Science 1, which only pilot 1 has."""
+
+    def get(self, bp_type_id, default=None):
+        if bp_type_id == 101:
+            return blueprint(manufacturing=[], research_material=[skill(3402, "Science", 1)])
+        return NO_SKILL_REQUIREMENTS.get(bp_type_id)
+
+
+def test_wallet_reason_only_for_the_pilot_who_could_run_the_job():
+    row = _researching(_parent(runs=1), fee=5 * M)
+    science = {"skill_id": 3402, "skill_name": "Science", "trained_skill_level": 1}
+    assigner, _actions = _assign(
+        [row], [_pilot(1, research_slots=1, extra=[science]), _pilot(2, research_slots=1)],
+        WalletBudget(balance=1 * M, reserve_pct=0), _OnlyPilotOneResearches(),
+    )
+    assert assigner.free_slots_after[1]["reason"] == "wallet"
+    assert assigner.free_slots_after[2]["reason"] == "no eligible job"
