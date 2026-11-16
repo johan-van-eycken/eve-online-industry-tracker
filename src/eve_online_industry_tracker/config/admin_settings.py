@@ -411,7 +411,7 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
                 "max": 90.0,
                 "step": 1.0,
                 "format": "%.0f",
-                "label": "Wallet reserve (%)",
+                "label": "Corp wallet reserve %",
                 "help": "Share of the corp wallet the planner never spends.",
             },
             "planner_min_isk_per_hour": {
