@@ -362,3 +362,49 @@ def test_wallet_caption_old_plan():
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run** the full suite. Then start the app, recompute the plan, and check the status bar, the shopping total ≤ 90% of the wallet, and free slots. Expected: PASS, and on screen what is described above.
 - [ ] **Step 5: Commit** `feat(ui): show corp wallet age, plan budget and free slots`.
+
+### Task 9: Blueprint stock pass for leftover science slots
+
+Spec: section 7 of the design doc.
+
+**Files:**
+- Create: `src/eve_online_industry_tracker/application/daily_planner/blueprint_stock.py`
+- Modify: `src/eve_online_industry_tracker/application/daily_planner/character_assigner.py` (`assign`: a stock pass after `_fill_science`, before `free_slots_after` is filled)
+- Modify: `src/eve_online_industry_tracker/application/daily_planner/service.py` (`_phase_6_assign` passes the stock inputs)
+- Modify: `src/eve_online_industry_tracker/config/admin_settings.py` (two settings)
+- Test: `tests/test_daily_planner_blueprint_stock.py`
+
+**Interfaces:**
+- Settings (daily_planner section, same dict shape as the others): `planner_min_bpc_stock`: int, default 3, min 0, max 50, label "Minimum BPCs in stock per owned BPO"; `planner_min_invented_bpc_stock`: int, default 3, min 0, max 50, label "Minimum invented BPCs in stock per inventable T2".
+- Produces in `blueprint_stock.py`:
+  - `@dataclass(frozen=True) class StockGap: kind: str  # "copy" | "invent"; blueprint_type_id: int  # the BPO to copy, or the T2 blueprint to invent; source_blueprint_type_id: int | None  # T1 blueprint for "invent"; have: float; want: int; product_type_id: int | None`
+  - `count_in_progress(industry_jobs, invention_probability: Callable[[int], float | None]) -> dict[int, float]`: per blueprint type_id that will gain BPCs, the BPCs on their way. A copy job (activity_id 5, not delivered) adds its `runs` (copies) to its `blueprint_type_id`. An invention job (activity_id 8) adds `runs × probability(product_type_id)` to its `product_type_id` (the invented blueprint), or `runs` when the probability is None.
+  - `stock_gaps(*, bpo_type_ids: Iterable[int], bpc_counts: dict[int, int], in_progress: dict[int, float], invention_source_index: dict[int, int], min_bpc: int, min_invented: int, product_of: Callable[[int], int | None]) -> list[StockGap]`: a "copy" gap per owned BPO type with `bpc_counts + in_progress < min_bpc`. An "invent" gap per T2 blueprint whose source (via `invention_source_index`, {T2 bp: T1 bp}) is an owned BPO type and with `bpc_counts + in_progress < min_invented`. `product_of(bp)` is the manufactured product (via the SDE).
+  - `rank_gaps(gaps, decision_by_product: dict[int, ItemDecision]) -> list[StockGap]`: rows that are "build" decisions first, by `capital_return_per_day` descending. Then other rows by `margin_pct` descending. Then gaps with no decision or no margin. Stable within ties.
+- Consumes from earlier tasks: `WalletBudget.charge` (not `charge_science`), `science_cost(action)`, `_reserve_copy_pilots` / `_copy_actions` / `_invent_action` / `_invention_results`, the ledger, and `free_slots_after` (it is still filled after this pass, so the "no eligible job" / "wallet" reasons include stock jobs).
+- `assign(..., blueprint_stock: dict[str, Any] | None = None)`: None skips the pass (existing tests). The service passes `{"bpo_assets_by_type_id", "bpc_assets_by_type_id", "busy_blueprint_item_ids", "min_bpc", "min_invented"}` from phase 1 and the two settings.
+
+Behaviour:
+1. After the science fill pass, while any pilot has `free_research > 0`, walk the ranked gaps. For a "copy" gap, emit copy jobs on a free owned BPO of that type (not busy, not claimed in the ledger), with copies sized as the planner already sizes copies of that blueprint, up to `want - have` copies. For an "invent" gap, emit invent jobs from free T1 BPCs of the source type that exist now (any free one, even one that brings T1 stock below its minimum), with the decryptor and probability the product overview row of the T2 product gives, up to the attempts needed for `want - have` expected successes.
+2. A gap whose product has no overview row, or whose fee, inputs or probability are unknown, is skipped with a logged reason, never planned as free.
+3. Each job is charged with `budget.charge(science_cost(action))`. On False it is dropped and its slot released, and the pilot's science reason becomes `budget.blocked_reason or "wallet"`.
+4. Notes on the actions say why they exist: `f"stock: {have:g} of {want} BPCs"`.
+
+- [ ] **Step 1: Write the failing tests**
+
+```python
+def test_count_in_progress():        # copy job runs=2 on bp 10 -> {10: 2}; invent runs=4 on product 20 with p=0.5 -> {20: 2.0}; p None -> 4
+def test_copy_gap_below_minimum():   # BPO 10 owned, 1 BPC, 1 in progress, min 3 -> one copy gap have=2 want=3
+def test_no_gap_at_minimum():        # 3 BPCs -> no gap
+def test_invent_gap_from_owned_t1(): # BPO 10 owned, T2 bp 30 sourced from 10, 0 BPCs -> invent gap source=10 want=3
+def test_rank_build_rows_first():    # build row (crpd 0.01) > skip row margin 40% > no decision
+def test_stock_pass_fills_free_slots():  # 2 free research slots, one copy gap -> copy action with note "stock: 1 of 3 BPCs"
+def test_stock_pass_respects_wallet():   # budget 0 left after builds -> no stock job, science reason "wallet"
+def test_stock_pass_skips_unknown_fee(): # copy fee unknown -> no action, no crash
+def test_invent_uses_t1_below_minimum(): # 1 T1 BPC, T1 min 3, T2 gap -> invent action uses that BPC (option B)
+```
+
+- [ ] **Step 2: Run** `pytest tests/test_daily_planner_blueprint_stock.py -v`. Expected: FAIL (ImportError).
+- [ ] **Step 3: Implement** the module, the pass, the service wiring and the settings.
+- [ ] **Step 4: Run** the full suite. Expected: PASS.
+- [ ] **Step 5: Commit** `feat(planner): keep a minimum blueprint stock with leftover science slots`.
