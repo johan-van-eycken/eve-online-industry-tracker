@@ -55,6 +55,9 @@ class StockLedger:
     def __init__(self, stock: dict[int, int]):
         self._stock = dict(stock)
 
+    def available(self, type_id: int) -> int:
+        return max(self._stock.get(type_id, 0), 0)
+
     def purchase_cost(
         self,
         materials: dict[int, int],

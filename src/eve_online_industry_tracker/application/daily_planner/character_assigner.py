@@ -2256,7 +2256,12 @@ class _BuildCharger:
     a sub decision builds costs its build cost per unit for the units its
     jobs cover, booked at the parent's turn on slots reserved there, so the
     sub pass cannot spend later what was not charged. Runs are cut to the
-    market cap and to what the wallet allows."""
+    market cap and to what the wallet allows.
+
+    Sub cost is not linear in units (whole runs, ME rounded per job), so a
+    sub is charged in whole runs, its spare output kept for the next parent,
+    plus one unit of each of its inputs per reserved job: a re-sized sub never
+    costs more than was charged for it."""
 
     def __init__(
         self, assigner: CharacterAssigner, budget: WalletBudget, ledger: StockLedger,
@@ -2272,6 +2277,10 @@ class _BuildCharger:
         #: shopping list's sub_built).
         self.reserved: dict[int, list[int]] = {}
         self.covered: dict[int, int] = {}
+        #: {sub type_id: units of the runs already paid that no parent took yet}.
+        self.spare: dict[int, int] = {}
+        #: {sub type_id: one unit of each input per reserved job, at market}, charged with its first paid run.
+        self.rounding: dict[int, float | None] = {}
         #: {parent type_id: runs built / batch runs} for the sub re-size.
         self.scale: dict[int, float] = {}
 
@@ -2311,6 +2320,9 @@ class _BuildCharger:
                 jobs_covered += 1
                 units += int(job["quantity"])
             self.reserved[sub_type_id], self.covered[sub_type_id] = pilots, units
+            self.spare[sub_type_id] = 0
+            inputs = [self._unit_price(int(t)) for t in row.get("sub_batch_materials") or {}]
+            self.rounding[sub_type_id] = None if None in inputs else jobs_covered * sum(inputs)
             row["reserved_sub_pilots"] = list(pilots)
             fresh.append(sub_type_id)
         return fresh
@@ -2320,6 +2332,8 @@ class _BuildCharger:
             for char_id in self.reserved.pop(sub_type_id):
                 self._assigner._release_slot(self._char_slots, char_id, "sub_manufacture")
             self.covered.pop(sub_type_id)
+            self.spare.pop(sub_type_id)
+            self.rounding.pop(sub_type_id)
         for sub in self._subs:
             if int(sub.type_id) in sub_type_ids:
                 sub.overview_row.pop("reserved_sub_pilots", None)
@@ -2339,12 +2353,17 @@ class _BuildCharger:
         (nothing charged, reason on the decision) when not even 1 run fits."""
         parent_type_id = int(decision.type_id)
         fresh = self._reserve_subs(parent_type_id)
-        build_unit_cost = {
-            int(sub.type_id): (sub.overview_row["sub_manufacture_cost"] + sub.overview_row["sub_install_fee"])
-            / sub.overview_row["quantity_needed"]
+        # {sub type_id: (cost of one run, units one run outputs)}.
+        sub_runs = {
+            int(sub.type_id): (
+                (sub.overview_row["sub_manufacture_cost"] + sub.overview_row["sub_install_fee"])
+                / sub.overview_row["sub_runs"],
+                job["output"] / job["runs"],
+            )
             for sub in self._subs
             if int(sub.type_id) in self.covered
             and parent_type_id in {int(p) for p in sub.overview_row.get("requested_by_type_ids") or []}
+            for job in sub.overview_row["sub_job_batches"][:1]
         }
         base, fee = self._materials(action), action.estimated_job_fee_isk
 
@@ -2353,13 +2372,25 @@ class _BuildCharger:
                 return None
             materials = {t: -(-q * runs // batch_runs) for t, q in base.items()}
             built = 0.0
-            for sub_type_id, unit_cost in build_unit_cost.items():
-                take = min(materials.get(sub_type_id, 0), self.covered[sub_type_id])
-                if take:
-                    materials[sub_type_id] -= take
-                    built += take * unit_cost
-                    if commit:
-                        self.covered[sub_type_id] -= take
+            for sub_type_id, (run_cost, out_per_run) in sub_runs.items():
+                # Corp stock first (ChainPlanner sizes the sub net of it); the sub covers the rest.
+                gap = max(materials.get(sub_type_id, 0) - self._ledger.available(sub_type_id), 0)
+                take = min(gap, self.covered[sub_type_id])
+                if not take:
+                    continue
+                materials[sub_type_id] -= take
+                new_runs = math.ceil(max(take - self.spare[sub_type_id], 0) / out_per_run)
+                if new_runs:
+                    rounding = self.rounding[sub_type_id]
+                    if rounding is None:  # an input without a price: unknown, never cheap
+                        return None
+                    built += new_runs * run_cost + rounding
+                if commit:
+                    self.covered[sub_type_id] -= take
+                    paid = self.spare[sub_type_id] + math.floor(new_runs * out_per_run)
+                    self.spare[sub_type_id] = max(paid - take, 0)
+                    if new_runs:
+                        self.rounding[sub_type_id] = 0.0  # charged once, with the sub's first paid run
             bought = self._ledger.purchase_cost(materials, self._unit_price, commit=commit)
             return None if bought is None else fee * runs / batch_runs + built + bought
 

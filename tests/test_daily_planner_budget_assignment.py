@@ -10,7 +10,7 @@ from eve_online_industry_tracker.application.daily_planner.wallet_budget import 
 from fakes import _Chars
 from planner_skill_fakes import NO_SKILL_REQUIREMENTS
 
-MAT, COMP = 34, 777
+MAT, COMP, SUB_INPUT = 34, 777, 35
 M = 1_000_000
 
 
@@ -44,7 +44,8 @@ def _parent(type_id=100, runs=30, materials=None, fee=0.0, crpd=None, score=1.0,
     )
 
 
-def _sub(need=10, parents=(100,)):
+def _sub(need=10, parents=(100,), per_run=1, run_cost=1 * M):
+    runs = math.ceil(need / per_run)
     return ItemDecision(
         type_id=COMP, type_name="Component", decision="build", decision_reason="Sub-manufacture",
         adjusted_score=0.0, absolute_profit_per_batch=0.0, isk_per_hour=0.0, margin_pct=0.0,
@@ -53,15 +54,18 @@ def _sub(need=10, parents=(100,)):
         overview_row={
             "type_id": COMP, "blueprint_type_id": 778, "quantity_needed": need,
             "requested_by_type_ids": list(parents),
-            "sub_manufacture_cost": 0.8 * M * need, "sub_install_fee": 0.2 * M * need,
-            "sub_max_runs_per_job": need, "market_buy_cost": 2.0 * M * need,
-            "sub_job_batches": [{"quantity": need, "output": need, "runs": need, "cost": 0.8 * M * need,
-                                 "materials": {MAT: need}, "fee": 0.2 * M * need, "after_job": None}],
+            "sub_runs": runs, "sub_batch_materials": {SUB_INPUT: runs},
+            "sub_manufacture_cost": 0.8 * run_cost * runs, "sub_install_fee": 0.2 * run_cost * runs,
+            "sub_max_runs_per_job": runs, "market_buy_cost": 2.0 * M * need,
+            "sub_job_batches": [{"quantity": need, "output": runs * per_run, "runs": runs,
+                                 "cost": 0.8 * run_cost * runs, "materials": {SUB_INPUT: runs},
+                                 "fee": 0.2 * run_cost * runs, "after_job": None}],
         },
     )
 
 
-PRICES = {MAT: {"vwap_5d": 10.0 * M}, COMP: {"vwap_5d": 2.0 * M}}
+#: The sub's input costs 1 ISK: one unit per reserved sub job is charged for ME rounding.
+PRICES = {MAT: {"vwap_5d": 10.0 * M}, COMP: {"vwap_5d": 2.0 * M}, SUB_INPUT: {"vwap_5d": 1.0}}
 
 
 def _assign(decisions, chars, budget, stock=None, prices=PRICES, plan=None):
@@ -109,7 +113,7 @@ def test_stock_lowers_the_charge():
 def test_sub_component_priced_at_build_cost():
     budget = WalletBudget(balance=1e12, reserve_pct=0)
     actions = _assign([_parent(runs=1, materials={COMP: 10}), _sub()], [_char(1, mfg_slots=2)], budget)
-    assert budget.spent == 10 * M  # 10 x (0.8M + 0.2M), not 10 x 2M
+    assert budget.spent == 10 * M + 1  # 10 x (0.8M + 0.2M), not 10 x 2M; + 1 ISK rounding unit
     (sub,) = _of(actions, "sub_manufacture")
     assert sub.character_id == 1
 
@@ -138,7 +142,36 @@ def test_cut_parent_resizes_subs():
     (mfg,) = _of(actions, "manufacture")
     assert mfg.runs == 9 and seen["scale"] == {100: 9 / 30}
     assert [a.quantity for a in _of(actions, "sub_manufacture")] == [math.ceil(9 / 30 * need)]
-    assert budget.spent == 9 * 11 * M
+    assert budget.spent == 9 * 11 * M + 1
+
+
+def test_sub_charged_in_whole_runs():
+    """30 units per sub run at 30M; each parent run needs 1 component + 10M."""
+    parent = _parent(runs=30, materials={MAT: 30, COMP: 30})
+    resized = {}
+
+    def resize(fallen, dropped=frozenset(), scale=None):
+        resized["sub"] = _sub(need=math.ceil(30 * scale[100]), per_run=30, run_cost=30 * M)
+        return [resized["sub"]]
+
+    plan = ChainPlan(decisions=[parent, _sub(need=30, per_run=30, run_cost=30 * M)], resize_sub_components=resize)
+    budget = WalletBudget(balance=100 * M, reserve_pct=0)
+    actions = _assign(None, [_char(1, mfg_slots=3)], budget, plan=plan)
+    (mfg,) = _of(actions, "manufacture")
+    sub_row = resized["sub"].overview_row
+    assert mfg.runs == 6  # 7 runs: 70M + 30M + 1 ISK rounding > 100M
+    assert budget.spent >= sub_row["sub_manufacture_cost"] + sub_row["sub_install_fee"] + mfg.runs * 10 * M
+    assert budget.spent <= 100 * M
+
+
+def test_component_stock_used_before_the_sub():
+    """Request 30, stock 20, sub builds 10: a parent cut to 10 runs takes its 10 from stock."""
+    parent = _parent(runs=30, materials={MAT: 30, COMP: 30})
+    plan = ChainPlan(decisions=[parent, _sub(need=10)], resize_sub_components=lambda *a, **k: [])
+    budget = WalletBudget(balance=100 * M, reserve_pct=0)
+    actions = _assign(None, [_char(1, mfg_slots=3)], budget, stock={COMP: 20}, plan=plan)
+    (mfg,) = _of(actions, "manufacture")
+    assert mfg.runs == 10 and budget.spent == 100 * M
 
 
 def test_no_budget_means_old_behaviour():
