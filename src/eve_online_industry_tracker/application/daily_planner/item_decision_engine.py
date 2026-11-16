@@ -7,6 +7,7 @@ Two-pass ordering:
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any
 
 from eve_online_industry_tracker.application.daily_planner.admin_setting import planner_setting as _adm
@@ -20,6 +21,14 @@ from eve_online_industry_tracker.application.daily_planner.models import (
 logger = logging.getLogger(__name__)
 
 
+def market_cap_runs(
+    *, batch_runs: int, units_per_run: float, velocity: float, pipeline_units: float, max_days: float,
+) -> int:
+    """Runs of a batch the market can absorb within max_days, given what is already in the pipeline."""
+    room = math.floor((velocity * max_days - pipeline_units) / units_per_run)
+    return max(0, min(batch_runs, room))
+
+
 class ItemDecisionEngine:
     """Phase 4: assign a decision to each scored item."""
 
@@ -30,11 +39,12 @@ class ItemDecisionEngine:
         overview_row: dict[str, Any],
         admin_settings: Any,
         meta_group_id: int | None = None,
+        margin_known: bool = True,
     ) -> ItemDecision:
         """_decide's decision; when the row's profit is an upper bound (job
         fees unknown) its reason says so. The scores
         stay on that bound, labelled."""
-        decision = self._decide(scored, pipeline, overview_row, admin_settings, meta_group_id)
+        decision = self._decide(scored, pipeline, overview_row, admin_settings, meta_group_id, margin_known)
         upper_bound = orow.get_profit_upper_bound_reason(overview_row)
         if upper_bound is not None:
             decision.profit_is_upper_bound = True
@@ -49,6 +59,7 @@ class ItemDecisionEngine:
         overview_row: dict[str, Any],
         admin_settings: Any,
         meta_group_id: int | None = None,
+        margin_known: bool = True,
     ) -> ItemDecision:
         """Apply Phase 4 decision rules and return an ItemDecision.
 
@@ -88,8 +99,6 @@ class ItemDecisionEngine:
                 overview_row=overview_row,
             )
 
-        min_isk_per_hour = float(_adm(admin_settings, "planner_min_isk_per_hour"))
-        min_profit_per_batch = float(_adm(admin_settings, "planner_min_profit_per_batch"))
         competition_gate = float(_adm(admin_settings, "planner_competition_index_gate"))
         momentum_pause_threshold = float(_adm(admin_settings, "planner_momentum_pause_threshold"))
 
@@ -125,88 +134,75 @@ class ItemDecisionEngine:
                 overview_row=overview_row,
             )
 
-        # ── SKIP check (score or profit too low) ──────────────────────────────
-        if scored.adjusted_score <= min_isk_per_hour or scored.absolute_profit_per_batch <= min_profit_per_batch:
-            if scored.adjusted_score <= min_isk_per_hour:
-                reason = f"Score {scored.adjusted_score/1e6:.1f}M ISK/hr below {min_isk_per_hour/1e6:.1f}M threshold"
-            else:
-                reason = f"Batch profit {scored.absolute_profit_per_batch/1e6:.1f}M ISK below {min_profit_per_batch/1e6:.1f}M threshold"
-            # Special case: declining trend with no active jobs → skip not pause
-            if price_trend_7d < -8.0 or momentum_signal < momentum_pause_threshold:
+        # ── Build rules: margin, sell time, market cap, capital return ────────
+        min_margin = float(_adm(admin_settings, "planner_min_margin_pct"))
+        max_days = float(_adm(admin_settings, "planner_max_days_to_sell"))
+        velocity = pipeline.effective_velocity
+        pipeline_units = pipeline_days * velocity
+        declining = price_trend_7d < -8.0 or momentum_signal < momentum_pause_threshold
+        computed: dict[str, Any] = {}
+
+        def _result(decision: str, reason: str) -> ItemDecision:
+            if decision == "skip" and declining:
                 reason += "; declining market (no active jobs)"
             return ItemDecision(
                 type_id=type_id,
                 type_name=type_name,
-                decision="skip",
+                decision=decision,
                 decision_reason=reason,
                 adjusted_score=scored.adjusted_score,
                 absolute_profit_per_batch=scored.absolute_profit_per_batch,
                 isk_per_hour=scored.isk_per_hour,
                 margin_pct=scored.margin_pct,
                 days_of_supply_current=pipeline.days_of_supply_current,
-                effective_velocity=pipeline.effective_velocity,
+                effective_velocity=velocity,
                 velocity_unknown_reason=pipeline.velocity_unknown_reason,
                 meta_group_id=meta_group_id,
-                pipeline_stage="watching",
+                # The overview row carries no pipeline stage or in-flight flags
+                # (no producer writes them), so a non-build is always "watching".
+                pipeline_stage="manufacturing" if decision == "build" else "watching",
                 overview_row=overview_row,
+                **computed,
             )
 
-        # ── WATCH check (pipeline saturated or market flooded) ────────────────
+        if pipeline.velocity_unknown_reason is not None:
+            return _result("skip", f"not built: sell velocity unknown ({pipeline.velocity_unknown_reason})")
+        if not margin_known:
+            return _result("skip", "not built: margin unknown")
+        if scored.margin_pct < min_margin:
+            return _result("skip", f"margin {scored.margin_pct:.1f}% below {min_margin:g}%")
+
+        batch_runs = orow.get_manufacturing_job(overview_row).get("runs")
+        if not isinstance(batch_runs, int) or isinstance(batch_runs, bool) or batch_runs <= 0:
+            return _result("skip", "not built: batch runs unknown")
+        quantity = orow.get_product_quantity(overview_row)
+        if quantity <= 0:
+            return _result("skip", "not built: product quantity unknown")
+        units_per_run = quantity / batch_runs
+        capital = orow.get_total_cost(overview_row)
+        if capital is None or capital <= 0:
+            return _result("skip", "not built: batch cost unknown")
+
+        # ── WATCH check (market flooded, or no room left to sell a batch) ─────
         # competition_index gate: only applied if competition_index is not None (Phase A: skip gate)
-        competition_flooded = (
-            competition_index is not None and competition_index >= competition_gate
-        )
-        pipeline_saturated = pipeline_days >= 3.0
+        if competition_index is not None and competition_index >= competition_gate:
+            return _result("watch", f"Watch: competition index {competition_index:.1f} ≥ {competition_gate:.1f}")
 
-        if pipeline_saturated or competition_flooded:
-            reasons = []
-            if pipeline_saturated:
-                reasons.append(f"{pipeline_days:.1f}d of supply (≥ 3d)")
-            if competition_flooded:
-                reasons.append(f"competition index {competition_index:.1f} ≥ {competition_gate:.1f}")
-            reason = "Watch: " + ", ".join(reasons)
-            # The overview row carries no pipeline stage or in-flight flags
-            # (pipeline_stage / invention_in_flight / bpc_in_flight /
-            # copy_in_flight are written by no producer), so the old
-            # inference always fell through to "watching". Say so directly.
-            pipeline_stage = "watching"
-            return ItemDecision(
-                type_id=type_id,
-                type_name=type_name,
-                decision="watch",
-                decision_reason=reason,
-                adjusted_score=scored.adjusted_score,
-                absolute_profit_per_batch=scored.absolute_profit_per_batch,
-                isk_per_hour=scored.isk_per_hour,
-                margin_pct=scored.margin_pct,
-                days_of_supply_current=pipeline.days_of_supply_current,
-                effective_velocity=pipeline.effective_velocity,
-                velocity_unknown_reason=pipeline.velocity_unknown_reason,
-                meta_group_id=meta_group_id,
-                pipeline_stage=pipeline_stage,
-                overview_row=overview_row,
-            )
+        cap = market_cap_runs(
+            batch_runs=batch_runs, units_per_run=units_per_run, velocity=velocity,
+            pipeline_units=pipeline_units, max_days=max_days,
+        )
+        computed["market_cap_runs"] = cap
+        if cap == 0:
+            return _result("watch", f"market full: {pipeline_days:.0f} days of supply already, max {max_days:g}")
 
         # ── BUILD ─────────────────────────────────────────────────────────────
-        reason = (
-            f"Build: score {scored.adjusted_score/1e6:.1f}M ISK/hr, "
-            f"pipeline {pipeline_days:.1f}d < 3d"
+        expected_days = (pipeline_units + cap * units_per_run) / velocity
+        # Runs cancel out: the full batch's profit and cost give the capped batch's ratio.
+        crpd = (scored.absolute_profit_per_batch / capital) / max(expected_days, 1.0)
+        computed["expected_days_to_sell"] = expected_days
+        computed["capital_return_per_day"] = crpd
+        return _result(
+            "build",
+            f"Build: margin {scored.margin_pct:.1f}%, {expected_days:.0f} days to sell, {100 * crpd:.2f}%/day on capital",
         )
-        return ItemDecision(
-            type_id=type_id,
-            type_name=type_name,
-            decision="build",
-            decision_reason=reason,
-            adjusted_score=scored.adjusted_score,
-            absolute_profit_per_batch=scored.absolute_profit_per_batch,
-            isk_per_hour=scored.isk_per_hour,
-            margin_pct=scored.margin_pct,
-            days_of_supply_current=pipeline.days_of_supply_current,
-            effective_velocity=pipeline.effective_velocity,
-            velocity_unknown_reason=pipeline.velocity_unknown_reason,
-            meta_group_id=meta_group_id,
-            pipeline_stage="manufacturing",
-            overview_row=overview_row,
-        )
-
-

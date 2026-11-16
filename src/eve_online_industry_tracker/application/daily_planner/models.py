@@ -81,6 +81,12 @@ class ItemDecision:
     # unknown, orow.get_profit_upper_bound_reason); persisted so feedback
     # does not learn accuracy from them.
     profit_is_upper_bound: bool = False
+    # Phase 4 build rules (set on a build; on a skip/watch only what was computed
+    # before the rule fired): days to sell the capped batch plus the pipeline,
+    # its profit/cost per day, and how many runs the market absorbs.
+    expected_days_to_sell: float | None = None
+    capital_return_per_day: float | None = None
+    market_cap_runs: int | None = None
     # Chain context flag — True for sub-components added in Phase 5 Pass 2
     is_sub_component: bool = False
     # overview row snapshot for downstream phases

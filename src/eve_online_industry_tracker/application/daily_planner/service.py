@@ -918,6 +918,7 @@ class DailyPlannerService:
                     # (only meta_group_name); the resolved SDE value lives on
                     # the validated input row instead.
                     meta_group_id=input_row.meta_group_id if input_row is not None else None,
+                    margin_known=input_row is None or input_row.profit_margin_fraction is not None,
                 )
                 notes = _unavailable_input_notes(scored.type_id, unavailable, margin_correlations)
                 stale_note = _market_depth_stale_note(market_depth_cache.get(scored.type_id))
