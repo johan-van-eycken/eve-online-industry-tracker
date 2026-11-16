@@ -609,16 +609,28 @@ class ChainPlanner:
             id(d): dict(d.overview_row.get("component_buy_reasons") or {}) for d in build_decisions
         }
 
-        def _sub_decisions(fallen: set[int], dropped: set[int] | frozenset[int] = frozenset()) -> list[ItemDecision]:
+        def _sub_decisions(
+            fallen: set[int], dropped: set[int] | frozenset[int] = frozenset(),
+            scale: dict[int, float] | None = None,
+        ) -> list[ItemDecision]:
             # `dropped`: parents CharacterAssigner
             # gives no manufacture (e.g. owner binding): no sub-builds for them.
+            # `scale`: {parent type_id: fraction in (0, 1]} of a parent's batch
+            # that is still built; its requests shrink to match (rounded up).
+            scale = scale or {}
+            for parent, fraction in scale.items():
+                if not 0 < fraction <= 1:
+                    raise ValueError(f"sub-component scale for parent {parent} must be in (0, 1], got {fraction}")
             for decision in build_decisions:
                 if id(decision) in phase_d_buy_reasons and (
                     phase_d_buy_reasons[id(decision)] or "component_buy_reasons" in decision.overview_row
                 ):
                     decision.overview_row["component_buy_reasons"] = dict(phase_d_buy_reasons[id(decision)])
             per_parent = [
-                (parent, fallback_requests[parent] if parent in fallen and parent in fallback_requests else requests)
+                (parent, [
+                    {**r, "quantity": math.ceil(r["quantity"] * scale[parent])} if parent in scale else r
+                    for r in (fallback_requests[parent] if parent in fallen and parent in fallback_requests else requests)
+                ])
                 for parent, requests in requests_by_parent
                 if parent not in dropped
             ]
