@@ -19,6 +19,7 @@ from streamlit_ui.state.page_preferences import load_page_preferences, save_page
 from streamlit_ui.api.realized_profit import (
     clear_realized_profit_cache,
     fetch_realized_profit,
+    refresh_ledger_once_per_start,
     refresh_realized_profit,
 )
 from streamlit_ui.state.session_state import ensure_state_defaults, ensure_valid_state_value
@@ -723,6 +724,11 @@ def render() -> None:
     if _owner_load_failures():
         # The st.error naming each failure is already shown.
         return
+
+    startup_failure = refresh_ledger_once_per_start()
+    if startup_failure:
+        # The stored ledger is still shown below; Refresh Ledger retries.
+        st.error(startup_failure)
 
     controls_owner, controls_range, controls_refresh, controls_about = st.columns([2.5, 4.5, 1.5, 1.0])
     with controls_owner:
