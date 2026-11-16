@@ -50,31 +50,77 @@ def _boom():
     raise CorporationRefreshError("refresh_wallet_balances", {"Corp": "esi down"})
 
 
-def test_plan_never_exceeds_budget():
-    # The real assigner, shopping list and action builder, a real WalletBudget: 500M of builds, 100M wallet.
-    # (A full _run_compute needs a real overview + SDE; phases 6-8 are where the invariant lives.)
-    svc = DailyPlannerService(
-        industry_service=SimpleNamespace(), corporations_service=SimpleNamespace(),
-        characters_service=_Chars([_char(1)]), sales_history_service=SimpleNamespace(),
-        market_pricing_service=SimpleNamespace(), repo=SimpleNamespace(), admin_settings=_AdminStub(),
-        session_provider=SimpleNamespace(),
-    )
-    decision = _parent(runs=50)  # 500M of materials
+def _plan_actions(svc, budget, decisions):
+    """Phases 6-8 of the service (real assigner, shopping list, action builder) as capital-reserved dicts."""
     phase1 = {
-        "wallet_budget": WalletBudget(balance=100 * M, reserve_pct=10), "corp_material_stock": {},
+        "wallet_budget": budget, "corp_material_stock": {},
         "industry_jobs": [], "price_map": PRICES, "market_depth_cache": PRICES,
         "blueprint_data": NO_SKILL_REQUIREMENTS, "corp_assets": [],
     }
-    chain = ChainPlan(decisions=[decision])
+    chain = ChainPlan(decisions=decisions)
     assigned = svc._phase_6_assign(chain, phase1)
     phase1["blueprint_data"] = {}  # the shopping list and action builder index real SDE data
     rows = svc._phase_8_actions(assigned, svc._phase_7_shopping(assigned, phase1), phase1, chain)
-    actions = [{"action_type": r.action_type, "status": "pending", "estimated_cost_isk": r.estimated_cost_isk,
-                "estimated_job_fee_isk": r.estimated_job_fee_isk} for r in rows]
+    return [{"action_type": r.action_type, "status": "pending", "estimated_cost_isk": r.estimated_cost_isk,
+             "estimated_job_fee_isk": r.estimated_job_fee_isk} for r in rows]
+
+
+def _pilot_service(session_provider=None, planner_repo=None, tmp_path=None, corp=None, pilots=2):
+    corporations = SimpleNamespace(
+        refresh_wallet_balances=lambda: _boom(),
+        list_corporations=lambda: [corp] if corp else [],
+    )
+    return DailyPlannerService(
+        industry_service=SimpleNamespace(get_cached_overview_rows=lambda: [GOOD_ROW]),
+        corporations_service=corporations,
+        characters_service=_Chars([_char(i + 1) for i in range(pilots)]),
+        sales_history_service=SimpleNamespace(), market_pricing_service=SimpleNamespace(),
+        repo=planner_repo, admin_settings=AdminSettingsManager(file_path=str(tmp_path / "admin.json")),
+        session_provider=session_provider,
+    )
+
+
+def test_plan_never_exceeds_budget():
+    # Two builds (500M and 200M of materials) and two pilots compete for 90M of a 100M wallet.
+    svc = DailyPlannerService(
+        industry_service=SimpleNamespace(), corporations_service=SimpleNamespace(),
+        characters_service=_Chars([_char(1), _char(2)]), sales_history_service=SimpleNamespace(),
+        market_pricing_service=SimpleNamespace(), repo=SimpleNamespace(), admin_settings=_AdminStub(),
+        session_provider=SimpleNamespace(),
+    )
+    decisions = [_parent(type_id=100, runs=50), _parent(type_id=200, runs=20)]
+    actions = _plan_actions(svc, WalletBudget(balance=100 * M, reserve_pct=10), decisions)
     assert any(a["action_type"] == "manufacture" for a in actions)
     reserved = compute_capital_reserved(actions)
     assert 0 < reserved.total <= 90 * M
     assert reserved.unpriced_purchases == 0 and reserved.unknown_fee_jobs == 0
+
+
+def _phase1_budget_plan(session_provider, planner_repo, tmp_path, corp):
+    """The budget the service's own phase 1 builds, then phases 6-8 with a pilot and an affordable build."""
+    svc = _pilot_service(session_provider, planner_repo, tmp_path, corp)
+    budget = svc._phase_1_collect()["wallet_budget"]
+    return budget, _plan_actions(svc, budget, [_parent(runs=5)])  # 50M of materials
+
+
+def test_healthy_wallet_plans_the_same_build(session_provider, planner_repo, tmp_path):
+    # Control: the build of the two tests below is affordable, so they do test the budget.
+    _, actions = _phase1_budget_plan(session_provider, planner_repo, tmp_path, _wallet_corp(age_hours=1))
+    assert any(a["action_type"] == "manufacture" for a in actions)
+
+
+def test_service_passes_stale_wallet_as_blocked(session_provider, planner_repo, tmp_path):
+    budget, actions = _phase1_budget_plan(session_provider, planner_repo, tmp_path, _wallet_corp(age_hours=7))
+    assert budget.blocked_reason.startswith("corp wallet last read")
+    assert not [a for a in actions if a["action_type"] in PAID]
+    assert {a["action_type"] for a in actions} <= {"deliver"}
+
+
+def test_unknown_wallet_plans_no_paid_jobs(session_provider, planner_repo, tmp_path):
+    budget, actions = _phase1_budget_plan(session_provider, planner_repo, tmp_path, None)
+    assert budget.blocked_reason == "corp wallet unknown"
+    assert not [a for a in actions if a["action_type"] in PAID]
+    assert {a["action_type"] for a in actions} <= {"deliver"}
 
 
 def test_compute_refreshes_wallet_first(session_provider, planner_repo, tmp_path):
@@ -90,14 +136,13 @@ def test_wallet_refresh_failure_uses_stored_balance(session_provider, planner_re
     assert 1.9 < summary["wallet"]["age_hours"] < 2.5 and summary["wallet"]["blocked_reason"] is None
 
 
-def test_service_passes_stale_wallet_as_blocked(session_provider, planner_repo, tmp_path):
+def test_stale_wallet_is_recorded_in_the_summary(session_provider, planner_repo, tmp_path):
     _, summary = _compute(session_provider, planner_repo, tmp_path, _wallet_corp(age_hours=7), _boom)
     assert summary["wallet"]["blocked_reason"].startswith("corp wallet last read")
     assert summary["wallet"]["budget"] == 0
 
 
-def test_unknown_wallet_plans_no_paid_jobs(session_provider, planner_repo, tmp_path):
+def test_unknown_wallet_is_recorded_in_the_summary(session_provider, planner_repo, tmp_path):
     _, summary = _compute(session_provider, planner_repo, tmp_path, None, lambda: None)
     assert summary["wallet"]["balance"] is None
     assert summary["wallet"]["blocked_reason"] == "corp wallet unknown"
-    assert WalletBudget(balance=None, reserve_pct=10).charge(1.0) is False
