@@ -421,7 +421,7 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
                 "max": 100.0,
                 "step": 0.5,
                 "format": "%.1f",
-                "label": "Minimum margin (%)",
+                "label": "Minimum margin % for build decision",
                 "help": "Items with a profit margin below this are not built.",
             },
             "planner_max_days_to_sell": {
@@ -431,7 +431,7 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
                 "max": 365.0,
                 "step": 1.0,
                 "format": "%.0f",
-                "label": "Maximum days to sell",
+                "label": "Maximum expected days to sell",
                 "help": "A batch is capped so pipeline plus batch sell within this many days; no room left means watch.",
             },
             "planner_min_isk_per_hour": {
