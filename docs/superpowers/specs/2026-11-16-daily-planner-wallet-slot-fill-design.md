@@ -100,8 +100,8 @@ For goal 2 when the wallet cannot pay for every slot (the user picked A):
 ### 1. Decision rules (phase 4, `ItemDecisionEngine`)
 
 The rules above. Each `ItemDecision` gets two new fields: `expected_days_to_sell`
-and `capital_return_per_day`, persisted on `build_plan_item` (additive columns,
-nullable) so the build plan tab can show them. A skip's reason names the rule
+and `capital_return_per_day`, used for the build order and written into the
+build reason (no new columns: the reason is already stored and shown). A skip's reason names the rule
 it failed, with the numbers ("margin 6% below 10%", "expected 80 days to sell
 > 45").
 
@@ -196,8 +196,8 @@ balance stays and is shown and planned with as if it were current.
 - Store when the wallet balances were last read successfully
   (`corporations.wallets_refreshed_at`, additive nullable column), set only
   when the ESI wallet call succeeds.
-- Every place that shows the corp wallet (status bar, shopping tab,
-  corporation page) shows its age, and a warning when it is older than
+- The daily planner status bar (above all its tabs) and the corporation
+  page show the wallet's age, and a warning when it is older than
   `wallet_max_age_hours` (new setting, default 6).
 - The daily planner refreshes the corp wallet balances itself at the start of
   every compute (one ESI call, a new wallet-only refresh). If that refresh

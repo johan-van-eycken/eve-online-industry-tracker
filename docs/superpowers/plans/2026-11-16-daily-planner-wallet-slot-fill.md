@@ -94,7 +94,6 @@ def test_refresh_wallet_balances_makes_one_esi_call(...):
   - `blocked_reason: str | None` (property). When set, every charge fails.
   - `available: float` (property): spendable minus charged, never below 0.
   - `charge(self, amount: float | None) -> bool`. Returns False, and charges nothing, for None, for a negative amount, when blocked, or when amount > available.
-  - `refund(self, amount: float) -> None`.
   - `set_aside(self, amount: float) -> float`. Moves up to `amount` from `available` into a science pot and returns what was set aside.
   - `charge_science(self, amount: float | None) -> bool`. Charges the science pot first and the rest from `available`; same failure rules as `charge`.
   - `spent: float` (property): everything charged, science included.
@@ -153,15 +152,13 @@ def test_max_affordable_runs():
 **Files:**
 - Modify: `src/eve_online_industry_tracker/application/daily_planner/item_decision_engine.py` (`_decide`: the SKIP and WATCH blocks)
 - Modify: `src/eve_online_industry_tracker/application/daily_planner/models.py` (`ItemDecision`)
-- Modify: `src/eve_online_industry_tracker/application/daily_planner/service.py` (`_build_plan_items`, about line 1508)
-- Modify: `src/eve_online_industry_tracker/infrastructure/models.py` (`BuildPlanItemModel`), `schema_migrations.py`
 - Modify: `src/eve_online_industry_tracker/config/admin_settings.py` (add `planner_min_margin_pct`, `planner_max_days_to_sell`)
 - Modify: `tests/test_daily_planner_decisions.py`, `tests/test_daily_planner_thresholds.py` (the old-gate assertions)
 - Test: `tests/test_daily_planner_build_rules.py`
 
 **Interfaces:**
 - Produces `ItemDecision` fields, defaults None: `expected_days_to_sell: float | None`, `capital_return_per_day: float | None`, `market_cap_runs: int | None`.
-- Produces `build_plan_item` columns `expected_days_to_sell REAL`, `capital_return_per_day REAL`.
+- No new DB columns: the build reason already carries the days to sell and the capital return, and that reason is stored and shown.
 - Produces in `item_decision_engine.py`: `market_cap_runs(*, batch_runs: int, units_per_run: float, velocity: float, pipeline_units: float, max_days: float) -> int`, equal to `min(batch_runs, floor((velocity * max_days - pipeline_units) / units_per_run))`, never below 0.
 
 Rules, replacing the SKIP block's ISK/hour and batch-profit gates and the WATCH block's `pipeline_days >= 3.0`. The competition gate and PAUSE stay.
@@ -191,7 +188,7 @@ def test_market_cap_runs():
 ```
 
 - [ ] **Step 2: Run** `pytest tests/test_daily_planner_build_rules.py -v`. Expected: FAIL.
-- [ ] **Step 3: Implement.** Mark the help text of `planner_min_isk_per_hour` and `planner_min_profit_per_batch` "No longer used by the daily planner." Do the rules, the fields, the persistence (`_build_plan_items` also writes the two new columns), and the settings. In `DailyPlannerService._phase_4_decide`, nothing changes: the engine reads the row and the pipeline it already gets.
+- [ ] **Step 3: Implement.** Mark the help text of `planner_min_isk_per_hour` and `planner_min_profit_per_batch` "No longer used by the daily planner." Do the rules, the fields and the settings. In `DailyPlannerService._phase_4_decide`, nothing changes: the engine reads the row and the pipeline it already gets.
 - [ ] **Step 4: Update** the old-gate tests in `test_daily_planner_decisions.py` and `test_daily_planner_thresholds.py` to the new reasons, then run the full suite. Expected: PASS.
 - [ ] **Step 5: Commit** `feat(planner): build on margin and sell time, rank by capital return`.
 
@@ -265,7 +262,7 @@ def test_no_budget_means_old_behaviour():         # budget=None -> same actions 
 **Interfaces:**
 - Produces: `CharacterAssigner._research_actions(self, *, decision, row, char_slots, characters, now, skill_gate, research_owners) -> list[AssignedAction]`, extracted unchanged from `_assign_decision`, which then calls it.
 - Produces: `CharacterAssigner.free_slots_after: dict[int, dict[str, Any]]`, set at the end of `assign`: `{char_id: {"character_name": str, "manufacturing": int, "science": int, "reason": str | None}}`.
-- Produces: `science_cost(action: AssignedAction, price_map) -> float | None`. For research and copy it is the job fee; for invent it is the fee plus the action's `estimated_cost_isk` (the inputs).
+- Produces: `science_cost(action: AssignedAction) -> float | None`. For research and copy it is the job fee; for invent it is the fee plus the action's `estimated_cost_isk` (the inputs).
 
 Behaviour:
 1. Before the top-level pass: build the science candidates and call `budget.set_aside()` with the sum of `science_cost` of the first N candidates, where N = total free research slots (`free_research`) over all pilots.
@@ -273,6 +270,7 @@ Behaviour:
      - ME/TE research where the row has `needs_me_research` / `needs_te_research`;
      - copies of a free owned T1 BPO for a T2 build row that has no BPC;
      - invention from T1 BPCs that exist now.
+   - Only candidates someone can run today count: the blueprint is free in the ledger, and `skill_gate.check(blueprint_type_id, activity)` returns no block (activity `research_material` / `research_time` / `copying` / `invention`). A skill-blocked research, like the capital rigs in plan 26 (no Rigging 4), reserves nothing.
    - Their costs are estimates from the row's fee fields; nothing is assigned yet.
 2. Every science action, whether in the build pass or the fill pass, is charged with `budget.charge_science(science_cost(...))`. On False it is dropped, its slot released, and the reason `"no science today: wallet"` appended.
 3. After the sub pass: the fill pass. For each candidate whose product got no science action yet, while a pilot has `free_research > 0`, emit the action through the existing helpers (`_research_actions`, `_copy_actions` with `_reserve_copy_pilots`, `_invent_action`). Ledger, skill gate and BPC-exists rules are unchanged.
@@ -284,6 +282,7 @@ Behaviour:
 ```python
 def test_science_set_aside_before_builds():   # wallet 100M, 2 research slots at 1M fee each, builds would take 100M -> both research actions exist, builds use <= 98M
 def test_fill_pass_uses_free_science_slots(): # 3 free research slots, 1 build row with research and 2 more build rows with no mfg slot needing ME research -> 3 me_research actions
+def test_skill_blocked_research_reserves_nothing(): # needs_me_research but no pilot has the skill -> set_aside total excludes its fee
 def test_free_slots_reason_no_eligible_job(): # 2 research slots, 0 candidates -> free_slots_after[c]["science"] == 2 and reason "no eligible job"
 def test_unowned_t1_bpo_gets_no_jobs():       # T2 row needs_t1_bpo -> no invent/copy/manufacture actions; reason contains "not owned: buy it first"
 ```
@@ -334,22 +333,19 @@ def test_unknown_wallet_plans_no_paid_jobs():
 
 **Files:**
 - Modify: `src/streamlit_ui/components/daily_planner/status_bar.py` (`wallet_snapshot` area, line 282; metrics around line 590)
-- Modify: `src/streamlit_ui/components/daily_planner/tab_shopping.py`
-- Modify: `src/streamlit_ui/components/daily_planner/tab_build_plan.py`
 - Modify: `src/streamlit_ui/pages/corporations.py` (`_master_wallet_balance_and_reason`, line 37)
 - Test: `tests/test_daily_planner_status_bar_wallet.py`
 
 **Interfaces:**
-- Consumes: the plan summary `"wallet"` / `"free_slots"` (Task 7), `wallet_age_hours` / `wallet_stale_reason` (Task 1), `build_plan_item.expected_days_to_sell` / `capital_return_per_day` (Task 3).
+- Consumes: the plan summary `"wallet"` / `"free_slots"` (Task 7), `wallet_age_hours` / `wallet_stale_reason` (Task 1).
 - Produces: `wallet_caption(summary_wallet: dict | None) -> str | None` in `status_bar.py`. Returns `"read {age:.1f} h ago · budget {budget:,.0f} ISK after {reserve:g}% reserve"`, prefixed with `"⚠ "` plus the blocked reason when the budget is blocked. Returns None for an old plan without the key.
 
 Behaviour:
 - Status bar "Corp Wallet" metric gets the caption.
 - A "Free slots" line per character, e.g. `"Duke X1: 2 mfg, 1 science free (no eligible job)"`, shown only when something is free.
-- The shopping tab shows the same caption under its budget metric.
+- Only the status bar shows it: it sits above all four tabs.
 - The corporations page shows the master wallet's age, with `st.warning` when `wallet_stale_reason` is set.
-- The build plan tab gets the columns "Days to sell" and "Capital return %/day".
-- BPO purchase advice (`buy_bpo` actions) shows `"wallet left after plan: {balance - spent:,.0f} ISK"` next to its price. It is not charged.
+- BPO purchase advice needs nothing new: the shopping tab's existing `remaining_after_shopping` / `budget_fit` already show what the wallet has left after the plan and whether each BPO fits.
 
 - [ ] **Step 1: Write the failing tests:**
 
