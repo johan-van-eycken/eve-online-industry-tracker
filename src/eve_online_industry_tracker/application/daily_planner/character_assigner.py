@@ -95,6 +95,10 @@ class CharacterAssigner:
     _MFG_ACTIONS = ("manufacture", "sub_manufacture")
     _RESEARCH_ACTIONS = ("invent", "copy", "me_research", "te_research")
 
+    #: Per pilot after the last assign: {char_id: {"character_name", "manufacturing",
+    #: "science" (slots left), "reason" (why science slots are left, else None)}}.
+    free_slots_after: dict[int, dict[str, Any]] = {}
+
     def assign(
         self,
         chain_plan: Any,                     # ChainPlan
@@ -120,6 +124,7 @@ class CharacterAssigner:
         (consumed in assignment order), its runs cut to what is affordable
         (_BuildCharger)."""
         now = _now()
+        self.free_slots_after = {}
 
         # Build character capability map
         characters = self._get_characters(characters_service)
@@ -161,9 +166,24 @@ class CharacterAssigner:
         bpc_pool: dict[str, Any] = {}
         # The actions of each top-level row: which claims they use.
         emitted: dict[int, list[AssignedAction]] = {}
+        # The rows that got a research / copy / invent action (the fill pass skips them).
+        with_science: set[int] = set()
+
+        def _candidates() -> list[tuple[ItemDecision, str, float | None]]:
+            return self._science_candidates(
+                top_level, char_slots, characters, skill_gate, bpc_pool,
+                probability_floor=probability_floor, price_map=price_map or {},
+            )
+
+        if budget is not None:
+            # Science first: what the candidates for the free research slots
+            # cost is set aside before any build takes the wallet.
+            slots = sum(int(s.get("free_research", 0)) for s in char_slots.values())
+            priced = [cost for _d, _kind, cost in _candidates() if cost is not None]
+            budget.set_aside(sum(priced[:slots]))
 
         def _assign_one(decision: ItemDecision) -> list[AssignedAction]:
-            return self._assign_decision(
+            actions = self._assign_decision(
                 decision=decision,
                 row=decision.overview_row,
                 char_slots=char_slots,
@@ -177,6 +197,9 @@ class CharacterAssigner:
                 skill_gate=skill_gate,
                 charger=charger,
             )
+            if any(a.action_type in self._RESEARCH_ACTIONS for a in actions):
+                with_science.add(id(decision))
+            return actions
 
         for pass_decisions in (top_level, None):
             if pass_decisions is None:
@@ -260,10 +283,171 @@ class CharacterAssigner:
                 # created -- two research actions on one item must not share a slot.
                 assigned_actions.extend(actions)
 
+        # Fill pass: research slots still free go to the candidates with no
+        # science job yet, in rank order.
+        for decision, kind, _cost in _candidates():
+            if not any(int(s.get("free_research", 0)) > 0 for s in char_slots.values()):
+                break
+            if id(decision) in with_science:
+                continue
+            actions = self._fill_science(
+                decision, kind, top_level, emitted, char_slots, characters, skill_gate, bpc_pool,
+                now=now, probability_floor=probability_floor, price_map=price_map or {}, charger=charger,
+            )
+            if actions:
+                with_science.add(id(decision))
+                assigned_actions.extend(actions)
+
         if fell_back:
             _reword_unused_research_claims(chain_plan.decisions, assigned_actions, fell_back)
         _reword_released_bpcs(chain_plan.decisions, bpc_pool)
+        wallet_reason = (budget.blocked_reason or "wallet") if charger is not None and charger.science_stopped else None
+        self.free_slots_after = {
+            cid: {
+                "character_name": slot["character_name"],
+                "manufacturing": int(slot["free_mfg"]),
+                "science": int(slot["free_research"]),
+                "reason": (wallet_reason or "no eligible job") if slot["free_research"] > 0 else None,
+            }
+            for cid, slot in char_slots.items()
+        }
         return assigned_actions
+
+    def _science_candidates(
+        self, decisions: list[ItemDecision], char_slots: dict[int, dict[str, Any]],
+        characters: list[dict[str, Any]], skill_gate: _SkillGate, bpc_pool: dict[str, Any], *,
+        probability_floor: float, price_map: dict[int, Any],
+    ) -> list[tuple[ItemDecision, str, float | None]]:
+        """(row, job kind, estimated science_cost) of every science job a
+        pilot could run today, in `decisions`' (rank) order: ME / TE research
+        the row needs, a copy of its free T1 BPO when it has no T1 BPC, an
+        invention from the T1 BPCs it has. A job no pilot has the skills for,
+        or whose blueprint another job took, is no candidate. Nothing is assigned."""
+        out: list[tuple[ItemDecision, str, float | None]] = []
+        for decision in decisions:
+            if decision.decision != "build":
+                continue
+            row = decision.overview_row
+            bp_type_id = orow.get_blueprint_type_id(row)
+            for kind, flag, activity, current, target in (
+                ("me_research", "needs_me_research", "research_material", "me_current", "me_research_target"),
+                ("te_research", "needs_te_research", "research_time", "te_current", "te_research_target"),
+            ):
+                if row.get(flag) and bp_type_id is not None and skill_gate.check(bp_type_id, activity)[1] is None:
+                    out.append((decision, kind, _research_fee(row, activity, current, target)[0]))
+            t1 = int(row.get("t1_blueprint_type_id") or 0)
+            if not row.get("needs_invention") or t1 <= 0:
+                continue
+            inv_qualified, inv_blocked = skill_gate.check(t1, "invention")
+            if inv_blocked is not None:
+                continue
+            bpcs = _row_bpcs(row, t1, bpc_pool.get("bpcs") or set(), carries_bpcs=bool(row.get("has_t1_bpo")))
+            if bpcs:
+                planned = self._planned_invents(
+                    decision, char_slots, characters, bpcs, self._owners(decision, bpc_pool), inv_qualified,
+                    probability_floor=probability_floor, price_map=price_map,
+                )
+                costs = [science_cost(action) for action, _bpc in planned]
+                out.append((decision, "invent", None if not costs or None in costs else sum(costs)))
+            elif (
+                row.get("has_t1_bpo") and _row_copy_bpos(row, t1, bpc_pool.get("bpos") or set())
+                and skill_gate.check(t1, "copying")[1] is None
+            ):
+                _jobs, needed, _sizes = self._copy_jobs_for(
+                    char_slots, characters, row, 0, 1, None,
+                    probability_floor=probability_floor, price_map=price_map, qualified=inv_qualified,
+                )
+                out.append((decision, "copy", _times_runs(orow.get_source_copy_fee_per_run(row), needed)))
+        return out
+
+    @staticmethod
+    def _owners(decision: ItemDecision, bpc_pool: dict[str, Any]) -> dict[int, int]:
+        return {**(bpc_pool.get("owners") or {}), **_owner_by_item(decision)}
+
+    def _planned_invents(
+        self, decision: ItemDecision, char_slots: dict[int, dict[str, Any]], characters: list[dict[str, Any]],
+        bpcs: list[tuple[Any, int | None, int]], owner_by_item: dict[int, int], qualified: frozenset[int], *,
+        probability_floor: float, price_map: dict[int, Any],
+    ) -> list[tuple[AssignedAction, tuple[Any, int | None, int]]]:
+        """The invent actions the free lanes would run on these T1 BPCs, one
+        per BPC, as the build pass sizes them. No slot is taken."""
+        row = decision.overview_row
+        results, _free = self._invention_results(
+            char_slots, characters, row, probability_floor=probability_floor, price_map=price_map,
+            max_lanes=len(bpcs), bpc_owners=[owner_by_item.get(e[1]) if e[1] is not None else None for e in bpcs],
+            qualified=qualified,
+        )
+        decryptor = orow.get_invention_decryptor(row)
+        planned = []
+        for char_id, invention, bpc in _lanes_on_bpcs(results, bpcs, owner_by_item):
+            action = self._invent_action(
+                row, decision.type_id, decision.type_name, char_id,
+                str(char_slots[char_id].get("character_name") or ""), invention, decryptor,
+            )
+            if bpc[1] is not None:
+                action.blueprint_item_id = bpc[1]
+                action.notes = f"{action.notes}; from T1 BPC item {bpc[1]} ({_count(bpc[2], 'run', 'runs')})"
+            planned.append((action, bpc))
+        return planned
+
+    def _fill_science(
+        self, decision: ItemDecision, kind: str, top_level: list[ItemDecision],
+        emitted: dict[int, list[AssignedAction]], char_slots: dict[int, dict[str, Any]],
+        characters: list[dict[str, Any]], skill_gate: _SkillGate, bpc_pool: dict[str, Any], *,
+        now: datetime, probability_floor: float, price_map: dict[int, Any], charger: _BuildCharger | None,
+    ) -> list[AssignedAction]:
+        """One fill-pass candidate's science actions on the free research
+        slots, through the build pass's helpers, each charged to the wallet."""
+        row = decision.overview_row
+        owner_by_item = self._owners(decision, bpc_pool)
+        if kind in ("me_research", "te_research"):
+            if _research_bpo_in_use(decision, top_level, emitted):
+                return []
+            return self._research_actions(
+                decision=decision, row=row, char_slots=char_slots, characters=characters, now=now,
+                skill_gate=skill_gate, research_owners=_claim_owners(decision, owner_by_item, "research"),
+                charger=charger,
+            )
+        t1 = int(row["t1_blueprint_type_id"])
+        inv_qualified, _blocked = skill_gate.check(t1, "invention")
+        if kind == "invent":
+            used_bpcs: set[Any] = bpc_pool.setdefault("bpcs", set())
+            bpcs = _row_bpcs(row, t1, used_bpcs, carries_bpcs=bool(row.get("has_t1_bpo"))) or []
+            actions = []
+            for action, bpc in self._planned_invents(
+                decision, char_slots, characters, bpcs, owner_by_item, inv_qualified,
+                probability_floor=probability_floor, price_map=price_map,
+            ):
+                if charger is None or charger.charge_science(decision, action):
+                    used_bpcs.add(bpc[0])
+                    actions.append(action)
+                    self._take_slot(char_slots, action.character_id, "invent")
+            return actions
+        used_bpos: set[Any] = bpc_pool.setdefault("bpos", set())
+        copy_bpos = _row_copy_bpos(row, t1, used_bpos)
+        reserved, reserved_bpos, _blocked_owners, _unskilled = self._reserve_owned_copy_pilots(
+            char_slots, row, copy_bpos, owner_by_item, skill_gate.check(t1, "copying")[0],
+        )
+        max_runs_per_copy = _max_runs_per_copy(row, decision.type_id)
+        jobs, _needed, lane_sizes = self._copy_jobs_for(
+            char_slots, characters, row, 0, len(reserved), max_runs_per_copy,
+            probability_floor=probability_floor, price_map=price_map, qualified=inv_qualified,
+        )
+        keep = len(reserved) if jobs is None else len(jobs)
+        for char_id, _name in reserved[keep:]:
+            self._release_slot(char_slots, char_id, "copy")
+        reserved, reserved_bpos = reserved[:keep], reserved_bpos[:keep]
+        if not reserved:
+            return []
+        copies = self._copy_actions(
+            row, decision.type_id, decision.type_name, t1, reserved, jobs,
+            "no T1 BPC on hand: no invention today; it starts once these copies are delivered",
+            max_runs_per_copy=max_runs_per_copy, lane_sizes=lane_sizes,
+        )
+        reserved_bpos = self._charge_copies(decision, copies, reserved_bpos, char_slots, charger)
+        used_bpos.update(reserved_bpos)
+        bpc_pool.setdefault("copy_used", {}).setdefault(int(decision.type_id), []).extend(reserved_bpos)
+        return copies
 
     def _take_slot(self, char_slots: dict[int, dict], char_id: int, action_type: str) -> None:
         """Consume one slot immediately, so sibling actions cannot reuse it."""
@@ -318,102 +502,13 @@ class CharacterAssigner:
             owner_by_item = dict(bpc_pool["owners"])
         research_owners = _claim_owners(decision, owner_by_item, "research")
 
-        # ME/TE research, by a pilot with the activity's skills. Why a
-        # planned research got no job, when it is the skills (research first
-        # then builds from the BPO, saying so).
-        me_scheduled, lab_free_at = False, now
-        me_pilot: tuple[int | None, str | None] = (None, None)
-        research_blocked: str | None = None
-        if row.get("needs_me_research"):
-            bp_type_id = self._research_blueprint_type_id(row, type_id, "ME")
-            qualified, blocked = (
-                (frozenset(), None) if bp_type_id is None
-                else skill_gate.for_owners(bp_type_id, "research_material", research_owners)
-            )
-            char_id, char_name = (
-                (None, None) if bp_type_id is None or blocked is not None
-                else self._best_research_char(char_slots, characters, only=research_owners, qualified=qualified)
-            )
-            if blocked is not None:
-                research_blocked = blocked
-                _append_reason(decision, f"no ME research today: {blocked}")
-            if char_id is not None:
-                me_timing = _research_timing(
-                    row, "research_material", "me_current", "me_research_target", now,
-                    f"ME research: {row.get('me_current', '?')} → {row.get('me_research_target', '?')}",
-                    _pilot_skills(char_slots, char_id), pilot_id=char_id,
-                )
-                # EVE runs one job per blueprint: a TE job on the same BPO starts after this one.
-                lab_free_at: datetime | None = me_timing["estimated_completion"]
-                me_scheduled = True
-                me_pilot = (char_id, char_name)
-                actions.append(AssignedAction(
-                    type_id=bp_type_id,
-                    type_name=type_name + " BPO",
-                    action_type="me_research",
-                    character_id=char_id,
-                    character_name=char_name,
-                    quantity=None,
-                    runs=None,
-                    estimated_cost_isk=None,
-                    estimated_profit_isk=None,
-                    **me_timing,
-                    **_job_fee(
-                        *_research_fee(row, "research_material", "me_current", "me_research_target"),
-                        "me_research", type_id,
-                    ),
-                ))
-                self._take_slot(char_slots, char_id, "me_research")
-            elif bp_type_id is not None:
-                logger.debug("CharacterAssigner: no free research slot for ME research on type_id=%s", type_id)
-
-        if row.get("needs_te_research"):
-            bp_type_id = self._research_blueprint_type_id(row, type_id, "TE")
-            qualified, blocked = (
-                (frozenset(), None) if bp_type_id is None
-                else skill_gate.for_owners(bp_type_id, "research_time", research_owners)
-            )
-            if me_scheduled:
-                # Queued behind the ME job on the same BPO (one job per
-                # blueprint): it cannot start in this plan, so it goes to the
-                # ME pilot and takes no research slot now -- if that pilot
-                # has the TE research skills.
-                char_id, char_name = me_pilot
-                if blocked is None and char_id not in qualified:
-                    blocked = skill_gate.pilot_lacks(bp_type_id, "research_time", char_id, prefix="ME pilot")
-            else:
-                char_id, char_name = (
-                    (None, None) if bp_type_id is None or blocked is not None
-                    else self._best_research_char(char_slots, characters, only=research_owners, qualified=qualified)
-                )
-            if blocked is not None:
-                char_id, char_name = None, None
-                research_blocked = research_blocked or blocked
-                _append_reason(decision, f"no TE research today: {blocked}")
-            if char_id is not None:
-                actions.append(AssignedAction(
-                    type_id=bp_type_id,
-                    type_name=type_name + " BPO",
-                    action_type="te_research",
-                    character_id=char_id,
-                    character_name=char_name,
-                    quantity=None,
-                    runs=None,
-                    estimated_cost_isk=None,
-                    estimated_profit_isk=None,
-                    **_research_timing(
-                        row, "research_time", "te_current", "te_research_target", lab_free_at,
-                        _te_research_note(row), _pilot_skills(char_slots, char_id),
-                        after_me=me_scheduled, pilot_id=char_id,
-                    ),
-                    **_job_fee(
-                        *_research_fee(row, "research_time", "te_current", "te_research_target"),
-                        "te_research", type_id,
-                    ),
-                    queued_after_me=me_scheduled,
-                ))
-                if not me_scheduled:
-                    self._take_slot(char_slots, char_id, "te_research")
+        # ME/TE research, by a pilot with the activity's skills.
+        blocked_out: list[str] = []
+        actions.extend(self._research_actions(
+            decision=decision, row=row, char_slots=char_slots, characters=characters, now=now,
+            skill_gate=skill_gate, research_owners=research_owners, charger=charger, blocked_out=blocked_out,
+        ))
+        research_blocked = blocked_out[0] if blocked_out else None
 
         # Invention and the T1 copies feeding it. Invention runs over
         # parallel lanes: one invent action per free research slot of every
@@ -533,10 +628,12 @@ class CharacterAssigner:
                 else:
                     note = f"{on_hand} T1 BPC run(s) on hand cover part of the attempts; these copies cover the rest"
                 if reserved and (jobs is None or jobs):
-                    actions.extend(self._copy_actions(
+                    copies = self._copy_actions(
                         row, type_id, type_name, t1_blueprint_type_id, reserved, jobs, note,
                         max_runs_per_copy=max_runs_per_copy, lane_sizes=lane_sizes,
-                    ))
+                    )
+                    reserved_bpos = self._charge_copies(decision, copies, reserved_bpos, char_slots, charger)
+                    actions.extend(copies)
                     used_bpos.update(reserved_bpos)
                     # Which T1 BPOs this row's copies use.
                     pools.setdefault("copy_used", {}).setdefault(int(type_id), []).extend(reserved_bpos)
@@ -638,6 +735,10 @@ class CharacterAssigner:
                         action.notes = f"{action.notes}; from T1 BPC item {bpc[1]} ({_count(bpc[2], 'run', 'runs')})"
                     if notes:
                         action.notes = f"{action.notes}; {notes}"
+                    if charger is not None and not charger.charge_science(decision, action):
+                        if bpc is not None:
+                            used_bpcs.discard(bpc[0])  # no job on it: free for a lower row
+                        continue
                     actions.append(action)
                     self._take_slot(char_slots, char_id, "invent")
 
@@ -897,6 +998,128 @@ class CharacterAssigner:
         else:
             logger.debug("CharacterAssigner: no free mfg slot for type_id=%s", type_id)
 
+        return actions
+
+    def _research_actions(
+        self,
+        *,
+        decision: ItemDecision,
+        row: dict[str, Any],
+        char_slots: dict[int, dict[str, Any]],
+        characters: list[dict[str, Any]],
+        now: datetime,
+        skill_gate: _SkillGate,
+        research_owners: list[int],
+        charger: _BuildCharger | None = None,
+        blocked_out: list[str] | None = None,
+    ) -> list[AssignedAction]:
+        """The row's ME / TE research actions, slots taken. Each is charged
+        to the wallet's science pot (`charger`); one that does not fit is
+        dropped. `blocked_out` gets why a planned research got no job, when
+        it is the skills (research first then builds from the BPO, saying so)."""
+        actions: list[AssignedAction] = []
+        type_id, type_name = decision.type_id, decision.type_name
+        me_scheduled, lab_free_at = False, now
+        me_pilot: tuple[int | None, str | None] = (None, None)
+        research_blocked: str | None = None
+        if row.get("needs_me_research"):
+            bp_type_id = self._research_blueprint_type_id(row, type_id, "ME")
+            qualified, blocked = (
+                (frozenset(), None) if bp_type_id is None
+                else skill_gate.for_owners(bp_type_id, "research_material", research_owners)
+            )
+            char_id, char_name = (
+                (None, None) if bp_type_id is None or blocked is not None
+                else self._best_research_char(char_slots, characters, only=research_owners, qualified=qualified)
+            )
+            if blocked is not None:
+                research_blocked = blocked
+                _append_reason(decision, f"no ME research today: {blocked}")
+            me_action = None
+            if char_id is not None:
+                me_timing = _research_timing(
+                    row, "research_material", "me_current", "me_research_target", now,
+                    f"ME research: {row.get('me_current', '?')} → {row.get('me_research_target', '?')}",
+                    _pilot_skills(char_slots, char_id), pilot_id=char_id,
+                )
+                me_action = AssignedAction(
+                    type_id=bp_type_id,
+                    type_name=type_name + " BPO",
+                    action_type="me_research",
+                    character_id=char_id,
+                    character_name=char_name,
+                    quantity=None,
+                    runs=None,
+                    estimated_cost_isk=None,
+                    estimated_profit_isk=None,
+                    **me_timing,
+                    **_job_fee(
+                        *_research_fee(row, "research_material", "me_current", "me_research_target"),
+                        "me_research", type_id,
+                    ),
+                )
+            if me_action is not None and (charger is None or charger.charge_science(decision, me_action)):
+                # EVE runs one job per blueprint: a TE job on the same BPO starts after this one.
+                lab_free_at: datetime | None = me_action.estimated_completion
+                me_scheduled = True
+                me_pilot = (char_id, char_name)
+                actions.append(me_action)
+                self._take_slot(char_slots, char_id, "me_research")
+            elif char_id is None and bp_type_id is not None:
+                logger.debug("CharacterAssigner: no free research slot for ME research on type_id=%s", type_id)
+
+        if row.get("needs_te_research"):
+            bp_type_id = self._research_blueprint_type_id(row, type_id, "TE")
+            qualified, blocked = (
+                (frozenset(), None) if bp_type_id is None
+                else skill_gate.for_owners(bp_type_id, "research_time", research_owners)
+            )
+            if me_scheduled:
+                # Queued behind the ME job on the same BPO (one job per
+                # blueprint): it cannot start in this plan, so it goes to the
+                # ME pilot and takes no research slot now -- if that pilot
+                # has the TE research skills.
+                char_id, char_name = me_pilot
+                if blocked is None and char_id not in qualified:
+                    blocked = skill_gate.pilot_lacks(bp_type_id, "research_time", char_id, prefix="ME pilot")
+            else:
+                char_id, char_name = (
+                    (None, None) if bp_type_id is None or blocked is not None
+                    else self._best_research_char(char_slots, characters, only=research_owners, qualified=qualified)
+                )
+            if blocked is not None:
+                char_id, char_name = None, None
+                research_blocked = research_blocked or blocked
+                _append_reason(decision, f"no TE research today: {blocked}")
+            if char_id is not None:
+                te_action = AssignedAction(
+                    type_id=bp_type_id,
+                    type_name=type_name + " BPO",
+                    action_type="te_research",
+                    character_id=char_id,
+                    character_name=char_name,
+                    quantity=None,
+                    runs=None,
+                    estimated_cost_isk=None,
+                    estimated_profit_isk=None,
+                    **_research_timing(
+                        row, "research_time", "te_current", "te_research_target", lab_free_at,
+                        _te_research_note(row), _pilot_skills(char_slots, char_id),
+                        after_me=me_scheduled, pilot_id=char_id,
+                    ),
+                    **_job_fee(
+                        *_research_fee(row, "research_time", "te_current", "te_research_target"),
+                        "te_research", type_id,
+                    ),
+                    queued_after_me=me_scheduled,
+                )
+                if charger is None or charger.charge_science(decision, te_action):
+                    actions.append(te_action)
+                    if not me_scheduled:
+                        self._take_slot(char_slots, char_id, "te_research")
+
+        if research_blocked is not None and blocked_out is not None:
+            blocked_out.append(research_blocked)
         return actions
 
     def get_character_name_map(self, characters_service: Any) -> dict[int, str]:
@@ -1351,6 +1574,24 @@ class CharacterAssigner:
             ))
         return actions
 
+    def _charge_copies(
+        self, decision: ItemDecision, copies: list[AssignedAction], bpos: list[Any],
+        char_slots: dict[int, dict], charger: _BuildCharger | None,
+    ) -> list[Any]:
+        """Charge each copy (its slot already taken) to the science pot; drop
+        those that do not fit, in place, giving their slot back. The BPOs of
+        the copies kept."""
+        if charger is None:
+            return bpos
+        kept: list[Any] = []
+        for action, bpo in list(zip(copies, bpos)):
+            if charger.charge_science(decision, action):
+                kept.append(bpo)
+            else:
+                copies.remove(action)
+                self._release_slot(char_slots, action.character_id, "copy")
+        return kept
+
     @staticmethod
     def _invention_lanes(char_slots: dict[int, dict], row: dict[str, Any]) -> list[int]:
         """One entry (the pilot's id) per FREE research slot of every pilot
@@ -1590,6 +1831,26 @@ _LANE_WORDING = re.compile(r"lane \d+ of \d+")
 #: Release-and-re-plan passes after the top-level rows (bounded:
 #: each pass only re-plans rows that had no action yet).
 MAX_REPLAN_PASSES = 3
+
+
+def _research_bpo_in_use(
+    decision: ItemDecision, top_level: list[ItemDecision], emitted: dict[int, list[AssignedAction]],
+) -> bool:
+    """The row's research BPO is built from today (its own manufacture, or
+    another row's job on a claim of it after a re-plan): not free to research."""
+    first = decision.overview_row.get("research_first")
+    other_bpo = isinstance(first, dict) and first.get("mode") == "other_bpo"
+    if not other_bpo and any(a.action_type == "manufacture" for a in emitted.get(id(decision)) or []):
+        return True
+    claims = decision.overview_row.get("ledger_claims")
+    mine = set(claims.get("research") or []) if isinstance(claims, dict) else set()
+    for other in top_level:
+        theirs = other.overview_row.get("ledger_claims")
+        if other is decision or not emitted.get(id(other)) or not isinstance(theirs, dict):
+            continue
+        if mine & {*(theirs.get("manufacture") or []), *(theirs.get("research") or [])}:
+            return True
+    return False
 
 
 def _unused_claims(
@@ -2234,6 +2495,15 @@ def _sub_manufacture_notes(
     return notes
 
 
+def science_cost(action: AssignedAction) -> float | None:
+    """What a research / copy job takes from the wallet: its fee; an invent
+    job its fee plus its inputs (estimated_cost_isk). None when a part is unknown."""
+    fee = action.estimated_job_fee_isk
+    if fee is None or action.action_type != "invent":
+        return fee
+    return None if action.estimated_cost_isk is None else fee + action.estimated_cost_isk
+
+
 def cut_batch(action: AssignedAction, runs: int, batch_runs: int) -> None:
     """Cut a manufacture action from `batch_runs` to `runs`: its units and
     materials (rounded up) and its ISK figures scale with the runs; None
@@ -2283,6 +2553,8 @@ class _BuildCharger:
         self.rounding: dict[int, float | None] = {}
         #: {parent type_id: runs built / batch runs} for the sub re-size.
         self.scale: dict[int, float] = {}
+        #: A science job was dropped for lack of wallet (free_slots_after's reason).
+        self.science_stopped = False
 
     def _unit_price(self, type_id: int) -> float | None:
         return price_map_unit_price(self._price_map.get(type_id))[0]
@@ -2424,6 +2696,22 @@ class _BuildCharger:
             action.notes = f"{action.notes}; cut from {batch_runs} to {_count(runs, 'run', 'runs')} (wallet / market)"
         budget.charge(cost)
         return True
+
+    def charge_science(self, decision: ItemDecision, action: AssignedAction) -> bool:
+        """Charge a research / copy / invent action (science_cost) to the
+        science pot, then the wallet; False (nothing charged, reason on the
+        decision) when it does not fit or its cost is unknown."""
+        cost = science_cost(action)
+        if self._budget.charge_science(cost):
+            return True
+        if cost is None:
+            why = f"{action.action_type} cost unknown ({action.estimated_job_fee_unknown_reason or 'fee or inputs unpriced'})"
+        else:
+            self.science_stopped = True
+            why = "wallet"
+        logger.info("CharacterAssigner: type_id=%s: no %s today: %s", decision.type_id, action.action_type, why)
+        _append_reason(decision, f"no science today: {why}")
+        return False
 
     def _unknown_input(self, base: dict[int, int] | None, fee: float | None, action: AssignedAction) -> str:
         if fee is None:

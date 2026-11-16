@@ -1280,8 +1280,9 @@ class ChainPlanner:
             self._mark_not_built(decision, "T1 BPO in an active industry job")
         else:
             decision.pipeline_stage = "invention"
-            # "A T1 BPO must be acquired first." Read by nothing downstream yet.
+            # "A T1 BPO must be acquired first."
             decision.overview_row["needs_t1_bpo"] = True
+            self._mark_not_built(decision, f"T1 BPO {t1_bp_type_id} not owned: buy it first (see BPO advice)")
             # Flag T1 BPO for investment analysis as invention enabler
             self._analyze_bpo_investment(
                 decision=decision,
