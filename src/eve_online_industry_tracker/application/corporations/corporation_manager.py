@@ -250,6 +250,9 @@ class CorporationManager:
     def refresh_wallet_transactions(self, corporation_name: Optional[str] = None, corporation_id: Optional[int] = None) -> None:
         self._refresh_batch("refresh_wallet_transactions", corporation_name, corporation_id)
 
+    def refresh_wallet_balances(self, corporation_name: Optional[str] = None, corporation_id: Optional[int] = None) -> None:
+        self._refresh_batch("refresh_wallet_balances", corporation_name, corporation_id)
+
     def refresh_wallet_journal(self, corporation_name: Optional[str] = None, corporation_id: Optional[int] = None) -> None:
         self._refresh_batch("refresh_wallet_journal", corporation_name, corporation_id)
 

@@ -135,6 +135,8 @@ class Corporation:
             self.members: List[CorporationMemberModel] = []
             self.assets: List[CorporationAssetsModel] = []
             self.updated_at: Optional[datetime] = None
+            self.wallets_refreshed_at: Optional[datetime] = None
+            self._load_wallet_state()
 
             # Intentionally do NOT call refresh methods here.
             # Constructors should be cheap; refresh is handled explicitly by managers/bootstrap.
@@ -142,6 +144,17 @@ class Corporation:
             error_message = f"Failed to initialize Corporation ID '{corporation_id}'. Error: {str(e)}"
             logging.error(error_message)
             raise Exception(error_message)
+
+    def _load_wallet_state(self) -> None:
+        """Stored wallets and their last-read time, so a restart does not forget them."""
+        try:
+            record = self._db_app.session.query(CorporationModel).filter_by(corporation_id=self.corporation_id).first()
+        except Exception as e:  # a missing DB must not stop the constructor
+            logging.warning("Could not load stored wallets of corporation %s: %s", self.corporation_id, e)
+            return
+        if record:
+            self.wallets = list(record.wallets or [])
+            self.wallets_refreshed_at = record.wallets_refreshed_at
 
     # -------------------
     # Get Corporation as dict
@@ -201,6 +214,7 @@ class Corporation:
             "structures": serialize_model_list(self.structures, CorporationStructuresModel),
             "members": serialize_model_list(self.members, CorporationMemberModel),
             "assets": serialize_model_list(self.assets, CorporationAssetsModel),
+            "wallets_refreshed_at": self.wallets_refreshed_at.isoformat() if self.wallets_refreshed_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
 
@@ -381,11 +395,8 @@ class Corporation:
         try:
             corp_data = self._default_esi_character._esi_client.esi_get(ESI_CORP_PUBLIC.format(corporation_id=self.corporation_id))
             corp_divisions = self._default_esi_character._esi_client.esi_get(ESI_CORP_DIVISIONS.format(corporation_id=self.corporation_id))
-            corp_wallets = self._default_esi_character._esi_client.esi_get(ESI_CORP_WALLETS.format(corporation_id=self.corporation_id))
             corp_standings = self._default_esi_character._esi_client.esi_get(ESI_CORP_STANDINGS.format(corporation_id=self.corporation_id))
             ceo_character = self._default_esi_character._esi_client.esi_get(ESI_CHAR_PUBLIC.format(character_id=corp_data.get('ceo_id')))
-            if isinstance(corp_wallets, str):
-                corp_wallets = json.loads(corp_wallets)
             if isinstance(corp_divisions, str):
                 corp_divisions = json.loads(corp_divisions)
             if isinstance(corp_standings, str):
@@ -418,14 +429,9 @@ class Corporation:
             self.ticker = corp_data.get("ticker")
             self.url = corp_data.get("url")
             self.war_eligible = corp_data.get("war_eligible")
-            self.wallets = [
-                {
-                    "division": str(w.get("division")),
-                    "division_name": divisions_lookup.get(w.get("division"), f"Division {w.get('division')}"),
-                    "balance": str(w.get("balance"))
-                }
-                for w in corp_wallets
-            ]
+            self.refresh_wallet_balances()
+            for w in self.wallets:  # ESI division names win over the stored ones
+                w["division_name"] = divisions_lookup.get(int(w["division"]), w["division_name"])
             self.standings = []
             for s in corp_standings:
                 entry = {
@@ -447,6 +453,35 @@ class Corporation:
             error_message = f"Failed to refresh corporation data for '{self.corporation_name}'. Error: {str(e)}"
             logging.error(error_message)
             raise Exception(error_message)
+
+    def refresh_wallet_balances(self) -> None:
+        """Read the division balances (one ESI call) and stamp wallets_refreshed_at. Raises on failure."""
+        if hasattr(self._default_esi_character, "ensure_esi"):
+            self._default_esi_character.ensure_esi()
+        corp_wallets = self._default_esi_character._esi_client.esi_get(
+            ESI_CORP_WALLETS.format(corporation_id=self.corporation_id)
+        )
+        if isinstance(corp_wallets, str):
+            corp_wallets = json.loads(corp_wallets)
+        names = {str(w.get("division")): w.get("division_name") for w in self.wallets or []}
+        self.wallets = [
+            {
+                "division": str(w.get("division")),
+                "division_name": names.get(str(w.get("division")))
+                or ("Master Wallet" if w.get("division") == 1 else f"Division {w.get('division')}"),
+                "balance": str(w.get("balance")),
+            }
+            for w in corp_wallets
+        ]
+        self.wallets_refreshed_at = datetime.now(timezone.utc)
+        # Only the wallet columns: save_corporation would blank the profile fields a fresh process has not loaded.
+        record = self._db_app.session.query(CorporationModel).filter_by(corporation_id=self.corporation_id).first()
+        if record is None:
+            self.save_corporation()
+            return
+        record.wallets = self.wallets
+        record.wallets_refreshed_at = self.wallets_refreshed_at
+        self._db_app.session.commit()
 
     # -------------------
     # Refresh Structures

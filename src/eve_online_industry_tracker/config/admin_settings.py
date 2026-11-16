@@ -396,6 +396,14 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
                 "label": "EMA alpha",
                 "help": "EMA smoothing factor for plan learning weights (accuracy, velocity, cost).",
             },
+            "wallet_max_age_hours": {
+                "type": "float",
+                "default": 6.0,
+                "min": 0.5,
+                "max": 72,
+                "label": "Maximum corp wallet age (hours)",
+                "help": "The planner treats the corp wallet as unknown when it was last read successfully longer ago than this.",
+            },
             "planner_min_isk_per_hour": {
                 "type": "int",
                 "default": 2_000_000,

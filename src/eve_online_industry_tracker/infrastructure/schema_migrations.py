@@ -1006,6 +1006,7 @@ def ensure_app_schema(db_app: DatabaseManager) -> None:
     _ensure_column(db_app, table="daily_action_log", column="queued_after_me", ddl_type="INTEGER NOT NULL DEFAULT 0")
     _ensure_column(db_app, table="build_plan_item", column="snapshot_sell_price", ddl_type="REAL")
     _ensure_column(db_app, table="build_plan_item", column="bpo_analysis_skip_reason", ddl_type="TEXT")
+    _ensure_column(db_app, table="corporations", column="wallets_refreshed_at", ddl_type="DATETIME")
 
     # Belt-and-braces normalization for existing corporations.wallets/standings
     # rows written by the pre-fix double-JSON-encoding bug in corporation.py

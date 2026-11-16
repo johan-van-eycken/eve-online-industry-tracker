@@ -26,6 +26,9 @@ class CorporationsService:
     def __init__(self, *, state: Any):
         self._state = state
 
+    def refresh_wallet_balances(self) -> None:
+        self._state.corp_manager.refresh_wallet_balances()
+
     def list_corporations(self) -> Any:
         """Return all corporations: full data for director-managed corps,
         lightweight entries for corps where we only have regular members."""
