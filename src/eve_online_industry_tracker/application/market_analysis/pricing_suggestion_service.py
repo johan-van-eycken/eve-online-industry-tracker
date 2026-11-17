@@ -19,6 +19,16 @@ from eve_online_industry_tracker.infrastructure.models import CharacterAssetsMod
 from eve_online_industry_tracker.infrastructure.session_provider import SessionProvider, StateSessionProvider
 
 
+def _fifo_acquisition_source(detail: str | None) -> str:
+    """The acquisition source of a FIFO lot from its label ("fifo: industry job N")."""
+    text = str(detail or "")
+    if "industry job" in text or "industry_build" in text:
+        return "manufactured"
+    if "wallet transaction" in text or "market_buy" in text:
+        return "bought"
+    return text.removeprefix("fifo: ") or "unknown"
+
+
 class PricingSuggestionService:
     """Suggest optimal sell prices based on market data and sales history."""
 
@@ -46,7 +56,7 @@ class PricingSuggestionService:
         my_sales = self._sales_history.suggest_sell_price(character_id=character_id, type_id=type_id)
         market_data = self._market_history.get_price_stats(type_id=type_id, region_id=region_id)
         volume_data = self._market_history.get_volume_stats(type_id=type_id, region_id=region_id)
-        cost_basis, acquisition_source, cost_source = self._get_cost_basis(
+        cost_basis, acquisition_source, cost_source, cost_detail = self._get_cost_basis(
             character_id=character_id, type_id=type_id, fallback_price=current_price,
             corporation_id=corporation_id,
         )
@@ -193,6 +203,7 @@ class PricingSuggestionService:
             "cost_basis": cost_basis,
             "acquisition_source": acquisition_source,
             "cost_basis_source": cost_source,
+            "cost_basis_detail": cost_detail,
             "breakdown": breakdown,
             "reasoning": self._with_fee_note(self._build_reasoning(breakdown, confidence), fees_assumed_reason),
             "sales_tax_fraction": sales_tax,
@@ -242,7 +253,67 @@ class PricingSuggestionService:
             logging.warning("Pricing suggestion: hub buy price of type %s unavailable: %s", type_id, exc)
         return None
 
+    def _fifo_unit_costs(self, owner_scope: str, owner_id: int) -> dict[int, tuple[float | None, str]]:
+        """The owner's next FIFO lot per type from the realized-profit ledger
+        (next_fifo_unit_costs), read once per owner for this service, i.e. one
+        enrichment request: the replay reads the whole ledger. {} after a DB error."""
+        cache: dict[tuple[str, int], dict] = self.__dict__.setdefault("_fifo_costs", {})
+        key = (str(owner_scope), int(owner_id))
+        if key in cache:
+            return cache[key]
+        from eve_online_industry_tracker.application.characters.realized_profit import (
+            CharacterRealizedProfitLedgerService,
+            CorporationRealizedProfitLedgerService,
+        )
+        service_class = (
+            CorporationRealizedProfitLedgerService if owner_scope == "corporation" else CharacterRealizedProfitLedgerService)
+        app_session = self._sessions.app_session()
+        sde_session = self._sessions.sde_session()
+        try:
+            cache[key] = service_class(
+                app_session=app_session, sde_session=sde_session, market_prices=self._ledger_market_prices(),
+            ).next_fifo_unit_costs(owner_scope=owner_scope, owner_id=int(owner_id))
+        except SQLAlchemyError as exc:
+            logging.warning("Pricing suggestion: FIFO cost basis unavailable for %s %s, using the asset costs: %s",
+                            owner_scope, owner_id, exc)
+            cache[key] = {}
+        finally:
+            for session in (app_session, sde_session):
+                try:
+                    session.close()
+                except SQLAlchemyError:
+                    pass
+        return cache[key]
+
+    def _ledger_market_prices(self) -> list[dict[str, Any]]:
+        """The market prices the ledger rebuild uses (ESI's averages), [] when unavailable."""
+        esi_service = getattr(self._state, "esi_service", None)
+        if esi_service is None:
+            return []
+        try:
+            prices = esi_service.get_market_prices()
+        except ESI_REQUEST_ERRORS as exc:
+            logging.warning("Pricing suggestion: market prices unavailable for the FIFO cost basis: %s", exc)
+            return []
+        return prices if isinstance(prices, list) else []
+
     def _get_cost_basis(
+        self, *, character_id: int, type_id: int, fallback_price: float | None = None,
+        corporation_id: int | None = None,
+    ) -> tuple[float | None, str | None, str | None, str | None]:
+        """(cost basis, acquisition source, cost basis source, detail): the owner's next
+        FIFO lot in the realized-profit ledger, else the asset costs as before (the
+        detail then says why the FIFO gave none)."""
+        owner_scope, owner_id = ("corporation", corporation_id) if corporation_id is not None else ("character", character_id)
+        fifo_cost, fifo_detail = self._fifo_unit_costs(owner_scope, int(owner_id)).get(int(type_id)) or (
+            None, f"fifo: no open lot of type {int(type_id)} for {owner_scope} {int(owner_id)}")
+        if fifo_cost is not None and fifo_cost > 0:
+            return float(fifo_cost), _fifo_acquisition_source(fifo_detail), "ledger_fifo", fifo_detail
+        cost, acquisition_source, cost_source = self._asset_cost_basis(
+            character_id=character_id, type_id=type_id, fallback_price=fallback_price, corporation_id=corporation_id)
+        return cost, acquisition_source, cost_source, fifo_detail
+
+    def _asset_cost_basis(
         self, *, character_id: int, type_id: int, fallback_price: float | None = None,
         corporation_id: int | None = None,
     ) -> tuple[float | None, str | None, str | None]:
