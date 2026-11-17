@@ -175,6 +175,8 @@ def _render_realized_profit(monkeypatch, *, owner_option, fetch):
     monkeypatch.setattr(page, "_character_name_map", lambda: {90000001: "Fake Pilot"})
     monkeypatch.setattr(page, "_owner_selector_options", lambda: [owner_option])
     monkeypatch.setattr(page, "fetch_realized_profit", fetch)
+    # The once-per-start rebuild has its own tests; here only the read fails.
+    monkeypatch.setattr(page, "refresh_ledger_once_per_start", lambda: None)
     monkeypatch.setattr(st, "button", lambda *a, **k: False)
     page.render()
 
