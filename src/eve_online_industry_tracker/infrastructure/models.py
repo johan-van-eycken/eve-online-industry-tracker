@@ -353,6 +353,7 @@ class CorporationModel(BaseApp):
     wallets: Mapped[Optional[list[dict[str, Any]]]] = mapped_column(JSON, nullable=True)
     standings: Mapped[Optional[list[dict[str, Any]]]] = mapped_column(JSON, nullable=True)
     date_founded: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    wallets_refreshed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)  # UTC, last successful wallet read
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
 class CorporationAssetsModel(BaseApp):

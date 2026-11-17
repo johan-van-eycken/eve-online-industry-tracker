@@ -85,8 +85,8 @@ def test_an_out_of_range_saturation_setting_is_refused(tmp_path, key, value):
 
 
 def test_a_row_between_the_old_and_new_thresholds_is_built_by_default():
-    """3M ISK/hour and 15M per batch: skipped under 5M / 20M, built under
-    2M / 10M (no settings store: the schema defaults)."""
+    """3M ISK/hour and 15M per batch: the old ISK/hour and batch-profit gates
+    no longer apply (no settings store: the schema defaults)."""
     scored = SimpleNamespace(
         type_id=1, adjusted_score=3_000_000.0, absolute_profit_per_batch=15_000_000.0, isk_per_hour=3_000_000.0,
         margin_pct=10.0, unscoreable_reason=None,
@@ -96,5 +96,7 @@ def test_a_row_between_the_old_and_new_thresholds_is_built_by_default():
         has_active_manufacturing_jobs=False, days_of_supply_current=1.0, effective_velocity=1.0,
         velocity_unknown_reason=None,
     )
-    decision = ItemDecisionEngine().decide(scored, pipeline, {"type_id": 1, "type_name": "Thing"}, None)
+    decision = ItemDecisionEngine().decide(
+        scored, pipeline, {"type_id": 1, "type_name": "Thing", "quantity": 10, "manufacturing_job": {"runs": 1, "total_cost": 1e8}}, None,
+    )
     assert decision.decision == "build"

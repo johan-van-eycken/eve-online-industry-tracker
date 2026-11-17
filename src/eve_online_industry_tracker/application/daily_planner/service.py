@@ -11,11 +11,15 @@ import logging
 import math
 import threading
 from collections.abc import Iterable
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy.exc import SQLAlchemyError
 
+from eve_online_industry_tracker.application.corporations.corporation_manager import CorporationRefreshError
+from eve_online_industry_tracker.application.corporations.wallet_age import wallet_age_hours, wallet_stale_reason
+from eve_online_industry_tracker.application.daily_planner.wallet_budget import WalletBudget
+from eve_online_industry_tracker.infrastructure.esi_client import ESI_REQUEST_ERRORS
 from eve_online_industry_tracker.application.daily_planner.values import attr as _get_attr, utc_now as _now
 from eve_online_industry_tracker.application.daily_planner.admin_setting import planner_setting as _adm
 from eve_online_industry_tracker.application.daily_planner.action_plan_builder import ActionPlanBuilder
@@ -675,8 +679,26 @@ class DailyPlannerService:
         if feedback_count > 0:
             logger.info("DailyPlannerService: processed %d feedback actions", feedback_count)
 
+        # A refresh failure must not fail the compute: the stored balance is
+        # used and its age decides (WalletBudget blocks a stale one).
+        with _ComputeStep(self, "refreshing the corp wallet"):
+            try:
+                self._corporations.refresh_wallet_balances()
+            except (CorporationRefreshError, *ESI_REQUEST_ERRORS) as exc:
+                logger.warning("DailyPlannerService: corp wallet refresh failed, using the stored balance: %s", exc)
         with _ComputeStep(self, "reading the corp wallet"):
-            corp_wallet = self._get_corp_wallet()
+            corp_wallet, corp_wallet_refreshed_at = self._get_corp_wallet()
+        reserve_pct = float(_adm(self._admin, "planner_wallet_reserve_pct"))
+        wallet_budget = WalletBudget(
+            balance=corp_wallet,
+            reserve_pct=reserve_pct,
+            blocked_reason=(
+                wallet_stale_reason(
+                    corp_wallet_refreshed_at, datetime.now(timezone.utc),
+                    float(_adm(self._admin, "wallet_max_age_hours")),
+                ) if corp_wallet is not None else None
+            ),
+        )
 
         # IndustryService overview rows, validated and cut to one row per
         # product (the producer emits one per blueprint variant). From here
@@ -791,6 +813,8 @@ class DailyPlannerService:
 
         return {
             "corp_wallet": corp_wallet,
+            "corp_wallet_refreshed_at": corp_wallet_refreshed_at,
+            "wallet_budget": wallet_budget,
             "overview_rows": overview_rows,
             "input_rows": input_rows,
             "variant_rows_by_type_id": variant_rows_by_type_id,
@@ -918,6 +942,7 @@ class DailyPlannerService:
                     # (only meta_group_name); the resolved SDE value lives on
                     # the validated input row instead.
                     meta_group_id=input_row.meta_group_id if input_row is not None else None,
+                    margin_known=input_row is None or input_row.profit_margin_fraction is not None,
                 )
                 notes = _unavailable_input_notes(scored.type_id, unavailable, margin_correlations)
                 stale_note = _market_depth_stale_note(market_depth_cache.get(scored.type_id))
@@ -999,6 +1024,16 @@ class DailyPlannerService:
             # The SDE skills each job's activity requires: a job goes only to
             # a pilot who has them.
             blueprint_data=phase1["blueprint_data"],
+            budget=phase1["wallet_budget"],
+            corp_material_stock=phase1["corp_material_stock"],
+            # Leftover research slots keep a minimum blueprint stock.
+            blueprint_stock={
+                "bpo_assets_by_type_id": phase1["bpo_assets_by_type_id"],
+                "bpc_assets_by_type_id": phase1["bpc_assets_by_type_id"],
+                "busy_blueprint_item_ids": phase1.get("busy_blueprint_item_ids") or set(),
+                "min_bpc": int(_adm(self._admin, "planner_min_bpc_stock")),
+                "min_invented": int(_adm(self._admin, "planner_min_invented_bpc_stock")),
+            },
         )
 
     def _phase_7_shopping(
@@ -1068,6 +1103,27 @@ class DailyPlannerService:
 
         unavailable_inputs = phase1_data.get("unavailable_inputs") or {}
         now = _now()
+        summary: dict[str, Any] = {}
+        if unavailable_inputs:
+            summary["unavailable_inputs"] = unavailable_inputs
+        budget = phase1_data.get("wallet_budget")
+        if budget is not None:
+            refreshed_at = phase1_data.get("corp_wallet_refreshed_at")
+            summary["wallet"] = {
+                "balance": corp_wallet,
+                "refreshed_at": refreshed_at,
+                "age_hours": wallet_age_hours(refreshed_at, datetime.now(timezone.utc)),
+                "reserve_pct": float(_adm(self._admin, "planner_wallet_reserve_pct")),
+                "budget": budget.spendable,
+                "spent": budget.spent,
+                "blocked_reason": budget.blocked_reason,
+            }
+            summary["free_slots"] = {
+                slot["character_name"]: {
+                    k: slot[k] for k in ("manufacturing", "science", "manufacturing_reason", "science_reason")
+                }
+                for slot in self._character_assigner.free_slots_after.values()
+            }
         plan = BuildPlanModel(
             created_at=now,
             updated_at=now,
@@ -1076,10 +1132,7 @@ class DailyPlannerService:
             market_snapshot_hash=snapshot_hash,
             freshness_score=1.0,
             # The scoring inputs whose read failed, NULL when none did.
-            plan_summary_json=(
-                json.dumps({"unavailable_inputs": unavailable_inputs}, sort_keys=True)
-                if unavailable_inputs else None
-            ),
+            plan_summary_json=json.dumps(summary, sort_keys=True) if summary else None,
         )
         plan_id = self._repo.insert_plan(plan)
 
@@ -1120,8 +1173,10 @@ class DailyPlannerService:
     # Helper methods
     # ──────────────────────────────────────────────────────────────────────────
 
-    def _get_corp_wallet(self) -> float | None:
-        """Master wallet (division 1) balance, or None when it is unknown.
+    def _get_corp_wallet(self) -> tuple[float | None, str | None]:
+        """(master wallet (division 1) balance, ISO time it was last read), the
+        balance None when it is unknown; the time None when never read (also
+        for a corporation without director access).
 
         Unknown covers: listing corporations failed, there is no corporation,
         and the corporation has no parseable division-1 balance (see
@@ -1133,11 +1188,11 @@ class DailyPlannerService:
             corps = self._corporations.list_corporations()
         except (KeyError, TypeError, ValueError):
             logger.exception("DailyPlannerService: failed to list corporations; corp wallet unknown")
-            return None
+            return None, None
 
         if not corps:
             logger.warning("DailyPlannerService: no corporation listed; corp wallet unknown")
-            return None
+            return None, None
         corp = corps[0] if isinstance(corps, list) else corps
         wallets = corp.get("wallets") if isinstance(corp, dict) else getattr(corp, "wallets", None)
         balance = _select_division_one_balance(wallets)
@@ -1146,7 +1201,8 @@ class DailyPlannerService:
                 "DailyPlannerService: no parseable division-1 wallet balance "
                 "(absent, undecodable or malformed); corp wallet unknown, not zero"
             )
-        return balance
+        refreshed_at = corp.get("wallets_refreshed_at") if isinstance(corp, dict) else getattr(corp, "wallets_refreshed_at", None)
+        return balance, refreshed_at
 
     def _get_overview_rows(self) -> list[dict[str, Any]]:
         """Get IndustryService overview rows from cache.

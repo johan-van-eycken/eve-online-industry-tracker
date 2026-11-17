@@ -1850,7 +1850,7 @@ PARENT, FALLEN = 990001, 990002
 
 def _dropped_parent_decision(type_id):
     return SimpleNamespace(type_id=type_id, decision="build", is_sub_component=False, adjusted_score=1.0,
-                           overview_row={}, decision_reason="")
+                           capital_return_per_day=None, overview_row={}, decision_reason="")
 
 
 def test_a_parent_with_no_manufacture_is_dropped_even_when_no_sub_decision_names_it(monkeypatch):

@@ -51,3 +51,29 @@ def refresh_realized_profit(*, owner_scope: str = "character", owner_id: int | N
 
 def clear_realized_profit_cache() -> None:
     fetch_realized_profit.clear()
+
+
+@st.cache_resource(show_spinner=False)
+def _startup_refresh_state() -> dict[str, bool]:
+    # One dict per Streamlit server process, so it lives until the app restarts.
+    return {"done": False}
+
+
+def refresh_ledger_once_per_start() -> str | None:
+    """Rebuild the character and corporation ledgers on the first page load
+    after an app start. Returns the failure, or None. Marked done before the
+    rebuild, so a failing one is not repeated on every rerun: the Refresh
+    Ledger button retries it."""
+    state = _startup_refresh_state()
+    if state["done"]:
+        return None
+    state["done"] = True
+    try:
+        with st.spinner("Rebuilding the realized profit ledger (first load since the app started)..."):
+            refresh_realized_profit(owner_scope="character", owner_id=None)
+            refresh_realized_profit(owner_scope="corporation", owner_id=None)
+    except RuntimeError as exc:
+        return str(exc)
+    finally:
+        clear_realized_profit_cache()
+    return None

@@ -133,6 +133,24 @@ def _ensure_column(db: DatabaseManager, *, table: str, column: str, ddl_type: st
         raise SchemaMigrationError(f"could not add column {table}.{column}", e) from e
 
 
+def _backfill_blueprint_item_id_sql(db: DatabaseManager, *, table: str) -> None:
+    """Populate blueprint_item_id from the stored raw ESI blueprint_id, once.
+
+    Rows synced before the job snapshot read the ESI blueprint_id (mostly
+    research jobs) stored it NULL, so the daily planner saw those blueprints
+    as free. Idempotent and non-fatal, like _backfill_activity_id_sql.
+    """
+    try:
+        db.execute(
+            f"UPDATE {table} "
+            "SET blueprint_item_id = json_extract(raw, '$.blueprint_id') "
+            "WHERE blueprint_item_id IS NULL AND raw IS NOT NULL "
+            "AND json_extract(raw, '$.blueprint_id') IS NOT NULL"
+        )
+    except Exception as e:
+        logging.error("Failed backfilling %s.blueprint_item_id: %s", table, str(e))
+
+
 def _backfill_activity_id_sql(db: DatabaseManager, *, table: str) -> None:
     """Populate activity_id from the stored raw ESI payload, once.
 
@@ -601,6 +619,7 @@ def ensure_app_schema(db_app: DatabaseManager) -> None:
     )
     for table in ("character_industry_jobs", "corporation_industry_jobs"):
         _backfill_activity_id_sql(db_app, table=table)
+        _backfill_blueprint_item_id_sql(db_app, table=table)
 
     # Market orderbook view cache (persistent hub pricing aggregates)
     _ensure_table(
@@ -987,6 +1006,7 @@ def ensure_app_schema(db_app: DatabaseManager) -> None:
     _ensure_column(db_app, table="daily_action_log", column="queued_after_me", ddl_type="INTEGER NOT NULL DEFAULT 0")
     _ensure_column(db_app, table="build_plan_item", column="snapshot_sell_price", ddl_type="REAL")
     _ensure_column(db_app, table="build_plan_item", column="bpo_analysis_skip_reason", ddl_type="TEXT")
+    _ensure_column(db_app, table="corporations", column="wallets_refreshed_at", ddl_type="DATETIME")
 
     # Belt-and-braces normalization for existing corporations.wallets/standings
     # rows written by the pre-fix double-JSON-encoding bug in corporation.py
