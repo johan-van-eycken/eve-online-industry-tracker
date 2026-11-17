@@ -34,6 +34,7 @@ from eve_online_industry_tracker.infrastructure.models import (
 from eve_online_industry_tracker.infrastructure.sde.blueprints import (
     get_blueprint_manufacturing_data,
     get_invention_source_blueprint_ids,
+    reduced_batch_quantity,
     round_material_quantity as _round_material_quantity,
 )
 from eve_online_industry_tracker.infrastructure.sde.decryptors import get_t2_invention_decryptors
@@ -72,6 +73,8 @@ class FifoLot:
     #: The corp asset history row of a blended transfer lot (it names no
     #: job): the ledger's stale check compares its stamped cost.
     asset_history_id: Optional[int] = None
+    #: When the corp asset history first saw a transfer lot's stack.
+    observed_at: Optional[str] = None
 
 
 def _parse_date(value: Any) -> Optional[datetime]:
@@ -440,6 +443,147 @@ def industry_job_material_type_ids(
     return out
 
 
+def is_manufacturing_job(job: Any) -> bool:
+    """A manufacturing job (activity 1, or none recorded): the only kind whose inputs the ledger drains."""
+    activity_id = _safe_int(getattr(job, "activity_id", None)) or _safe_int(_industry_job_raw_payload(job).get("activity_id"))
+    return activity_id in {None, 1}
+
+
+def industry_job_input_quantities(
+    job: Any, *, sde_session: Any, blueprints: Mapping[int, Any] | None = None,
+    facility_reductions: Iterable[float] = (),
+) -> dict[int, int]:
+    """{input type: units a manufacturing job took when it started}: the SDE
+    materials x runs reduced as the producer and the daily planner reduce them
+    (facility_bonus.combine_reductions of the blueprint ME and the facility's
+    `facility_reductions`, structure and rig, then reduced_batch_quantity). An
+    input the SDE does not list (or a job without its blueprint) is drawn as its
+    historical_input_costs recorded it; a recorded quantity never overrides the
+    SDE's, so an earlier costing at ME only cannot keep an overdraw alive. {} for
+    any other activity: their historical_input_costs hold the blueprint's
+    manufacturing materials, not what the job used. `blueprints`
+    ({blueprintTypeID: row}, prefetched by the caller) saves the per-job SDE lookup."""
+    from eve_online_industry_tracker.application.daily_planner.facility_bonus import combine_reductions
+
+    if not is_manufacturing_job(job):
+        return {}
+    raw = _industry_job_raw_payload(job)
+    blueprint_type_id = _safe_int(getattr(job, "blueprint_type_id", None))
+    me = _safe_int(getattr(job, "blueprint_material_efficiency", None)
+                   or raw.get("blueprint_material_efficiency") or raw.get("material_efficiency")) or 0
+    runs = _industry_job_runs(job)
+    reduction = combine_reductions([float(me) / 100.0, *facility_reductions])
+    out: dict[int, int] = {}
+    if blueprints is not None:
+        bp = blueprints.get(int(blueprint_type_id or 0))
+    else:
+        bp = sde_session.query(Blueprints).filter_by(blueprintTypeID=int(blueprint_type_id)).first() if blueprint_type_id else None
+    for material in (_get_mfg_activity(getattr(bp, "activities", None)) or {}).get("materials") or []:
+        type_id = _safe_int(material.get("typeID")) if isinstance(material, dict) else None
+        quantity = reduced_batch_quantity(_safe_int(material.get("quantity")) or 0, runs, reduction) if type_id else 0
+        if quantity > 0:
+            out[int(type_id)] = out.get(int(type_id), 0) + quantity
+    recorded = getattr(job, "historical_input_costs", None)
+    # shortcut: listed inputs drain today's SDE quantity, so a blueprint CCP changed since the job ran uses today's materials (ESI keeps no record of actual consumption); upgrade if that ever matters.
+    for type_key, detail in (recorded.items() if isinstance(recorded, dict) else ()):
+        type_id, quantity = _safe_int(type_key), _safe_int(detail.get("quantity")) if isinstance(detail, dict) else None
+        if type_id and quantity and type_id not in out:
+            out[type_id] = int(quantity)
+    return out
+
+
+#: build_cost_source of a job priced by the realized-profit ledger's FIFO replay;
+#: the job sync keeps such a cost (keep_ledger_job_cost).
+LEDGER_FIFO_SOURCE = "ledger_fifo"
+LEDGER_MARKET_ESTIMATE = "market_estimate"
+
+
+def is_ledger_priced(job: Any) -> bool:
+    return str(getattr(job, "build_cost_source", None) or "").startswith(LEDGER_FIFO_SOURCE)
+
+
+#: The materials part of a job's cost that the ledger prices; the fee, copy and
+#: invention cost and the output stay the job sync's.
+LEDGER_MATERIAL_FIELDS = (
+    "materials_cost", "historical_materials_cost", "historical_material_cost_source",
+    "historical_material_coverage_fraction", "historical_input_costs", "materials_cost_lower_bound_reason",
+    "build_cost_source",
+)
+
+
+def ledger_build_totals(
+    *, materials_cost: Any, cost: Any, copy_cost: Any, invention_cost: Any, output_quantity: Any,
+) -> tuple[float, float | None]:
+    """(total, unit) build cost of a ledger-priced job: its materials plus the install
+    fee, copy and invention cost, over its output (unit None without an output)."""
+    total = float(_safe_float(materials_cost) or 0.0) + sum(
+        float(_safe_float(part) or 0.0) for part in (cost, copy_cost, invention_cost))
+    output = _safe_int(output_quantity)
+    return total, (total / float(output) if output and output > 0 else None)
+
+
+def keep_ledger_job_cost(row: dict[str, Any], existing_job: Any) -> None:
+    """A job sync row keeps the materials the ledger already priced (the sync's own FIFO
+    would fight it); its total and unit are recomputed from the row's own fee, copy and
+    invention cost and output, so a change there moves the unit cost (and the ledger goes stale)."""
+    if existing_job is None or not is_ledger_priced(existing_job):
+        return
+    for field_name in LEDGER_MATERIAL_FIELDS:
+        row[field_name] = getattr(existing_job, field_name, None)
+    total, unit = ledger_build_totals(
+        materials_cost=row["materials_cost"], cost=row.get("cost"), copy_cost=row.get("copy_cost"),
+        invention_cost=row.get("invention_cost"), output_quantity=row.get("output_quantity"))
+    row["total_build_cost"] = total
+    row["unit_build_cost"] = unit if unit is not None else getattr(existing_job, "unit_build_cost", None)
+
+
+def job_cost_reason(job: Any, materials_reason: Any) -> str | None:
+    """Why a job's build cost is partly unknown: its invention and materials reasons, joined."""
+    return "; ".join(str(r) for r in (getattr(job, "invention_cost_unknown_reason", None), materials_reason) if r) or None
+
+
+def ledger_job_cost(job: Any, inputs_by_type: Mapping[int, Mapping[str, Any]], output_quantity: int) -> dict[str, Any]:
+    """The job's cost fields from the lots the ledger replay drew for its inputs
+    ({type_id: {"quantity": units drawn, "lots": [{quantity, unit_cost, total_cost, source, ...}]}}).
+    Materials are the drawn lots' cost (untracked units at their market estimate);
+    the install fee, copy and invention cost are kept as the job has them."""
+    lots = [lot for detail in inputs_by_type.values() for lot in detail["lots"]]
+    tracked = [lot for lot in lots if lot["source"] not in (LEDGER_MARKET_ESTIMATE, "unpriced")]
+    materials = sum(float(lot["total_cost"]) for lot in lots)
+    total_quantity = sum(int(detail["quantity"]) for detail in inputs_by_type.values())
+    source = LEDGER_FIFO_SOURCE + (
+        f"+{LEDGER_MARKET_ESTIMATE}" if any(lot["source"] == LEDGER_MARKET_ESTIMATE for lot in lots) else "")
+    unpriced = sorted(t for t, detail in inputs_by_type.items() if any(lot["source"] == "unpriced" for lot in detail["lots"]))
+    total, unit = ledger_build_totals(
+        materials_cost=materials, cost=getattr(job, "cost", None), copy_cost=getattr(job, "copy_cost", None),
+        invention_cost=getattr(job, "invention_cost", None), output_quantity=output_quantity)
+
+    def _priced_unit_cost(detail: Mapping[str, Any]) -> float | None:
+        priced = [lot for lot in detail["lots"] if lot["unit_cost"]]
+        quantity = sum(int(lot["quantity"]) for lot in priced)
+        return sum(float(lot["total_cost"]) for lot in priced) / quantity if quantity else None
+
+    return {
+        "materials_cost": float(materials),
+        "historical_materials_cost": float(sum(float(lot["total_cost"]) for lot in tracked)) if tracked else None,
+        "historical_material_cost_source": source,
+        "historical_material_coverage_fraction": (
+            float(sum(int(lot["quantity"]) for lot in tracked)) / float(total_quantity) if total_quantity else 0.0),
+        # The quantities are what the replay drew, so the next replay draws the same (industry_job_input_quantities).
+        "historical_input_costs": {
+            str(int(t)): {"quantity": int(detail["quantity"]), "unit_cost": _priced_unit_cost(detail),
+                          "source": LEDGER_FIFO_SOURCE, "lots": list(detail["lots"])}
+            for t, detail in inputs_by_type.items()
+        },
+        "materials_cost_lower_bound_reason": (
+            f"materials cost is a lower bound: no price for material type(s) {', '.join(map(str, unpriced))}"
+            if unpriced else None),
+        "total_build_cost": float(total),
+        "unit_build_cost": unit,
+        "build_cost_source": source,
+    }
+
+
 #: Why there is no RealizedInventionInputs when no provider is registered.
 NO_REALIZED_INVENTION_INPUTS_REASON = (
     "no inventor skills or decryptor choice available (the app has not registered the producer's invention inputs)"
@@ -700,6 +844,20 @@ def resnapshot_jobs_without_decryptor_choice(
                 invention_refresh=invention_refresh,
                 **invention_cost_source_for(_invention_sources(owner_id), row.blueprint_type_id),
             )
+            if is_ledger_priced(row):
+                # The ledger priced the materials from its FIFO replay: only the invention part changes.
+                output_quantity = _safe_int(row.output_quantity) or _safe_int(snapshot.get("output_quantity"))
+                total, unit = ledger_build_totals(
+                    materials_cost=row.materials_cost, cost=row.cost, copy_cost=row.copy_cost,
+                    invention_cost=snapshot.get("invention_cost"), output_quantity=output_quantity)
+                snapshot = {
+                    **snapshot,
+                    **{name: getattr(row, name) for name in LEDGER_MATERIAL_FIELDS},
+                    "output_quantity": output_quantity,
+                    "total_cost": total,
+                    "unit_cost": unit if unit is not None else row.unit_build_cost,
+                    "source": row.build_cost_source,
+                }
             row.output_quantity = snapshot.get("output_quantity")
             row.materials_cost = snapshot.get("materials_cost")
             row.historical_materials_cost = snapshot.get("historical_materials_cost")
@@ -2265,6 +2423,23 @@ def build_cost_map_for_assets(
     return out
 
 
+def stored_market_price_on_date(
+    *, app_session: Any, type_id: int, target_date: str, region_id: int = 10000002,
+) -> Optional[float]:
+    """The closest stored daily close on or before target_date (the market_history table only), or None."""
+    row = (
+        app_session.query(MarketHistoryModel)
+        .filter(
+            MarketHistoryModel.type_id == type_id,
+            MarketHistoryModel.region_id == region_id,
+            MarketHistoryModel.date <= target_date,
+        )
+        .order_by(MarketHistoryModel.date.desc())
+        .first()
+    )
+    return float(row.close) if row and row.close and float(row.close) > 0 else None
+
+
 def _get_or_fetch_market_price_on_date(
     *,
     type_id: int,
@@ -2297,17 +2472,8 @@ def _get_or_fetch_market_price_on_date(
             transient.add(int(type_id))
 
     def _stored_price() -> Optional[float]:
-        row = (
-            app_session.query(MarketHistoryModel)
-            .filter(
-                MarketHistoryModel.type_id == type_id,
-                MarketHistoryModel.region_id == region_id,
-                MarketHistoryModel.date <= target_date,
-            )
-            .order_by(MarketHistoryModel.date.desc())
-            .first()
-        )
-        return float(row.close) if row and row.close and float(row.close) > 0 else None
+        return stored_market_price_on_date(
+            app_session=app_session, type_id=type_id, target_date=target_date, region_id=region_id)
 
     price = _stored_price()
     if price is not None:

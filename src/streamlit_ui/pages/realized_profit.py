@@ -710,6 +710,8 @@ def _table_frame(
             "_negative_flag",
         ]
         frame = frame[[column for column in desired_columns if column in frame.columns]]
+        # Newest sale first; "YYYY-MM-DD HH:MM:SS" sorts by time as text.
+        frame = frame.sort_values("Date", ascending=False, kind="stable", ignore_index=True)
     return frame
 
 

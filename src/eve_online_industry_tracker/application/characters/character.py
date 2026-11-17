@@ -32,6 +32,7 @@ from eve_online_industry_tracker.application.characters.asset_provenance import 
     resolve_industry_job_cost_snapshot,
     backfill_historical_market_costs,
     add_consumed_input_lots,
+    keep_ledger_job_cost,
     subtract_consumed_input_lots,
 )
 from eve_online_industry_tracker.application.characters.corp_transfer_costs import (
@@ -1065,6 +1066,7 @@ class Character:
                 for job in jobs
                 if isinstance(job, dict) and job.get("job_id") is not None
             }
+            existing_by_id = {int(job.job_id): job for job in existing_jobs}
 
             historical_job_events: list[tuple[str, int, str, Any]] = []
             for job in existing_jobs:
@@ -1196,8 +1198,10 @@ class Character:
                         "raw": j,
                     }
                 )
+                # A cost the realized-profit ledger priced from its FIFO replay stays.
+                keep_ledger_job_cost(rows[-1], existing_by_id.get(int(job_id)))
                 output_quantity = int(snapshot.get("output_quantity") or 0)
-                unit_cost = snapshot.get("unit_cost")
+                unit_cost = rows[-1]["unit_build_cost"]
                 status = str(j.get("status") or "").lower()
                 if status in completed_statuses and completed_at and output_quantity > 0 and unit_cost is not None and float(unit_cost) > 0:
                     record_historical_acquisition(

@@ -34,6 +34,7 @@ _ADVISED_FIELDS = (
     ("cost_basis", "cost_basis"),
     ("acquisition_source", "acquisition_source"),
     ("cost_basis_source", "cost_basis_source"),
+    ("cost_basis_detail", "cost_basis_detail"),
     ("price_difference_pct", "price_difference_pct"),
     # Profitability metrics
     ("hub_price", "hub_price"),

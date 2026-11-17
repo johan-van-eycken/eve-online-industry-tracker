@@ -31,6 +31,7 @@ from eve_online_industry_tracker.application.characters.realized_profit import C
 from eve_online_industry_tracker.config.config_manager import ConfigManager
 from eve_online_industry_tracker.infrastructure.database_manager import DatabaseManager
 from eve_online_industry_tracker.infrastructure.models import CorporationAssetHistoryModel
+from eve_online_industry_tracker.infrastructure.sde import industry as sde_industry
 
 
 # ---------------------------------------------------------------------------
@@ -50,6 +51,8 @@ def main():
     session = db_app.session
     db_sde = DatabaseManager(cfg["app"]["database_sde_uri"], cfg["app"]["language"])
     sde_session = db_sde.session
+    # The SDE industry data (rig groups and effects) the app installs at startup: rig bonuses apply.
+    sde_industry.install_industry_data(sde_industry.load_industry_data(sde_session))
 
     print("Starting corp transfer cost backfill...")
     summary = backfill_corp_transfer_costs(session)

@@ -578,6 +578,8 @@ def _render_pricing_analysis(selected_order: dict) -> None:
                 source_label = f"{base} (from history)"
             else:
                 source_label = "Built" if source == "manufactured" else "Bought" if source == "bought" else source.title()
+            if cost_source == "ledger_fifo" and selected_order.get("cost_basis_detail"):
+                source_label = f"{source_label}, next FIFO lot: {selected_order['cost_basis_detail'].removeprefix('fifo: ')}"
 
             st.metric("Your Cost", format_isk_short(cost_basis))
             if cost_source == "market_order_fallback":

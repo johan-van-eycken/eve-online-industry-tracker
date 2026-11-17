@@ -1046,9 +1046,11 @@ def test_a_character_ledger_built_without_a_cost_basis_is_stale_once(app_session
 
 def _corporation(s, *, source, referenced):
     s.add(CorporationModel(corporation_id=CORP, corporation_name="Fake"))
-    # The pilot's job also feeds the corp a lot of its own, completed after
-    # the sale: the sale consumes only the history row.
-    _job(s, job_id=5001, completed="2026-10-03T00:00:00Z")
+    # A referenced stamp is job 5001's units, so the job completed by the stamp's
+    # date (a stamped lot enters the queue no earlier than its build). A blended row
+    # names no job: the pilot's job completed after the sale, so the sale consumes
+    # only the history row.
+    _job(s, job_id=5001, completed="2026-10-01T00:00:00Z" if referenced else "2026-10-03T00:00:00Z")
     s.add(CorporationAssetHistoryModel(
         id=1, corporation_id=CORP, item_id=1, observed_at="2026-10-01T01:00:00Z", type_id=PRODUCT, quantity=2,
         acquisition_source=source, acquisition_unit_cost=70.0, acquisition_total_cost=140.0,
