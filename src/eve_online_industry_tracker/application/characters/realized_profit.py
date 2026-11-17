@@ -977,6 +977,16 @@ class _BaseRealizedProfitLedgerService:
                             "acquisition_date")}
                         for entry in taken["allocations"]
                     ]
+                    # Opening-lot units a job takes are priced like untracked units (the market
+                    # on its start date), not at the lot's first known cost; sales keep that cost.
+                    for drawn_lot in drawn_lots:
+                        if drawn_lot["source"] == ASSET_SOURCE_OPENING_INVENTORY:
+                            price = self._input_market_price(int(type_id), job, market_price_map, fallback_prices)
+                            drawn_lot.update({
+                                "unit_cost": price,
+                                "total_cost": float(price) * int(drawn_lot["quantity"]) if price else 0.0,
+                                "source": LEDGER_MARKET_ESTIMATE if price else "unpriced",
+                            })
                     if taken["unpriced_quantity"]:
                         untracked = int(taken["unpriced_quantity"])
                         price = self._input_market_price(int(type_id), job, market_price_map, fallback_prices)
@@ -1023,7 +1033,8 @@ class _BaseRealizedProfitLedgerService:
             if job_id not in repriced and job_id not in unpriced_jobs:
                 _reprice(drawn["job"], int(_safe_int(getattr(drawn["job"], "output_quantity", None)) or 0))
         # An opening lot priced from a job this replay re-priced is replayed at the job's new
-        # cost (a fixed point: the next rebuild then prices it the same).
+        # cost (a fixed point: the next rebuild then prices it the same). Only sales carry
+        # that cost: job inputs from an opening lot are priced at the market.
         moved = {job_id: repriced[job_id][1]["unit_build_cost"] for job_id, cost in opening_job_costs_used.items()
                  if job_id in repriced and not _same_cost(cost, repriced[job_id][1]["unit_build_cost"])}
         if moved and _pass < 4:

@@ -176,3 +176,41 @@ def test_an_opening_lot_priced_from_a_job_takes_its_recomputed_cost_on_the_first
     first = {job_id: job.unit_build_cost for job_id, job in _jobs(app_session).items()}
     service.rebuild(character_id=1)
     assert {job_id: job.unit_build_cost for job_id, job in _jobs(app_session).items()} == first
+
+
+def _late_tritanium_buy(app_session) -> None:
+    """The job takes its Tritanium on 1 March; the only buy is on 1 April, so the job's
+    40 come from the opening lot (priced at that first known cost, 5.0)."""
+    app_session.query(CharacterWalletTransactionsModel).filter_by(transaction_id=501).one().date = "2026-04-01T00:00:00Z"
+    app_session.add(MarketHistoryModel(type_id=TRITANIUM, region_id=10000002, date="2026-02-28", close=4.0,
+                                       volume=1, order_count=1))
+    app_session.commit()
+
+
+def test_a_job_drawing_from_the_opening_lot_is_priced_at_the_start_date_close(session_provider) -> None:
+    app_session, sde_session = session_provider.app_session(), session_provider.sde_session()
+    _seed(app_session, sde_session)
+    _late_tritanium_buy(app_session)
+
+    _service(app_session, sde_session).rebuild(character_id=1)
+    job = _jobs(app_session)[1001]
+
+    assert job.materials_cost == 160.0  # 40 at the 28 Feb close of 4.0, not the first known 5.0
+    assert job.build_cost_source == "ledger_fifo+market_estimate"
+    [lot] = job.historical_input_costs[str(TRITANIUM)]["lots"]
+    assert (lot["source"], lot["reference_type"], lot["unit_cost"]) == ("market_estimate", "opening_inventory", 4.0)
+
+
+def test_a_sale_drawing_from_the_opening_lot_keeps_the_first_known_cost(session_provider) -> None:
+    app_session, sde_session = session_provider.app_session(), session_provider.sde_session()
+    _seed(app_session, sde_session)
+    _late_tritanium_buy(app_session)
+    app_session.add(CharacterWalletTransactionsModel(
+        character_id=1, transaction_id=603, date="2026-02-15T00:00:00Z", is_buy=False, is_personal=True,
+        quantity=5, type_id=TRITANIUM, type_name="Tritanium", unit_price=6.0, total_price=30.0))
+    app_session.commit()
+
+    [row] = _service(app_session, sde_session).rebuild(character_id=1)
+
+    assert [(a["source"], a["quantity"], a["unit_cost"]) for a in row["allocation_details"]] == [
+        ("opening_inventory", 5, 5.0)]
