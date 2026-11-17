@@ -748,7 +748,13 @@ class _BaseRealizedProfitLedgerService:
     def _facility_profile(self, facility_id: int, owner: int | None) -> dict[str, Any] | None:
         """The industry profile payload for a facility (the owner's own first): its
         columns, its rigs' SDE effects and its system's security, the parts the
-        producer's material reduction reads."""
+        producer's material reduction reads. Built once per (facility, owner) per service."""
+        payloads: dict[tuple[int, int | None], Any] = self.__dict__.setdefault("_facility_profile_payloads", {})
+        if (int(facility_id), owner) not in payloads:
+            payloads[(int(facility_id), owner)] = self._build_facility_profile(facility_id, owner)
+        return payloads[(int(facility_id), owner)]
+
+    def _build_facility_profile(self, facility_id: int, owner: int | None) -> dict[str, Any] | None:
         profiles: dict[int, list[Any]] = self.__dict__.get("_profiles_by_facility")
         if profiles is None:
             profiles = defaultdict(list)
