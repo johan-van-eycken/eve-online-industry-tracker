@@ -443,6 +443,12 @@ def industry_job_material_type_ids(
     return out
 
 
+def is_manufacturing_job(job: Any) -> bool:
+    """A manufacturing job (activity 1, or none recorded): the only kind whose inputs the ledger drains."""
+    activity_id = _safe_int(getattr(job, "activity_id", None)) or _safe_int(_industry_job_raw_payload(job).get("activity_id"))
+    return activity_id in {None, 1}
+
+
 def industry_job_input_quantities(
     job: Any, *, sde_session: Any, blueprints: Mapping[int, Any] | None = None,
     facility_reductions: Iterable[float] = (),
@@ -459,10 +465,9 @@ def industry_job_input_quantities(
     ({blueprintTypeID: row}, prefetched by the caller) saves the per-job SDE lookup."""
     from eve_online_industry_tracker.application.daily_planner.facility_bonus import combine_reductions
 
-    raw = _industry_job_raw_payload(job)
-    activity_id = _safe_int(getattr(job, "activity_id", None)) or _safe_int(raw.get("activity_id"))
-    if activity_id not in {None, 1}:
+    if not is_manufacturing_job(job):
         return {}
+    raw = _industry_job_raw_payload(job)
     blueprint_type_id = _safe_int(getattr(job, "blueprint_type_id", None))
     me = _safe_int(getattr(job, "blueprint_material_efficiency", None)
                    or raw.get("blueprint_material_efficiency") or raw.get("material_efficiency")) or 0
@@ -479,6 +484,7 @@ def industry_job_input_quantities(
         if quantity > 0:
             out[int(type_id)] = out.get(int(type_id), 0) + quantity
     recorded = getattr(job, "historical_input_costs", None)
+    # shortcut: listed inputs drain today's SDE quantity, so a blueprint CCP changed since the job ran uses today's materials (ESI keeps no record of actual consumption); upgrade if that ever matters.
     for type_key, detail in (recorded.items() if isinstance(recorded, dict) else ()):
         type_id, quantity = _safe_int(type_key), _safe_int(detail.get("quantity")) if isinstance(detail, dict) else None
         if type_id and quantity and type_id not in out:

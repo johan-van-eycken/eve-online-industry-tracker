@@ -23,6 +23,7 @@ from eve_online_industry_tracker.application.characters.asset_provenance import 
     LEDGER_MARKET_ESTIMATE,
     completed_job_output_lot,
     industry_job_input_quantities,
+    is_manufacturing_job,
     job_cost_reason,
     ledger_job_cost,
     stored_market_price_on_date,
@@ -186,6 +187,13 @@ def _with_cost_basis(allocations: list[dict[str, Any]], unit_cost_by_job_id: dic
             entry["cost_basis"] = unit_cost_by_job_id.get(int(job_id))
         elif entry.get("asset_history_id") is not None:
             entry["cost_basis"] = _safe_float(entry.get("unit_cost"))
+
+
+def _has_material_rigs(profile: dict[str, Any]) -> bool:
+    """Whether any of the profile's rigs has a manufacturing material effect (facility_bonus's filter)."""
+    from eve_online_industry_tracker.application.daily_planner import facility_bonus
+
+    return bool(facility_bonus._material_rig_effects(profile))
 
 
 def _event_ts(dt: datetime | None) -> float:
@@ -740,7 +748,8 @@ class _BaseRealizedProfitLedgerService:
             if profile is None:
                 cache[key] = None
             else:
-                entry = self._product_entry(product_type_id) if profile.get("structure_rigs") else None
+                # The product's rig groups matter only for a manufacturing material rig.
+                entry = self._product_entry(product_type_id) if _has_material_rigs(profile) else None
                 bonuses = facility_bonus.sub_job_facility_reductions(profile, entry)
                 cache[key] = (bonuses["structure_material_reduction"], bonuses["rig_material_reduction"])
         return cache[key]
@@ -785,8 +794,20 @@ class _BaseRealizedProfitLedgerService:
         return payload
 
     def _product_entry(self, type_id: int) -> dict[str, Any] | None:
-        """The product's SDE type entry (its group and category: the rig groups that cover it)."""
-        return get_type_data(self._sde_session, "en", [int(type_id)]).get(int(type_id)) if type_id else None
+        """The product's SDE type entry (its group and category: the rig groups that cover
+        it), from the batch _prefetch_product_entries read (one lookup when it did not)."""
+        entries: dict[int, Any] = self.__dict__.setdefault("_product_entries", {})
+        if type_id and int(type_id) not in entries:
+            self._prefetch_product_entries({int(type_id)})
+        return entries.get(int(type_id)) if type_id else None
+
+    def _prefetch_product_entries(self, type_ids: set[int]) -> None:
+        """Read the SDE type entries of `type_ids` not read yet, in one lookup."""
+        entries: dict[int, Any] = self.__dict__.setdefault("_product_entries", {})
+        missing = sorted(int(t) for t in type_ids if t and int(t) not in entries)
+        if missing:
+            found = get_type_data(self._sde_session, "en", missing)
+            entries.update({t: found.get(t) for t in missing})
 
     def _input_market_price(
         self, type_id: int, job: Any, market_price_map: dict[int, float],
@@ -898,9 +919,18 @@ class _BaseRealizedProfitLedgerService:
             )
 
         # Inputs leave when the job starts, from the same queue a sale takes from.
-        blueprints = self._load_blueprints({_safe_int(getattr(job, "blueprint_type_id", None)) for job in industry_jobs})
+        manufacturing_jobs = [job for job in industry_jobs if is_manufacturing_job(job)]
+        blueprints = self._load_blueprints({_safe_int(getattr(job, "blueprint_type_id", None)) for job in manufacturing_jobs})
+        # The products whose rig coverage a facility's material rig needs, in one SDE lookup.
+        self._prefetch_product_entries({
+            int(_safe_int(job.product_type_id) or 0) for job in manufacturing_jobs
+            if (profile := self._facility_profile(
+                _safe_int(job.facility_id) or 0,
+                _safe_int(getattr(job, "character_id", None)) or _safe_int(getattr(job, "installer_id", None))))
+            and _has_material_rigs(profile)
+        })
         me_only_jobs = 0
-        for job in industry_jobs:
+        for job in manufacturing_jobs:
             start_date = _parse_date(getattr(job, "start_date", None))
             if start_date is None:
                 continue

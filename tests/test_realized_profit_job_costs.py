@@ -460,3 +460,64 @@ def test_a_corp_rebuild_holds_every_character_lock_in_id_order_until_its_commit(
 
     assert events == ["acquire character_id:1", "acquire character_id:3", "commit",
                       "release character_id:3", "release character_id:1"]
+
+
+def _rigged_facility(app_session, sde_session, monkeypatch, *, effect_activity: str) -> list:
+    """Three manufacturing jobs (three products) and a copy job at a Raitaru whose one
+    rig has an effect for `effect_activity`; returns the get_type_data calls made."""
+    for offset in range(3):
+        sde_session.add(Blueprints(blueprintTypeID=MODULE_BP + 10 * offset, maxProductionLimit=100, activities={
+            "manufacturing": {"materials": [{"typeID": TRITANIUM, "quantity": 100}],
+                              "products": [{"typeID": MODULE + 10 * offset, "quantity": 1}]}}))
+    sde_session.commit()
+    app_session.add(CharacterModel(character_id=1, character_name="Builder"))
+    app_session.add(IndustryProfilesModel(character_id=1, profile_name="Raitaru", facility_id=RAITARU,
+                                          material_efficiency_bonus=0.01, rig_slot0_type_id=43920))
+    for offset, activity in enumerate((1, 1, 1, 5)):
+        app_session.add(CharacterIndustryJobsModel(
+            character_id=1, job_id=1001 + offset, status="delivered", activity_id=activity,
+            start_date=f"2026-03-0{offset + 1}T00:00:00Z", end_date="2026-03-20T00:00:00Z",
+            completed_date="2026-03-20T00:00:00Z", blueprint_type_id=MODULE_BP + 10 * min(offset, 2),
+            product_type_id=MODULE + 10 * min(offset, 2), runs=10, successful_runs=10, cost=0.0,
+            blueprint_material_efficiency=0, facility_id=RAITARU, output_quantity=10, unit_build_cost=1.0))
+    app_session.commit()
+    monkeypatch.setattr(rp, "get_rig_effects_for_type_ids", lambda session, ids: [
+        {"type_id": 43920, "effects": [{"activity": effect_activity, "metric": "material", "value": 0.02,
+                                        "group": "All"}]}])
+    calls: list = []
+    monkeypatch.setattr(rp, "get_type_data", lambda session, language, ids: (
+        calls.append(sorted(ids)), {i: {"type_id": i, "group_name": "Module", "category_name": "Module"} for i in ids})[1])
+    return calls
+
+
+def test_the_product_types_are_read_in_one_batched_lookup_per_replay(session_provider, monkeypatch) -> None:
+    app_session, sde_session = session_provider.app_session(), session_provider.sde_session()
+    calls = _rigged_facility(app_session, sde_session, monkeypatch, effect_activity="manufacturing")
+
+    replay = _service(app_session, sde_session)._replay_owner(owner_id=1)
+
+    assert calls == [[MODULE, MODULE + 10, MODULE + 20]]
+    # 1000 Tritanium a job, less the structure's 1 % and the rig's 2 %: ceil(1000 x 0.99 x 0.98) = 971.
+    assert replay["inputs"]["untracked"] == 3 * 971
+
+
+def test_without_a_manufacturing_material_rig_no_product_type_is_read(session_provider, monkeypatch) -> None:
+    app_session, sde_session = session_provider.app_session(), session_provider.sde_session()
+    calls = _rigged_facility(app_session, sde_session, monkeypatch, effect_activity="research_me")
+
+    _service(app_session, sde_session)._replay_owner(owner_id=1)
+
+    assert calls == []
+
+
+def test_only_manufacturing_jobs_look_up_their_facility(session_provider, monkeypatch) -> None:
+    app_session, sde_session = session_provider.app_session(), session_provider.sde_session()
+    _rigged_facility(app_session, sde_session, monkeypatch, effect_activity="research_me")
+    looked_up: list[int] = []
+    real = CharacterRealizedProfitLedgerService._facility_reductions
+    monkeypatch.setattr(CharacterRealizedProfitLedgerService, "_facility_reductions",
+                        lambda self, job: (looked_up.append(job.job_id), real(self, job))[1])
+
+    _service(app_session, sde_session)._replay_owner(owner_id=1)
+
+    assert sorted(looked_up) == [1001, 1002, 1003]  # not the copy job 1004
