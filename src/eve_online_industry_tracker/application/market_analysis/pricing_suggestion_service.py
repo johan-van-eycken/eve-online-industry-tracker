@@ -272,7 +272,7 @@ class PricingSuggestionService:
         try:
             cache[key] = service_class(
                 app_session=app_session, sde_session=sde_session, market_prices=self._ledger_market_prices(),
-            ).next_fifo_unit_costs(owner_scope=owner_scope, owner_id=int(owner_id))
+            ).next_fifo_unit_costs(owner_id=int(owner_id))
         except SQLAlchemyError as exc:
             logging.warning("Pricing suggestion: FIFO cost basis unavailable for %s %s, using the asset costs: %s",
                             owner_scope, owner_id, exc)

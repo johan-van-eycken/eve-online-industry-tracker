@@ -21,6 +21,11 @@ from eve_online_industry_tracker.infrastructure.models import (
 )
 
 MODULE, T2_PRODUCT = 12200, 26888
+
+
+def _next(service, owner_id: int, type_id: int):
+    """The next FIFO lot of one type: next_fifo_unit_costs, (None, reason) without one."""
+    return service.next_fifo_unit_costs(owner_id=owner_id).get(type_id) or (None, "no open lot")
 MODULE_BP, T2_BP = 12201, 26889
 
 
@@ -108,27 +113,28 @@ def test_draining_more_than_the_queue_holds_creates_no_cost(session_provider) ->
 
     # 100 taken, 40 on hand: the rest came from stock before tracking, and nothing is left.
     assert service.rebuild(character_id=1) == []
-    cost, reason = service.next_fifo_unit_cost(owner_scope="character", owner_id=1, type_id=MODULE)
+    cost, reason = _next(service, 1, MODULE)
     assert cost is None and reason
     assert app_session.query(CharacterRealizedSalesLedgerModel).count() == 0
 
 
-def test_recorded_input_quantity_wins_over_the_sde_when_it_is_larger(session_provider) -> None:
+def test_a_recorded_input_quantity_sizes_only_what_the_sde_does_not_list(session_provider) -> None:
+    """The recorded 30 (an earlier, ME-only costing) does not override the SDE's 10;
+    an input the SDE does not list (type 99) is drawn as recorded."""
     app_session, sde_session = session_provider.app_session(), session_provider.sde_session()
     _blueprints(sde_session)
     owner = {"character_id": 1}
     app_session.add(CharacterModel(character_id=1, character_name="Builder"))
     app_session.add(_build(CharacterIndustryJobsModel, owner, 1001, "2026-03-20T00:00:00Z", 40, 16_600_000.0))
-    # 10 runs by the SDE, but the job recorded taking 30 units of the module.
     app_session.add(_t2_job(CharacterIndustryJobsModel, owner, 1002, "2026-04-01T00:00:00Z", 10,
-                            historical_input_costs={str(MODULE): {"quantity": 30, "unit_cost": 16_600_000.0}}))
+                            historical_input_costs={str(MODULE): {"quantity": 30, "unit_cost": 16_600_000.0},
+                                                    "99": {"quantity": 5, "unit_cost": 1.0}}))
     app_session.commit()
 
-    cost, source = _character_service(app_session, sde_session).next_fifo_unit_cost(
-        owner_scope="character", owner_id=1, type_id=MODULE)
+    draws = _character_service(app_session, sde_session)._replay_owner(owner_id=1)["inputs"]["draws"]
 
-    assert cost == 16_600_000.0  # 10 of the 40 left
-    assert source == "fifo: industry job 1001"
+    assert draws[(MODULE, "industry_job", 1001)] == 10  # 30 of the 40 left
+    assert _next(_character_service(app_session, sde_session), 1, MODULE) == (16_600_000.0, "fifo: industry job 1001")
 
 
 def test_next_fifo_unit_cost_is_the_oldest_open_lot_after_replay(session_provider) -> None:
@@ -138,9 +144,9 @@ def test_next_fifo_unit_cost_is_the_oldest_open_lot_after_replay(session_provide
     app_session.commit()
     service = _character_service(app_session, sde_session)
 
-    assert service.next_fifo_unit_cost(owner_scope="character", owner_id=1, type_id=MODULE) == (
+    assert _next(service, 1, MODULE) == (
         13_500_000.0, "fifo: industry job 1003")
-    cost, reason = service.next_fifo_unit_cost(owner_scope="character", owner_id=1, type_id=999)
+    cost, reason = _next(service, 1, 999)
     assert cost is None and reason
     # Read-only: no ledger rows written.
     assert app_session.query(CharacterRealizedSalesLedgerModel).count() == 0
@@ -170,7 +176,7 @@ def test_the_corporation_queue_is_drained_by_character_and_corporation_jobs(sess
     [row] = service.rebuild(corporation_id=50)
     [allocation] = row["allocation_details"]
     assert allocation["reference_id"] == 1003
-    assert service.next_fifo_unit_cost(owner_scope="corporation", owner_id=50, type_id=MODULE) == (
+    assert _next(service, 50, MODULE) == (
         15_000_000.0, "fifo: industry job 1003")
 
 
@@ -299,8 +305,7 @@ def test_a_character_job_never_drains_corp_lots_its_own_ledger_did_not_have(sess
         product_type_id=MODULE, runs=100, successful_runs=100, blueprint_material_efficiency=0))
     app_session.commit()
 
-    assert _corp_service(app_session, sde_session).next_fifo_unit_cost(
-        owner_scope="corporation", owner_id=50, type_id=34) == (4.0, "fifo: wallet transaction 4001")
+    assert _next(_corp_service(app_session, sde_session), 50, 34) == (4.0, "fifo: wallet transaction 4001")
 
 
 def test_the_opening_inventory_also_covers_what_jobs_consumed(session_provider) -> None:
@@ -336,7 +341,7 @@ def test_next_fifo_unit_costs_reads_every_type_from_one_replay(session_provider)
                  lambda conn, cursor, statement, *args: blueprint_queries.append(statement)
                  if "FROM blueprints" in statement else None)
 
-    costs = _character_service(app_session, sde_session).next_fifo_unit_costs(owner_scope="character", owner_id=1)
+    costs = _character_service(app_session, sde_session).next_fifo_unit_costs(owner_id=1)
 
     assert costs[MODULE] == (13_500_000.0, "fifo: industry job 1003")
     assert len(blueprint_queries) == 1  # the three jobs' blueprints in one batched lookup

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+from contextlib import ExitStack
 from collections import defaultdict
 from dataclasses import asdict, replace
 from datetime import datetime, timezone
@@ -22,11 +23,14 @@ from eve_online_industry_tracker.application.characters.asset_provenance import 
     LEDGER_MARKET_ESTIMATE,
     completed_job_output_lot,
     industry_job_input_quantities,
+    job_cost_reason,
     ledger_job_cost,
     stored_market_price_on_date,
 )
 from eve_online_industry_tracker.db_models import (
     Blueprints,
+    IndustryProfilesModel,
+    MapSolarSystems,
     CharacterAssetHistoryModel,
     CharacterIndustryJobsModel,
     CharacterModel,
@@ -41,6 +45,10 @@ from eve_online_industry_tracker.db_models import (
     CorporationWalletTransactionsModel,
 )
 
+
+from eve_online_industry_tracker.infrastructure.sde.industry import SdeIndustryDataMissing
+from eve_online_industry_tracker.infrastructure.sde.rig_effects import get_rig_effects_for_type_ids
+from eve_online_industry_tracker.infrastructure.sde.types import get_type_data
 
 logger = logging.getLogger(__name__)
 
@@ -697,19 +705,13 @@ class _BaseRealizedProfitLedgerService:
         rows = query.order_by(self.ledger_model.date.desc(), self.ledger_model.transaction_id.desc()).all()
         return [_normalize_untracked_payload(self._serialize_row(row)) for row in rows]
 
-    def next_fifo_unit_costs(self, *, owner_scope: str, owner_id: int) -> dict[int, tuple[float | None, str]]:
+    def next_fifo_unit_costs(self, *, owner_id: int) -> dict[int, tuple[float | None, str]]:
         """{type_id: (unit cost of its oldest lot still open after replaying
         every buy, build, sale and job input, short source label)} from one
         replay of the owner; (None, reason) when that lot has no cost. Types
         with an empty queue are left out. Read-only: no ledger rows."""
-        service_class = _SERVICE_BY_SCOPE.get(str(owner_scope))
-        if service_class is None:
-            raise ValueError(f"owner_scope must be 'character' or 'corporation', not {owner_scope!r}")
-        service = self if isinstance(self, service_class) else service_class(
-            app_session=self._app_session, sde_session=self._sde_session,
-            market_prices=self._market_prices, admin_settings=self._admin_settings)
         out: dict[int, tuple[float | None, str]] = {}
-        for type_id, lots in service._replay_owner(owner_id=int(owner_id))["lots_by_type"].items():
+        for type_id, lots in self._replay_owner(owner_id=int(owner_id))["lots_by_type"].items():
             head = next((lot for lot in lots if int(lot.quantity or 0) > 0), None)
             if head is None:
                 continue
@@ -722,17 +724,63 @@ class _BaseRealizedProfitLedgerService:
                 out[int(type_id)] = (float(head.unit_price), f"fifo: {head.source or 'unknown'}")
         return out
 
-    def next_fifo_unit_cost(
-        self, *, owner_scope: str, owner_id: int, type_id: int,
-    ) -> tuple[float | None, str | None]:
-        """next_fifo_unit_costs for one type; (None, reason) when its queue is empty."""
-        costs = self.next_fifo_unit_costs(owner_scope=owner_scope, owner_id=int(owner_id))
-        return costs.get(int(type_id)) or (
-            None, f"fifo: no open lot of type {int(type_id)} for {owner_scope} {int(owner_id)}")
+    def _facility_reductions(self, job: Any) -> tuple[float, ...] | None:
+        """(structure, rig) material reductions of the industry profile for the job's
+        facility, as the daily planner applies them (facility_bonus.sub_job_facility_reductions
+        for the job's product); None when no profile names the facility (ME only then)."""
+        from eve_online_industry_tracker.application.daily_planner import facility_bonus
 
-    def _load_input_consuming_jobs(self, *, owner_id: int) -> list[Any]:
-        """The jobs whose inputs left this owner's queue: its own jobs."""
-        return self._load_industry_jobs(owner_id=int(owner_id))
+        facility_id = _safe_int(getattr(job, "facility_id", None))
+        owner = _safe_int(getattr(job, "character_id", None)) or _safe_int(getattr(job, "installer_id", None))
+        product_type_id = int(_safe_int(getattr(job, "product_type_id", None)) or 0)
+        cache: dict[tuple, Any] = self.__dict__.setdefault("_facility_reduction_cache", {})
+        key = (facility_id, owner, product_type_id)
+        if key not in cache:
+            profile = self._facility_profile(facility_id, owner) if facility_id else None
+            if profile is None:
+                cache[key] = None
+            else:
+                entry = self._product_entry(product_type_id) if profile.get("structure_rigs") else None
+                bonuses = facility_bonus.sub_job_facility_reductions(profile, entry)
+                cache[key] = (bonuses["structure_material_reduction"], bonuses["rig_material_reduction"])
+        return cache[key]
+
+    def _facility_profile(self, facility_id: int, owner: int | None) -> dict[str, Any] | None:
+        """The industry profile payload for a facility (the owner's own first): its
+        columns, its rigs' SDE effects and its system's security, the parts the
+        producer's material reduction reads."""
+        profiles: dict[int, list[Any]] = self.__dict__.get("_profiles_by_facility")
+        if profiles is None:
+            profiles = defaultdict(list)
+            for row in self._app_session.query(IndustryProfilesModel).order_by(IndustryProfilesModel.id).all():
+                for place in {_safe_int(row.facility_id), _safe_int(row.location_id)} - {None}:
+                    profiles[int(place)].append(row)
+            self._profiles_by_facility = profiles
+        rows = sorted(profiles.get(int(facility_id), []), key=lambda row: row.character_id != owner)
+        if not rows:
+            return None
+        row = rows[0]
+        payload: dict[str, Any] = {c.name: getattr(row, c.name) for c in IndustryProfilesModel.__table__.columns}
+        rig_ids = [t for t in (row.rig_slot0_type_id, row.rig_slot1_type_id, row.rig_slot2_type_id) if t]
+        if rig_ids and self._sde_session is not None:
+            try:
+                payload["structure_rigs"] = [
+                    {"type_id": rig.get("type_id"), "effects": rig.get("effects") or [],
+                     "security_multipliers": rig.get("security_multipliers")}
+                    for rig in get_rig_effects_for_type_ids(self._sde_session, rig_ids)
+                ]
+            except SdeIndustryDataMissing as exc:
+                logger.warning("Ledger job inputs: no rig effects for profile %s (%s); no rig bonus", row.id, exc)
+            if row.system_id:
+                system = self._sde_session.query(MapSolarSystems).filter_by(id=int(row.system_id)).first()
+                if system is not None:
+                    payload["system_security_status"] = system.securityStatus
+                    payload["system_region_id"] = system.regionID
+        return payload
+
+    def _product_entry(self, type_id: int) -> dict[str, Any] | None:
+        """The product's SDE type entry (its group and category: the rig groups that cover it)."""
+        return get_type_data(self._sde_session, "en", [int(type_id)]).get(int(type_id)) if type_id else None
 
     def _input_market_price(
         self, type_id: int, job: Any, market_price_map: dict[int, float],
@@ -844,13 +892,17 @@ class _BaseRealizedProfitLedgerService:
             )
 
         # Inputs leave when the job starts, from the same queue a sale takes from.
-        consuming_jobs = self._load_input_consuming_jobs(owner_id=int(owner_id))
-        blueprints = self._load_blueprints({_safe_int(getattr(job, "blueprint_type_id", None)) for job in consuming_jobs})
-        for job in consuming_jobs:
+        blueprints = self._load_blueprints({_safe_int(getattr(job, "blueprint_type_id", None)) for job in industry_jobs})
+        me_only_jobs = 0
+        for job in industry_jobs:
             start_date = _parse_date(getattr(job, "start_date", None))
             if start_date is None:
                 continue
-            job_inputs = industry_job_input_quantities(job, sde_session=self._sde_session, blueprints=blueprints)
+            facility_reductions = self._facility_reductions(job)
+            job_inputs = industry_job_input_quantities(
+                job, sde_session=self._sde_session, blueprints=blueprints, facility_reductions=facility_reductions or ())
+            if job_inputs and facility_reductions is None:
+                me_only_jobs += 1
             for input_type_id, input_quantity in job_inputs.items():
                 events_by_type.setdefault(int(input_type_id), []).append(
                     {
@@ -874,7 +926,8 @@ class _BaseRealizedProfitLedgerService:
                 )
 
         # draws: {(type_id, reference_type, reference_id): units} the job inputs took per lot.
-        inputs: dict[str, Any] = {"jobs": set(), "drained": 0, "untracked": 0, "draws": defaultdict(int)}
+        inputs: dict[str, Any] = {"jobs": set(), "drained": 0, "untracked": 0, "draws": defaultdict(int),
+                                  "me_only_jobs": me_only_jobs}
         # One timeline over every item: a job's inputs (drawn at its start) are priced before
         # its product lot enters (at its completion), so a later job that consumes that
         # product sees the recomputed cost.
@@ -909,8 +962,7 @@ class _BaseRealizedProfitLedgerService:
             fields = ledger_job_cost(job, drawn["types"], output_quantity)
             repriced[job_id] = (job, fields)
             job_unit_cost_by_job_id[job_id] = fields["unit_build_cost"]
-            reason = "; ".join(str(r) for r in (getattr(job, "invention_cost_unknown_reason", None),
-                                                fields["materials_cost_lower_bound_reason"]) if r)
+            reason = job_cost_reason(job, fields["materials_cost_lower_bound_reason"])
             if reason:
                 cost_unknown_reason_by_job_id[job_id] = reason
             else:
@@ -1112,8 +1164,10 @@ class _BaseRealizedProfitLedgerService:
         inputs = replay["inputs"]
         if inputs["jobs"]:
             logger.info(
-                "%s %s ledger: %d industry job(s) took %d tracked input unit(s) from the FIFO queues, %d untracked",
+                "%s %s ledger: %d industry job(s) took %d tracked input unit(s) from the FIFO queues, %d untracked; "
+                "%d at a facility without an industry profile (blueprint ME only)",
                 self.owner_id_field, int(owner_id), len(inputs["jobs"]), inputs["drained"], inputs["untracked"],
+                inputs["me_only_jobs"],
             )
         if replay["uncancelled_excess"]:
             excess = sorted(replay["uncancelled_excess"].items(), key=lambda item: -item[1])
@@ -1402,20 +1456,39 @@ class CorporationRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
     owner_model = CorporationModel
 
     def rebuild(self, *, corporation_id: int | None = None) -> list[dict[str, Any]]:
-        return super().rebuild(owner_id=corporation_id)
+        """Every character's ledger lock is held, in id order, from before the first
+        write until the corp commit: the corp rebuild writes the characters' job costs,
+        and SQLite's write lock is held until that commit, so a character rebuild must
+        not get between (the caller holds the corp's lock; a character rebuild takes
+        only its own, so the order corp, then characters by id, never deadlocks)."""
+        with ExitStack() as locks:
+            for character_id in self._source_character_ids():
+                locks.enter_context(ledger_rebuild_lock("character_id", character_id))
+            return super().rebuild(owner_id=corporation_id)
+
+    def _source_character_ids(self) -> list[int]:
+        """The characters whose jobs and buys feed the corp queue (_load_character_source_lots), in id order."""
+        ids = {int(cid) for (cid,) in self._app_session.query(CharacterIndustryJobsModel.character_id).distinct()}
+        ids |= {int(cid) for (cid,) in self._app_session.query(CharacterWalletTransactionsModel.character_id)
+                .filter(CharacterWalletTransactionsModel.is_buy.is_(True)).distinct()}
+        return sorted(ids)
 
     def _rebuild_owner(self, *, owner_id: int) -> list[Any]:
         """Character job costs first (the corp's merged character lots and blended
-        transfer stamps are priced from them), then the corp ledger and its jobs."""
+        transfer stamps are priced from them), then the corp ledger and its jobs.
+        The character replays are reused by the corp's merge."""
         character_service = CharacterRealizedProfitLedgerService(
             app_session=self._app_session, sde_session=self._sde_session,
             market_prices=self._market_prices, admin_settings=self._admin_settings)
-        # The caller holds the corp's lock; the characters' are taken after it, in id order
-        # (a character rebuild takes only its own), so the two never deadlock.
-        for character_id in sorted(self._load_character_source_lots()):
-            with ledger_rebuild_lock("character_id", int(character_id)):
-                character_service._persist_job_costs(character_service._replay_owner(owner_id=int(character_id)))
-        return super()._rebuild_owner(owner_id=int(owner_id))
+        self._character_replays = {}
+        try:
+            for character_id in sorted(self._load_character_source_lots()):
+                replay = character_service._replay_owner(owner_id=int(character_id))
+                character_service._persist_job_costs(replay)
+                self._character_replays[int(character_id)] = replay
+            return super()._rebuild_owner(owner_id=int(owner_id))
+        finally:
+            self._character_replays = {}
 
     def list_rows(self, *, corporation_id: int | None = None) -> list[dict[str, Any]]:
         return super().list_rows(owner_id=corporation_id)
@@ -1656,12 +1729,12 @@ class CorporationRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
         keyed_by_type: dict[int, list[tuple[FifoLot, int]]] = defaultdict(list)
         stamped_keys_by_type: dict[int, set[tuple[Any, Any]]] = defaultdict(set)
         for character_id, lots_by_type in self._load_character_source_lots().items():
-            replay = character_service._replay_owner(owner_id=int(character_id))
+            replay = (self.__dict__.get("_character_replays") or {}).get(int(character_id)) or (
+                character_service._replay_owner(owner_id=int(character_id)))
             # The character's jobs as its own replay priced them (the source lots are repriced from this map).
             for job_id, (job, fields) in replay["repriced"].items():
                 job_unit_costs[int(job_id)] = fields["unit_build_cost"]
-                reason = "; ".join(str(r) for r in (getattr(job, "invention_cost_unknown_reason", None),
-                                                    fields["materials_cost_lower_bound_reason"]) if r)
+                reason = job_cost_reason(job, fields["materials_cost_lower_bound_reason"])
                 if reason:
                     job_cost_reasons[int(job_id)] = reason
                 else:
@@ -1923,10 +1996,6 @@ class CorporationRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
         )
 
 
-_SERVICE_BY_SCOPE: dict[str, type[_BaseRealizedProfitLedgerService]] = {
-    "character": CharacterRealizedProfitLedgerService,
-    "corporation": CorporationRealizedProfitLedgerService,
-}
 
 
 def summarize_realized_profit_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:

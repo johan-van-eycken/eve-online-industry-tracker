@@ -154,7 +154,7 @@ def test_a_read_only_fifo_lookup_does_not_write_job_costs(session_provider) -> N
     app_session, sde_session = session_provider.app_session(), session_provider.sde_session()
     _seed(app_session, sde_session)
 
-    assert _service(app_session, sde_session).next_fifo_unit_costs(owner_scope="character", owner_id=1)[MODULE] == (
+    assert _service(app_session, sde_session).next_fifo_unit_costs(owner_id=1)[MODULE] == (
         7.5, "fifo: industry job 1001")
     app_session.commit()
     assert _jobs(app_session)[1001].unit_build_cost == 16_600_002.5
@@ -364,3 +364,99 @@ def test_a_sync_change_to_a_ledger_priced_job_makes_the_ledger_stale(session_pro
 
     assert job.unit_build_cost == 15.0  # (75 + 25 + 50) / 10
     assert service.stale_resolved_cost_owner_ids(service.list_rows(character_id=1)) == {1}
+
+
+# --- the facility's material bonus, the lock order ------------------------------------
+
+import threading  # noqa: E402
+
+from eve_online_industry_tracker.application.characters import realized_profit as rp  # noqa: E402
+from eve_online_industry_tracker.infrastructure.models import IndustryProfilesModel  # noqa: E402
+
+RAITARU = 1051424764880
+
+
+def _facility_job(app_session, sde_session, *, profile: bool, recorded: int | None = None) -> None:
+    """Job 1001: 10 runs of a blueprint taking 100 Tritanium a run, ME 0, at the Raitaru."""
+    sde_session.add(Blueprints(blueprintTypeID=MODULE_BP, maxProductionLimit=100, activities={"manufacturing": {
+        "materials": [{"typeID": TRITANIUM, "quantity": 100}], "products": [{"typeID": MODULE, "quantity": 1}]}}))
+    sde_session.commit()
+    app_session.add(CharacterModel(character_id=1, character_name="Builder"))
+    if profile:
+        app_session.add(IndustryProfilesModel(character_id=1, profile_name="Raitaru", facility_id=RAITARU,
+                                              material_efficiency_bonus=0.01))
+    app_session.add(CharacterWalletTransactionsModel(
+        character_id=1, transaction_id=501, date="2026-02-01T00:00:00Z", is_buy=True, is_personal=True,
+        quantity=5000, type_id=TRITANIUM, type_name="Tritanium", unit_price=5.0, total_price=25000.0))
+    app_session.add(CharacterIndustryJobsModel(
+        character_id=1, job_id=1001, status="delivered", activity_id=1, start_date="2026-03-01T00:00:00Z",
+        end_date="2026-03-20T00:00:00Z", completed_date="2026-03-20T00:00:00Z", blueprint_type_id=MODULE_BP,
+        product_type_id=MODULE, runs=10, successful_runs=10, cost=0.0, blueprint_material_efficiency=0,
+        facility_id=RAITARU, output_quantity=10, unit_build_cost=1.0,
+        **({"build_cost_source": "ledger_fifo", "historical_input_costs": {str(TRITANIUM): {
+            "quantity": recorded, "unit_cost": 5.0, "source": "ledger_fifo", "lots": []}}} if recorded else {})))
+    app_session.commit()
+
+
+def test_a_job_at_a_structure_with_a_material_bonus_drains_the_reduced_quantity(session_provider) -> None:
+    app_session, sde_session = session_provider.app_session(), session_provider.sde_session()
+    _facility_job(app_session, sde_session, profile=True)
+
+    replay = _service(app_session, sde_session)._replay_owner(owner_id=1)
+
+    assert replay["inputs"]["draws"][(TRITANIUM, "wallet_transaction", 501)] == 990  # 1000 less the Raitaru's 1 %
+    assert replay["inputs"]["me_only_jobs"] == 0
+
+
+def test_an_earlier_me_only_quantity_does_not_keep_the_overdraw(session_provider) -> None:
+    app_session, sde_session = session_provider.app_session(), session_provider.sde_session()
+    _facility_job(app_session, sde_session, profile=True, recorded=1000)
+
+    _service(app_session, sde_session).rebuild(character_id=1)
+    job = _jobs(app_session)[1001]
+
+    assert job.historical_input_costs[str(TRITANIUM)]["quantity"] == 990
+    assert job.materials_cost == 990 * 5.0
+
+
+def test_a_job_at_a_facility_without_a_profile_uses_the_blueprint_me_only(session_provider) -> None:
+    app_session, sde_session = session_provider.app_session(), session_provider.sde_session()
+    _facility_job(app_session, sde_session, profile=False)
+
+    replay = _service(app_session, sde_session)._replay_owner(owner_id=1)
+
+    assert replay["inputs"]["draws"][(TRITANIUM, "wallet_transaction", 501)] == 1000
+    assert replay["inputs"]["me_only_jobs"] == 1
+
+
+def test_a_corp_rebuild_holds_every_character_lock_in_id_order_until_its_commit(session_provider, monkeypatch) -> None:
+    app_session, sde_session = session_provider.app_session(), session_provider.sde_session()
+    _corp_seed(app_session, sde_session)
+    app_session.add(CharacterWalletTransactionsModel(
+        character_id=3, transaction_id=502, date="2026-02-01T00:00:00Z", is_buy=True, is_personal=True,
+        quantity=1, type_id=TRITANIUM, unit_price=5.0, total_price=5.0))
+    app_session.commit()
+    events: list[str] = []
+
+    class _Recording:
+        def __init__(self, name):
+            self.name, self._lock = name, threading.Lock()
+
+        def __enter__(self):
+            self._lock.acquire()
+            events.append(f"acquire {self.name}")
+
+        def __exit__(self, *exc):
+            events.append(f"release {self.name}")
+            self._lock.release()
+
+    locks: dict[tuple, _Recording] = {}
+    monkeypatch.setattr(rp, "ledger_rebuild_lock",
+                        lambda field, owner: locks.setdefault((field, owner), _Recording(f"{field}:{owner}")))
+    real_commit = app_session.commit
+    monkeypatch.setattr(app_session, "commit", lambda: (events.append("commit"), real_commit())[1])
+
+    _corp_service(app_session, sde_session).rebuild(corporation_id=CORP)
+
+    assert events == ["acquire character_id:1", "acquire character_id:3", "commit",
+                      "release character_id:3", "release character_id:1"]

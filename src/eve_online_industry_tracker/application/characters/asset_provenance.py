@@ -34,7 +34,7 @@ from eve_online_industry_tracker.infrastructure.models import (
 from eve_online_industry_tracker.infrastructure.sde.blueprints import (
     get_blueprint_manufacturing_data,
     get_invention_source_blueprint_ids,
-    me_adjusted_batch_quantity,
+    reduced_batch_quantity,
     round_material_quantity as _round_material_quantity,
 )
 from eve_online_industry_tracker.infrastructure.sde.decryptors import get_t2_invention_decryptors
@@ -445,14 +445,20 @@ def industry_job_material_type_ids(
 
 def industry_job_input_quantities(
     job: Any, *, sde_session: Any, blueprints: Mapping[int, Any] | None = None,
+    facility_reductions: Iterable[float] = (),
 ) -> dict[int, int]:
     """{input type: units a manufacturing job took when it started}: the SDE
-    materials x runs at the job's ME, raised to what the job's
-    historical_input_costs recorded where that is more (a recorded quantity
-    covers only the tracked stock, so it is a floor). {} for any other
-    activity: their historical_input_costs hold the blueprint's manufacturing
-    materials, not what the job used. `blueprints` ({blueprintTypeID: row},
-    prefetched by the caller) saves the per-job SDE lookup."""
+    materials x runs reduced as the producer and the daily planner reduce them
+    (facility_bonus.combine_reductions of the blueprint ME and the facility's
+    `facility_reductions`, structure and rig, then reduced_batch_quantity). An
+    input the SDE does not list (or a job without its blueprint) is drawn as its
+    historical_input_costs recorded it; a recorded quantity never overrides the
+    SDE's, so an earlier costing at ME only cannot keep an overdraw alive. {} for
+    any other activity: their historical_input_costs hold the blueprint's
+    manufacturing materials, not what the job used. `blueprints`
+    ({blueprintTypeID: row}, prefetched by the caller) saves the per-job SDE lookup."""
+    from eve_online_industry_tracker.application.daily_planner.facility_bonus import combine_reductions
+
     raw = _industry_job_raw_payload(job)
     activity_id = _safe_int(getattr(job, "activity_id", None)) or _safe_int(raw.get("activity_id"))
     if activity_id not in {None, 1}:
@@ -461,6 +467,7 @@ def industry_job_input_quantities(
     me = _safe_int(getattr(job, "blueprint_material_efficiency", None)
                    or raw.get("blueprint_material_efficiency") or raw.get("material_efficiency")) or 0
     runs = _industry_job_runs(job)
+    reduction = combine_reductions([float(me) / 100.0, *facility_reductions])
     out: dict[int, int] = {}
     if blueprints is not None:
         bp = blueprints.get(int(blueprint_type_id or 0))
@@ -468,13 +475,13 @@ def industry_job_input_quantities(
         bp = sde_session.query(Blueprints).filter_by(blueprintTypeID=int(blueprint_type_id)).first() if blueprint_type_id else None
     for material in (_get_mfg_activity(getattr(bp, "activities", None)) or {}).get("materials") or []:
         type_id = _safe_int(material.get("typeID")) if isinstance(material, dict) else None
-        quantity = me_adjusted_batch_quantity(_safe_int(material.get("quantity")) or 0, runs, me) if type_id else 0
+        quantity = reduced_batch_quantity(_safe_int(material.get("quantity")) or 0, runs, reduction) if type_id else 0
         if quantity > 0:
             out[int(type_id)] = out.get(int(type_id), 0) + quantity
     recorded = getattr(job, "historical_input_costs", None)
     for type_key, detail in (recorded.items() if isinstance(recorded, dict) else ()):
         type_id, quantity = _safe_int(type_key), _safe_int(detail.get("quantity")) if isinstance(detail, dict) else None
-        if type_id and quantity and quantity > out.get(type_id, 0):
+        if type_id and quantity and type_id not in out:
             out[type_id] = int(quantity)
     return out
 
@@ -483,11 +490,6 @@ def industry_job_input_quantities(
 #: the job sync keeps such a cost (keep_ledger_job_cost).
 LEDGER_FIFO_SOURCE = "ledger_fifo"
 LEDGER_MARKET_ESTIMATE = "market_estimate"
-LEDGER_JOB_COST_FIELDS = (
-    "materials_cost", "historical_materials_cost", "historical_material_cost_source",
-    "historical_material_coverage_fraction", "historical_input_costs", "materials_cost_lower_bound_reason",
-    "total_build_cost", "unit_build_cost", "build_cost_source",
-)
 
 
 def is_ledger_priced(job: Any) -> bool:
@@ -527,6 +529,11 @@ def keep_ledger_job_cost(row: dict[str, Any], existing_job: Any) -> None:
         invention_cost=row.get("invention_cost"), output_quantity=row.get("output_quantity"))
     row["total_build_cost"] = total
     row["unit_build_cost"] = unit if unit is not None else getattr(existing_job, "unit_build_cost", None)
+
+
+def job_cost_reason(job: Any, materials_reason: Any) -> str | None:
+    """Why a job's build cost is partly unknown: its invention and materials reasons, joined."""
+    return "; ".join(str(r) for r in (getattr(job, "invention_cost_unknown_reason", None), materials_reason) if r) or None
 
 
 def ledger_job_cost(job: Any, inputs_by_type: Mapping[int, Mapping[str, Any]], output_quantity: int) -> dict[str, Any]:
@@ -839,10 +846,7 @@ def resnapshot_jobs_without_decryptor_choice(
                     invention_cost=snapshot.get("invention_cost"), output_quantity=output_quantity)
                 snapshot = {
                     **snapshot,
-                    **{name: getattr(row, name) for name in (
-                        "materials_cost", "historical_materials_cost", "historical_material_cost_source",
-                        "historical_material_coverage_fraction", "historical_input_costs",
-                        "materials_cost_lower_bound_reason")},
+                    **{name: getattr(row, name) for name in LEDGER_MATERIAL_FIELDS},
                     "output_quantity": output_quantity,
                     "total_cost": total,
                     "unit_cost": unit if unit is not None else row.unit_build_cost,

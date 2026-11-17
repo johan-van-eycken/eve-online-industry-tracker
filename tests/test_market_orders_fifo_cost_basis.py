@@ -67,7 +67,7 @@ def test_the_fifo_is_read_once_per_owner_per_request(session_provider, monkeypat
     for type_id in (MODULE, OTHER, MODULE):
         service._get_cost_basis(character_id=1, type_id=type_id, corporation_id=CORP)
 
-    assert calls == [(("owner_id", CORP), ("owner_scope", "corporation"))]
+    assert calls == [(("owner_id", CORP),)]
 
 
 def test_a_failing_fifo_lookup_falls_back_to_the_old_chain(session_provider, monkeypatch, caplog) -> None:
