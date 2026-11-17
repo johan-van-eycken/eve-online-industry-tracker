@@ -73,9 +73,6 @@ class FifoLot:
     #: The corp asset history row of a blended transfer lot (it names no
     #: job): the ledger's stale check compares its stamped cost.
     asset_history_id: Optional[int] = None
-    #: The corp asset history row of a transfer stamp: the character ledger's
-    #: transfer-out event names the same row (realized_profit).
-    transfer_stamp_id: Optional[int] = None
 
 
 def _parse_date(value: Any) -> Optional[datetime]:

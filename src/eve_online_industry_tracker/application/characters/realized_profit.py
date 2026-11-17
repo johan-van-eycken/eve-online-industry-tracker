@@ -558,31 +558,6 @@ def _normalize_untracked_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
-def _transfer_stamp_rows(app_session: Any) -> list[Any]:
-    """Every corp's asset history rows stamped as transferred from a character,
-    one per item (its earliest costed row: every asset refresh copies a stack
-    again), oldest observed first."""
-    query = app_session.query(CorporationAssetHistoryModel).filter(
-        CorporationAssetHistoryModel.acquisition_unit_cost.isnot(None),
-        CorporationAssetHistoryModel.acquisition_source.like("%transferred%"),
-    )
-    out: list[Any] = []
-    seen_items: set[tuple[int, int]] = set()
-    for row in query.order_by(CorporationAssetHistoryModel.observed_at, CorporationAssetHistoryModel.id).all():
-        item_id = _safe_int(getattr(row, "item_id", None))
-        if item_id is not None:
-            if (int(row.corporation_id), item_id) in seen_items:
-                continue
-            seen_items.add((int(row.corporation_id), item_id))
-        type_id = _safe_int(getattr(row, "type_id", None))
-        unit_cost = _safe_float(getattr(row, "acquisition_unit_cost", None))
-        quantity = _safe_int(getattr(row, "quantity", None))
-        if type_id is None or type_id <= 0 or unit_cost is None or unit_cost <= 0 or not quantity or quantity <= 0:
-            continue
-        out.append(row)
-    return out
-
-
 class _BaseRealizedProfitLedgerService:
     owner_id_field: str
     ledger_model: Any
@@ -821,17 +796,6 @@ class _BaseRealizedProfitLedgerService:
                     }
                 )
 
-        # Units moved to a corp hangar leave when the corp first saw the stack.
-        for stamp in self._load_transfer_out_stamps(owner_id=int(owner_id)):
-            events_by_type.setdefault(int(stamp.type_id), []).append(
-                {
-                    "kind": "transfer",
-                    "dt": _parse_date(stamp.observed_at),
-                    "sort_id": int(stamp.id),
-                    "quantity": int(stamp.quantity),
-                }
-            )
-
         for ah_type_id, ah_lots in asset_history_lots.items():
             for lot in ah_lots:
                 events_by_type.setdefault(int(ah_type_id), []).append(
@@ -845,9 +809,7 @@ class _BaseRealizedProfitLedgerService:
 
         sales: list[tuple[Any, dict[str, Any]]] = []
         # draws: {(type_id, reference_type, reference_id): units} the job inputs took per lot.
-        # transfers: {stamp row id: [(reference_type, reference_id) or None when untracked, units]}.
-        inputs: dict[str, Any] = {"jobs": set(), "drained": 0, "untracked": 0, "draws": defaultdict(int),
-                                  "transfers": {}, "transfer_draws": defaultdict(int), "transferred": 0, "transfer_untracked": 0}
+        inputs: dict[str, Any] = {"jobs": set(), "drained": 0, "untracked": 0, "draws": defaultdict(int)}
         for type_id, events in events_by_type.items():
             events.sort(key=lambda item: (item.get("dt") or datetime.min, int(item.get("sort_id") or 0)))
             lots = lots_by_type.setdefault(int(type_id), [])
@@ -913,20 +875,6 @@ class _BaseRealizedProfitLedgerService:
                             inputs["draws"][(int(type_id), entry["reference_type"], int(entry["reference_id"]))] += int(entry["quantity"])
                     continue
 
-                if kind == "transfer":
-                    taken = _consume_lots(lots, quantity=int(event["quantity"]))
-                    pieces = [((entry["reference_type"], entry["reference_id"]), int(entry["quantity"]))
-                              for entry in taken["allocations"]]
-                    if taken["unpriced_quantity"]:
-                        pieces.append((None, int(taken["unpriced_quantity"])))
-                    inputs["transfers"][int(event["sort_id"])] = pieces
-                    for (reference_type, reference_id), quantity in pieces[:len(taken["allocations"])]:
-                        if reference_id is not None:
-                            inputs["transfer_draws"][(int(type_id), reference_type, int(reference_id))] += quantity
-                    inputs["transferred"] += int(taken["priced_quantity"])
-                    inputs["transfer_untracked"] += int(taken["unpriced_quantity"])
-                    continue
-
                 if kind != "sell":
                     continue
 
@@ -967,12 +915,6 @@ class _BaseRealizedProfitLedgerService:
             logger.info(
                 "%s %s ledger: %d industry job(s) took %d tracked input unit(s) from the FIFO queues, %d untracked",
                 self.owner_id_field, int(owner_id), len(inputs["jobs"]), inputs["drained"], inputs["untracked"],
-            )
-        if inputs["transfers"]:
-            logger.info(
-                "%s %s ledger: %d transfer(s) to a corp hangar took %d tracked unit(s) from the FIFO queues, %d untracked",
-                self.owner_id_field, int(owner_id), len(inputs["transfers"]), inputs["transferred"],
-                inputs["transfer_untracked"],
             )
         if replay["uncancelled_excess"]:
             excess = sorted(replay["uncancelled_excess"].items(), key=lambda item: -item[1])
@@ -1111,11 +1053,6 @@ class _BaseRealizedProfitLedgerService:
         does); returns {type_id: stamped units left uncancelled}."""
         return {}
 
-    def _load_transfer_out_stamps(self, *, owner_id: int) -> list[Any]:
-        """The corp asset history stamps of units this owner moved to a corp
-        hangar (the character does)."""
-        return []
-
     def _load_owner_context(self, *, owner_id: int) -> dict[str, Any]:
         return {}
 
@@ -1204,21 +1141,6 @@ class CharacterRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
 
     def _extra_row_fields(self, owner_context: dict[str, Any]) -> dict[str, Any]:
         return {"fee_inputs": owner_context.get("fee_inputs")}
-
-    def _load_transfer_out_stamps(self, *, owner_id: int) -> list[Any]:
-        """The corp transfer stamps naming one of this character's jobs or buys."""
-        if getattr(self, "_stamp_rows", None) is None:
-            self._stamp_rows = _transfer_stamp_rows(self._app_session)  # once per service, for every character
-        job_ids = {int(job_id) for (job_id,) in self._app_session.query(CharacterIndustryJobsModel.job_id)
-                   .filter(CharacterIndustryJobsModel.character_id == int(owner_id))}
-        tx_ids = {int(tx_id) for (tx_id,) in self._app_session.query(CharacterWalletTransactionsModel.transaction_id)
-                  .filter(CharacterWalletTransactionsModel.character_id == int(owner_id),
-                          CharacterWalletTransactionsModel.is_buy.is_(True))}
-        return [
-            row for row in self._stamp_rows
-            if (row.acquisition_reference_type == "industry_job" and _safe_int(row.acquisition_reference_id) in job_ids)
-            or (row.acquisition_reference_type == "wallet_transaction" and _safe_int(row.acquisition_reference_id) in tx_ids)
-        ]
 
     def _load_wallet_transactions(self, *, owner_id: int) -> list[Any]:
         return (
@@ -1368,15 +1290,30 @@ class CorporationRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
         Only transfer rows: the corp's own jobs and buys are already events. Every asset
         refresh copies a stack again, so one item is one lot, from its earliest costed row.
         """
+        rows = (
+            self._app_session.query(CorporationAssetHistoryModel)
+            .filter(
+                CorporationAssetHistoryModel.corporation_id == int(owner_id),
+                CorporationAssetHistoryModel.acquisition_unit_cost.isnot(None),
+                CorporationAssetHistoryModel.acquisition_source.like("%transferred%"),
+            )
+            .order_by(CorporationAssetHistoryModel.observed_at, CorporationAssetHistoryModel.id)
+            .all()
+        )
         lots_by_type: dict[int, list[FifoLot]] = {}
         blended_reason_by_type_id: dict[int, str] | None = None
-        # Every corp's stamps, read once per service: the character replays reuse them.
-        if getattr(self, "_stamp_rows", None) is None:
-            self._stamp_rows = _transfer_stamp_rows(self._app_session)
-        for row in (r for r in self._stamp_rows if int(r.corporation_id) == int(owner_id)):
-            type_id = int(row.type_id)
-            unit_cost = float(row.acquisition_unit_cost)
-            quantity = int(row.quantity)
+        seen_item_ids: set[int] = set()
+        for row in rows:
+            item_id = _safe_int(getattr(row, "item_id", None))
+            if item_id is not None:
+                if item_id in seen_item_ids:
+                    continue
+                seen_item_ids.add(item_id)
+            type_id = _safe_int(getattr(row, "type_id", None))
+            unit_cost = _safe_float(getattr(row, "acquisition_unit_cost", None))
+            quantity = _safe_int(getattr(row, "quantity", None))
+            if type_id is None or type_id <= 0 or unit_cost is None or unit_cost <= 0 or not quantity or quantity <= 0:
+                continue
             acquisition_date = getattr(row, "acquisition_date", None) or getattr(row, "observed_at", None)
             source = str(getattr(row, "acquisition_source", None) or "asset_history")
             reference_id = _safe_int(getattr(row, "acquisition_reference_id", None))
@@ -1398,7 +1335,6 @@ class CorporationRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
                     asset_history_id=(
                         _safe_int(getattr(row, "id", None)) if _is_blended_transfer_lot(source, reference_type) else None
                     ),
-                    transfer_stamp_id=_safe_int(getattr(row, "id", None)),
                 )
             )
         return lots_by_type
@@ -1490,7 +1426,6 @@ class CorporationRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
         character_service = CharacterRealizedProfitLedgerService(
             app_session=self._app_session, sde_session=self._sde_session,
             market_prices=self._market_prices, admin_settings=self._admin_settings)
-        character_service._stamp_rows = getattr(self, "_stamp_rows", None)
         uncancelled: dict[int, int] = defaultdict(int)
         for character_id, lots_by_type in self._load_character_source_lots().items():
             replay = character_service._replay_owner(owner_id=int(character_id))
@@ -1499,32 +1434,32 @@ class CorporationRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
                 for entry in allocation["allocations"]:
                     if entry["reference_id"] is not None:
                         taken[(int(tx.type_id), entry["reference_type"], int(entry["reference_id"]))] += int(entry["quantity"])
-            transfers = replay["inputs"]["transfers"]
-            for key, quantity in replay["inputs"]["transfer_draws"].items():
-                taken[key] += int(quantity)
             for type_id, lots in lots_by_type.items():
                 type_lots = asset_history_lots.setdefault(int(type_id), [])
-                source_by_key = {(lot.reference_type, lot.reference_id): lot for lot in lots}
-                stamps = [lot for lot in type_lots if (lot.reference_type, lot.reference_id) in source_by_key]
+                keys = {(lot.reference_type, lot.reference_id) for lot in lots}
+                stamps = [lot for lot in type_lots if (lot.reference_type, lot.reference_id) in keys]
                 stamped_keys = {(lot.reference_type, lot.reference_id) for lot in stamps}
                 stamp_ids = {id(lot) for lot in stamps}
                 type_lots[:] = [lot for lot in type_lots if id(lot) not in stamp_ids]
-                # Each stamp's units are the units the character's own FIFO moved out for it,
-                # at the stamp's place in the corp queue.
-                for stamp in stamps:
-                    for key, quantity in transfers.get(stamp.transfer_stamp_id, [(None, int(stamp.quantity))]):
-                        source_lot = source_by_key.get(key) if key is not None else None
-                        if source_lot is None:
-                            if key is None:
-                                uncancelled[int(type_id)] += int(quantity)
-                            type_lots.append(replace(stamp, quantity=int(quantity)))
-                            continue
-                        type_lots.append(replace(source_lot, quantity=int(quantity), acquisition_date=stamp.acquisition_date))
+                residuals = []
                 for lot in lots:
-                    key = (lot.reference_type, lot.reference_id)
                     left = int(lot.quantity) - taken.get((int(type_id), lot.reference_type, int(lot.reference_id or 0)), 0)
-                    if left > 0 and key not in stamped_keys:
-                        type_lots.append(replace(lot, quantity=left))
+                    if left > 0:
+                        residuals.append(replace(lot, quantity=left))
+                # Each stamp's units are the oldest residual units, at the stamp's place in the queue.
+                for stamp in stamps:
+                    to_place = int(stamp.quantity)
+                    while to_place and residuals:
+                        arrived = min(to_place, int(residuals[0].quantity))
+                        type_lots.append(replace(residuals[0], quantity=arrived, acquisition_date=stamp.acquisition_date))
+                        to_place -= arrived
+                        residuals[0] = replace(residuals[0], quantity=int(residuals[0].quantity) - arrived)
+                        if not residuals[0].quantity:
+                            residuals.pop(0)
+                    if to_place:
+                        uncancelled[int(type_id)] += to_place
+                        type_lots.append(replace(stamp, quantity=to_place))
+                type_lots.extend(lot for lot in residuals if (lot.reference_type, lot.reference_id) not in stamped_keys)
         return dict(uncancelled)
 
     def _load_owner_context(self, *, owner_id: int) -> dict[str, Any]:
