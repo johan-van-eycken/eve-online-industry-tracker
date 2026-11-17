@@ -5,7 +5,7 @@ import logging
 import threading
 from collections import defaultdict
 from dataclasses import asdict, replace
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import or_
@@ -18,8 +18,12 @@ from eve_online_industry_tracker.application.characters.asset_provenance import 
     FifoLot,
     _safe_float,
     _safe_int,
+    LEDGER_FIFO_SOURCE,
+    LEDGER_MARKET_ESTIMATE,
     completed_job_output_lot,
     industry_job_input_quantities,
+    ledger_job_cost,
+    stored_market_price_on_date,
 )
 from eve_online_industry_tracker.db_models import (
     Blueprints,
@@ -175,6 +179,13 @@ def _with_cost_basis(allocations: list[dict[str, Any]], unit_cost_by_job_id: dic
             entry["cost_basis"] = _safe_float(entry.get("unit_cost"))
 
 
+def _event_ts(dt: datetime | None) -> float:
+    """A sortable timestamp for an event date (naive dates read as UTC; none first)."""
+    if dt is None:
+        return float("-inf")
+    return (dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt).timestamp()
+
+
 def _existed_by(lot: FifoLot, observed_at: Any) -> bool:
     """Whether `lot` was acquired no later than `observed_at` (unknown: yes)."""
     acquired, observed = _parse_date(lot.acquisition_date), _parse_date(observed_at)
@@ -203,7 +214,12 @@ def _reprice_job_lot(lot: FifoLot, unit_cost_by_job_id: dict[int, float]) -> Fif
     return replace(lot, unit_price=float(current))
 
 
-def _opening_inventory_lot(events: list[dict[str, Any]]) -> FifoLot | None:
+def _opening_inventory_lot(
+    events: list[dict[str, Any]], job_costs: dict[int, float] | None = None, used: dict[int, float] | None = None,
+) -> FifoLot | None:
+    """The estimated stock from before tracking, at the first known unit cost. A job's
+    cost is taken from `job_costs` when given (its ledger cost); the job that priced the
+    lot is recorded in `used`."""
     running_balance = 0
     min_balance = 0
     first_known_unit_cost: float | None = None
@@ -222,11 +238,14 @@ def _opening_inventory_lot(events: list[dict[str, Any]]) -> FifoLot | None:
                 first_known_date = getattr(tx, "date", None)
             running_balance += int(quantity)
         elif kind == "job":
-            unit_cost = _safe_float(event.get("unit_cost"))
+            job = event.get("job")
+            job_id = int(_safe_int(getattr(job, "job_id", None)) or 0)
+            unit_cost = _safe_float((job_costs or {}).get(job_id, event.get("unit_cost")))
             if first_known_unit_cost is None and unit_cost is not None and unit_cost > 0 and quantity > 0:
                 first_known_unit_cost = float(unit_cost)
-                job = event.get("job")
                 first_known_date = getattr(job, "completed_date", None) or getattr(job, "end_date", None)
+                if used is not None:
+                    used[job_id] = float(unit_cost)
             running_balance += int(quantity)
         elif kind == "asset_history":
             lot = event.get("lot")
@@ -708,17 +727,46 @@ class _BaseRealizedProfitLedgerService:
         """The jobs whose inputs left this owner's queue: its own jobs."""
         return self._load_industry_jobs(owner_id=int(owner_id))
 
+    def _input_market_price(
+        self, type_id: int, job: Any, market_price_map: dict[int, float],
+        memo: dict[tuple[int, str], float | None],
+    ) -> float | None:
+        """The market fallback for job input units the queue did not hold, as the job
+        sync prices uncovered inputs: the stored daily close on or before the job's start
+        (backfill_historical_market_costs), else the current market price, else the unit
+        cost the job already recorded for that input (its own market estimate once the
+        ledger priced it); None when there is none."""
+        day = str(getattr(job, "start_date", None) or "")[:10]
+        key = (int(type_id), day)
+        if key not in memo:
+            price = stored_market_price_on_date(
+                app_session=self._app_session, type_id=int(type_id), target_date=day) if day else None
+            memo[key] = price if price is not None else market_price_map.get(int(type_id))
+        if memo[key] is not None:
+            return memo[key]
+        recorded = (getattr(job, "historical_input_costs", None) or {}).get(str(int(type_id)))
+        if not isinstance(recorded, dict):
+            return None
+        if recorded.get("source") == LEDGER_FIFO_SOURCE:
+            estimates = [lot for lot in recorded.get("lots") or [] if lot.get("source") == LEDGER_MARKET_ESTIMATE]
+            return _safe_float(estimates[0].get("unit_cost")) if estimates else None
+        price = _safe_float(recorded.get("unit_cost"))
+        return price if price is not None and price > 0 else None
+
     def _load_blueprints(self, blueprint_type_ids: set[int | None]) -> dict[int, Any]:
-        """{blueprintTypeID: SDE row} in one query per chunk, for a replay."""
-        ids = sorted(i for i in blueprint_type_ids if i) if self._sde_session is not None else []
-        out: dict[int, Any] = {}
+        """{blueprintTypeID: SDE row} in one query per chunk, kept per service (static SDE data)."""
+        cache: dict[int, Any] = self.__dict__.setdefault("_blueprint_cache", {})
+        ids = sorted(i for i in blueprint_type_ids if i and i not in cache) if self._sde_session is not None else []
+        out = cache
         for start in range(0, len(ids), _SQL_IN_CHUNK):
             for bp in self._sde_session.query(Blueprints).filter(
                     Blueprints.blueprintTypeID.in_(ids[start:start + _SQL_IN_CHUNK])).all():
                 out[int(bp.blueprintTypeID)] = bp
         return out
 
-    def _replay_owner(self, *, owner_id: int) -> dict[str, Any]:
+    def _replay_owner(
+        self, *, owner_id: int, _opening_job_costs: dict[int, float] | None = None, _pass: int = 1,
+    ) -> dict[str, Any]:
         """Replay the owner's events per item in (date, id) order through one
         FIFO queue: buys, finished jobs and asset-history lots fill it; sales
         and industry job inputs (taken when the job starts) drain it, oldest
@@ -729,20 +777,20 @@ class _BaseRealizedProfitLedgerService:
         industry_jobs = self._load_industry_jobs(owner_id=int(owner_id))
         asset_history_lots = self._load_asset_history_lots(owner_id=int(owner_id))
 
-        uncancelled_excess = self._merge_character_lots(asset_history_lots)
-
         # A lot that points at an industry job is priced from the job's
         # current unit_build_cost, not the cost stamped when the lot was
         # written: a job re-snapshotted since (the decryptor re-snapshot, a
         # later job refresh) would otherwise leave the lot at a stale lower
-        # bound with its reason gone.
+        # bound with its reason gone. Jobs priced in this replay (or, for the
+        # corp, in the character replays of the merge) overlay these maps.
         job_unit_cost_by_job_id = self._load_job_unit_cost_by_job_id()
+        cost_unknown_reason_by_job_id = self._load_cost_unknown_reason_by_job_id()
+        uncancelled_excess = self._merge_character_lots(
+            asset_history_lots, job_unit_cost_by_job_id, cost_unknown_reason_by_job_id)
         asset_history_lots = {
             type_id: [_reprice_job_lot(lot, job_unit_cost_by_job_id) for lot in lots]
             for type_id, lots in asset_history_lots.items()
         }
-
-        cost_unknown_reason_by_job_id = self._load_cost_unknown_reason_by_job_id()
 
         lots_by_type: dict[int, list[FifoLot]] = {}
         events_by_type: dict[int, list[dict[str, Any]]] = {}
@@ -802,6 +850,7 @@ class _BaseRealizedProfitLedgerService:
                         "kind": "consume",
                         "dt": start_date,
                         "sort_id": int(_safe_int(getattr(job, "job_id", None)) or 0),
+                        "job": job,
                         "quantity": int(input_quantity),
                     }
                 )
@@ -817,16 +866,53 @@ class _BaseRealizedProfitLedgerService:
                     }
                 )
 
-        sales: list[tuple[Any, dict[str, Any]]] = []
         # draws: {(type_id, reference_type, reference_id): units} the job inputs took per lot.
         inputs: dict[str, Any] = {"jobs": set(), "drained": 0, "untracked": 0, "draws": defaultdict(int)}
-        for type_id, events in events_by_type.items():
-            events.sort(key=lambda item: (item.get("dt") or datetime.min, int(item.get("sort_id") or 0)))
-            lots = lots_by_type.setdefault(int(type_id), [])
-            opening_lot = _opening_inventory_lot(events)
+        # One timeline over every item: a job's inputs (drawn at its start) are priced before
+        # its product lot enters (at its completion), so a later job that consumes that
+        # product sees the recomputed cost.
+        timeline: list[tuple[float, int, int, int, dict[str, Any]]] = []
+        opening_job_costs_used: dict[int, float] = {}
+        for type_order, (type_id, events) in enumerate(events_by_type.items()):
+            events.sort(key=lambda item: (_event_ts(item.get("dt")), int(item.get("sort_id") or 0)))
+            opening_lot = _opening_inventory_lot(events, _opening_job_costs, opening_job_costs_used)
+            lots_by_type.setdefault(int(type_id), [])
             if opening_lot is not None:
-                lots.append(opening_lot)
-            for event in events:
+                lots_by_type[int(type_id)].append(opening_lot)
+            timeline.extend((_event_ts(event.get("dt")), int(event.get("sort_id") or 0), type_order, position, event)
+                            for position, event in enumerate(events))
+        timeline.sort(key=lambda item: item[:4])
+        type_ids = list(events_by_type)
+        # job_id -> {"job": job, "types": {type_id: {"quantity", "lots"}}}: what each job's inputs drew.
+        job_inputs: dict[int, dict[str, Any]] = {}
+        repriced: dict[int, tuple[Any, dict[str, Any]]] = {}
+        sales_by_type: dict[int, list[tuple[Any, dict[str, Any]]]] = defaultdict(list)
+        fallback_prices: dict[tuple[int, str], float | None] = {}
+        unpriced_jobs: set[int] = set()
+
+        def _reprice(job: Any, output_quantity: int) -> float | None:
+            job_id = int(_safe_int(getattr(job, "job_id", None)) or 0)
+            drawn = job_inputs.get(job_id)
+            if drawn is None or output_quantity <= 0:
+                return None
+            if any(lot["source"] == "unpriced" for detail in drawn["types"].values() for lot in detail["lots"]):
+                # Never price an input at 0: a job with an input no lot or market prices keeps its cost.
+                unpriced_jobs.add(job_id)
+                return None
+            fields = ledger_job_cost(job, drawn["types"], output_quantity)
+            repriced[job_id] = (job, fields)
+            job_unit_cost_by_job_id[job_id] = fields["unit_build_cost"]
+            reason = "; ".join(str(r) for r in (getattr(job, "invention_cost_unknown_reason", None),
+                                                fields["materials_cost_lower_bound_reason"]) if r)
+            if reason:
+                cost_unknown_reason_by_job_id[job_id] = reason
+            else:
+                cost_unknown_reason_by_job_id.pop(job_id, None)
+            return fields["unit_build_cost"]
+
+        for _ts, _sort_id, type_order, _position, event in timeline:
+                type_id = type_ids[type_order]
+                lots = lots_by_type[int(type_id)]
                 kind = str(event.get("kind") or "")
                 if kind == "buy":
                     tx = event.get("tx")
@@ -851,7 +937,8 @@ class _BaseRealizedProfitLedgerService:
                 if kind == "job":
                     job = event.get("job")
                     quantity = _safe_int(event.get("quantity")) or 0
-                    unit_cost = _safe_float(event.get("unit_cost"))
+                    recomputed = _reprice(job, quantity)
+                    unit_cost = recomputed if recomputed is not None else _safe_float(event.get("unit_cost"))
                     if unit_cost is None or unit_cost <= 0 or quantity <= 0:
                         continue
                     _append_lot(
@@ -883,6 +970,24 @@ class _BaseRealizedProfitLedgerService:
                     for entry in taken["allocations"]:
                         if entry["reference_id"] is not None:
                             inputs["draws"][(int(type_id), entry["reference_type"], int(entry["reference_id"]))] += int(entry["quantity"])
+                    job = event["job"]
+                    drawn_lots = [
+                        {key: entry.get(key) for key in (
+                            "quantity", "unit_cost", "total_cost", "source", "reference_type", "reference_id",
+                            "acquisition_date")}
+                        for entry in taken["allocations"]
+                    ]
+                    if taken["unpriced_quantity"]:
+                        untracked = int(taken["unpriced_quantity"])
+                        price = self._input_market_price(int(type_id), job, market_price_map, fallback_prices)
+                        drawn_lots.append({
+                            "quantity": untracked, "unit_cost": price,
+                            "total_cost": float(price) * untracked if price else 0.0,
+                            "source": LEDGER_MARKET_ESTIMATE if price else "unpriced",
+                            "reference_type": None, "reference_id": None, "acquisition_date": None,
+                        })
+                    job_inputs.setdefault(int(event["sort_id"]), {"job": job, "types": {}})["types"][int(type_id)] = {
+                        "quantity": int(event["quantity"]), "lots": drawn_lots}
                     continue
 
                 if kind != "sell":
@@ -911,15 +1016,52 @@ class _BaseRealizedProfitLedgerService:
                             "reference_type": "untracked_inventory",
                         }
                     )
-                sales.append((tx, allocation))
+                sales_by_type[int(type_id)].append((tx, allocation))
+
+        # A job without a product lot here (still running, or no cost to queue) is priced too.
+        for job_id, drawn in job_inputs.items():
+            if job_id not in repriced and job_id not in unpriced_jobs:
+                _reprice(drawn["job"], int(_safe_int(getattr(drawn["job"], "output_quantity", None)) or 0))
+        # An opening lot priced from a job this replay re-priced is replayed at the job's new
+        # cost (a fixed point: the next rebuild then prices it the same).
+        moved = {job_id: repriced[job_id][1]["unit_build_cost"] for job_id, cost in opening_job_costs_used.items()
+                 if job_id in repriced and not _same_cost(cost, repriced[job_id][1]["unit_build_cost"])}
+        if moved and _pass < 4:
+            return self._replay_owner(
+                owner_id=int(owner_id), _opening_job_costs={**(_opening_job_costs or {}), **moved}, _pass=_pass + 1)
+        # The sales in the per-item order the ledger rows always had.
+        sales = [sale for type_id in type_ids for sale in sales_by_type.get(int(type_id), [])]
 
         return {"lots_by_type": lots_by_type, "sales": sales, "inputs": inputs,
-                "uncancelled_excess": uncancelled_excess}
+                "uncancelled_excess": uncancelled_excess, "repriced": repriced, "unpriced_jobs": unpriced_jobs}
+
+    def _persist_job_costs(self, replay: dict[str, Any]) -> None:
+        """Write the replay's job costs to the job rows (the Industry pages, the
+        planner feedback and Market Orders read them); a re-costed character job
+        re-stamps the blended corp transfer lots of its type."""
+        restamp_types: set[int] = set()
+        for job, fields in replay["repriced"].values():
+            if not _same_cost(getattr(job, "unit_build_cost", None), fields["unit_build_cost"]) and isinstance(
+                    job, CharacterIndustryJobsModel):
+                restamp_types.add(int(job.product_type_id))
+            for field_name, value in fields.items():
+                setattr(job, field_name, value)
+        self._app_session.flush()
+        if restamp_types:
+            from eve_online_industry_tracker.application.characters.corp_transfer_costs import (
+                restamp_blended_corp_transfer_lots,
+            )
+            restamp_blended_corp_transfer_lots(self._app_session, sorted(restamp_types))
+        if replay["repriced"] or replay["unpriced_jobs"]:
+            logger.info("%s ledger: priced %d industry job(s) from the FIFO replay; %d kept their cost "
+                        "(an input with no lot and no market price)",
+                        self.owner_id_field, len(replay["repriced"]), len(replay["unpriced_jobs"]))
 
     def _rebuild_owner(self, *, owner_id: int) -> list[Any]:
         self._app_session.query(self.ledger_model).filter(getattr(self.ledger_model, self.owner_id_field) == int(owner_id)).delete()
 
         replay = self._replay_owner(owner_id=int(owner_id))
+        self._persist_job_costs(replay)
         inputs = replay["inputs"]
         if inputs["jobs"]:
             logger.info(
@@ -1058,9 +1200,13 @@ class _BaseRealizedProfitLedgerService:
         """Return FifoLots sourced from asset history, keyed by type_id. Subclasses may override."""
         return {}
 
-    def _merge_character_lots(self, asset_history_lots: dict[int, list[FifoLot]]) -> dict[int, int]:
+    def _merge_character_lots(
+        self, asset_history_lots: dict[int, list[FifoLot]], job_unit_costs: dict[int, float],
+        job_cost_reasons: dict[int, str],
+    ) -> dict[int, int]:
         """Merge character-held lots into `asset_history_lots` (the corp
-        does); returns {type_id: stamped units left uncancelled}."""
+        does), overlaying the character jobs' ledger costs on the two maps;
+        returns {type_id: stamped units left uncancelled}."""
         return {}
 
     def _load_owner_context(self, *, owner_id: int) -> dict[str, Any]:
@@ -1210,6 +1356,16 @@ class CorporationRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
 
     def rebuild(self, *, corporation_id: int | None = None) -> list[dict[str, Any]]:
         return super().rebuild(owner_id=corporation_id)
+
+    def _rebuild_owner(self, *, owner_id: int) -> list[Any]:
+        """Character job costs first (the corp's merged character lots and blended
+        transfer stamps are priced from them), then the corp ledger and its jobs."""
+        character_service = CharacterRealizedProfitLedgerService(
+            app_session=self._app_session, sde_session=self._sde_session,
+            market_prices=self._market_prices, admin_settings=self._admin_settings)
+        for character_id in sorted(self._load_character_source_lots()):
+            character_service._persist_job_costs(character_service._replay_owner(owner_id=int(character_id)))
+        return super()._rebuild_owner(owner_id=int(owner_id))
 
     def list_rows(self, *, corporation_id: int | None = None) -> list[dict[str, Any]]:
         return super().list_rows(owner_id=corporation_id)
@@ -1421,7 +1577,10 @@ class CorporationRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
                     break
         return stale
 
-    def _merge_character_lots(self, asset_history_lots: dict[int, list[FifoLot]]) -> dict[int, int]:
+    def _merge_character_lots(
+        self, asset_history_lots: dict[int, list[FifoLot]], job_unit_costs: dict[int, float],
+        job_cost_reasons: dict[int, str],
+    ) -> dict[int, int]:
         """Char-job and char-buy lots cover char-built items sold before the transfer was
         captured in asset history (Manufacturing instead of opening_inventory).
 
@@ -1448,6 +1607,15 @@ class CorporationRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
         stamped_keys_by_type: dict[int, set[tuple[Any, Any]]] = defaultdict(set)
         for character_id, lots_by_type in self._load_character_source_lots().items():
             replay = character_service._replay_owner(owner_id=int(character_id))
+            # The character's jobs as its own replay priced them (the source lots are repriced from this map).
+            for job_id, (job, fields) in replay["repriced"].items():
+                job_unit_costs[int(job_id)] = fields["unit_build_cost"]
+                reason = "; ".join(str(r) for r in (getattr(job, "invention_cost_unknown_reason", None),
+                                                    fields["materials_cost_lower_bound_reason"]) if r)
+                if reason:
+                    job_cost_reasons[int(job_id)] = reason
+                else:
+                    job_cost_reasons.pop(int(job_id), None)
             taken: dict[tuple[int, Any, int], int] = defaultdict(int, replay["inputs"]["draws"])
             for tx, allocation in replay["sales"]:
                 for entry in allocation["allocations"]:

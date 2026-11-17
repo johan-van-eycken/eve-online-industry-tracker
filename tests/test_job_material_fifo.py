@@ -109,3 +109,18 @@ def test_a_re_snapshot_subtracts_what_stored_earlier_jobs_took(app_session):
     left = subtract_consumed_input_lots(lookup, consumed)[34]["lots"]
 
     assert [(lot["reference_id"], lot["quantity"]) for lot in left] == [(2, 400)]
+
+
+def test_the_job_sync_keeps_a_cost_the_ledger_priced(monkeypatch, app_session, sde_session):
+    ledger_costs = {"materials_cost": 200.0, "historical_materials_cost": 200.0, "unit_build_cost": 7.5,
+                    "total_build_cost": 7.5, "build_cost_source": "ledger_fifo",
+                    "historical_input_costs": {"34": {"quantity": 1000, "unit_cost": 0.2, "lots": []}}}
+    app_session.add(CharacterIndustryJobsModel(character_id=1, job_id=11, start_date="2026-02-01T00:00:00Z",
+                                               **ledger_costs))
+    app_session.commit()
+
+    jobs = _refresh(monkeypatch, app_session, sde_session, buys=[
+        _buy(1, "2026-01-01T00:00:00Z", 1000, 4.0),
+    ], jobs=[_job(11, "2026-02-01T00:00:00Z", "2026-02-02T00:00:00Z")])
+
+    assert {field: getattr(jobs[11], field) for field in ledger_costs} == ledger_costs
