@@ -175,6 +175,16 @@ def _with_cost_basis(allocations: list[dict[str, Any]], unit_cost_by_job_id: dic
             entry["cost_basis"] = _safe_float(entry.get("unit_cost"))
 
 
+def _existed_by(lot: FifoLot, observed_at: Any) -> bool:
+    """Whether `lot` was acquired no later than `observed_at` (unknown: yes)."""
+    acquired, observed = _parse_date(lot.acquisition_date), _parse_date(observed_at)
+    if acquired is None or observed is None:
+        return True
+    if (acquired.tzinfo is None) != (observed.tzinfo is None):
+        acquired, observed = acquired.replace(tzinfo=None), observed.replace(tzinfo=None)
+    return acquired <= observed
+
+
 def _is_blended_transfer_lot(source: Any, reference_type: Any) -> bool:
     """A transferred build lot that names no single job: the average
     fallback, or a FIFO match spanning several jobs."""
@@ -1335,6 +1345,7 @@ class CorporationRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
                     asset_history_id=(
                         _safe_int(getattr(row, "id", None)) if _is_blended_transfer_lot(source, reference_type) else None
                     ),
+                    observed_at=getattr(row, "observed_at", None),
                 )
             )
         return lots_by_type
@@ -1420,13 +1431,21 @@ class CorporationRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
         the corp hangar: the stamp gives the quantity, the character's FIFO residual (oldest
         first) the identity and cost, since the backfill's job is only a guess at which
         build the stack came from. The rest of a stamped lot's residual stayed with the
-        character; other residuals stay in the queue. A placed residual keeps the stamp's
-        date (its place in the corp queue). Stamped units beyond the character's residuals
-        are kept as stamped and returned per type."""
+        character; other residuals stay in the queue. A blended lot (an average naming no
+        job or buy) does the same with the oldest unstamped residuals of its type of any
+        character; what no residual covers stays blended. Stamps are placed in stamp-date
+        order, keyed first on a tie, each residual at the stamp's date (its place in the
+        corp queue). Keyed stamp units beyond the character's residuals are kept as
+        stamped and returned per type."""
         character_service = CharacterRealizedProfitLedgerService(
             app_session=self._app_session, sde_session=self._sde_session,
             market_prices=self._market_prices, admin_settings=self._admin_settings)
         uncancelled: dict[int, int] = defaultdict(int)
+        # Per type: [character_id, residual lot] oldest first, the keyed stamps with their
+        # character, and the keys those stamps name.
+        residuals_by_type: dict[int, list[list[Any]]] = defaultdict(list)
+        keyed_by_type: dict[int, list[tuple[FifoLot, int]]] = defaultdict(list)
+        stamped_keys_by_type: dict[int, set[tuple[Any, Any]]] = defaultdict(set)
         for character_id, lots_by_type in self._load_character_source_lots().items():
             replay = character_service._replay_owner(owner_id=int(character_id))
             taken: dict[tuple[int, Any, int], int] = defaultdict(int, replay["inputs"]["draws"])
@@ -1438,28 +1457,53 @@ class CorporationRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
                 type_lots = asset_history_lots.setdefault(int(type_id), [])
                 keys = {(lot.reference_type, lot.reference_id) for lot in lots}
                 stamps = [lot for lot in type_lots if (lot.reference_type, lot.reference_id) in keys]
-                stamped_keys = {(lot.reference_type, lot.reference_id) for lot in stamps}
                 stamp_ids = {id(lot) for lot in stamps}
                 type_lots[:] = [lot for lot in type_lots if id(lot) not in stamp_ids]
-                residuals = []
+                keyed_by_type[int(type_id)].extend((stamp, int(character_id)) for stamp in stamps)
+                stamped_keys_by_type[int(type_id)] |= {(lot.reference_type, lot.reference_id) for lot in stamps}
                 for lot in lots:
                     left = int(lot.quantity) - taken.get((int(type_id), lot.reference_type, int(lot.reference_id or 0)), 0)
                     if left > 0:
-                        residuals.append(replace(lot, quantity=left))
-                # Each stamp's units are the oldest residual units, at the stamp's place in the queue.
-                for stamp in stamps:
-                    to_place = int(stamp.quantity)
-                    while to_place and residuals:
-                        arrived = min(to_place, int(residuals[0].quantity))
-                        type_lots.append(replace(residuals[0], quantity=arrived, acquisition_date=stamp.acquisition_date))
-                        to_place -= arrived
-                        residuals[0] = replace(residuals[0], quantity=int(residuals[0].quantity) - arrived)
-                        if not residuals[0].quantity:
-                            residuals.pop(0)
-                    if to_place:
+                        residuals_by_type[int(type_id)].append([int(character_id), replace(lot, quantity=left)])
+
+        for type_id, residuals in residuals_by_type.items():
+            residuals.sort(key=lambda entry: str(entry[1].acquisition_date or ""))
+            type_lots = asset_history_lots.setdefault(int(type_id), [])
+            stamped_keys = stamped_keys_by_type[int(type_id)]
+            # A blended lot (an average naming no job or buy) stands for unstamped character
+            # residuals of its type, any character's: the owner is not stored.
+            blended = [lot for lot in type_lots if lot.reference_id is None]
+            blended_ids = {id(lot) for lot in blended}
+            type_lots[:] = [lot for lot in type_lots if id(lot) not in blended_ids]
+            stamps = [(stamp, character_id) for stamp, character_id in keyed_by_type[int(type_id)]]
+            stamps += [(stamp, None) for stamp in blended]
+            # Stamp-date order, keyed stamps first on a tie.
+            stamps.sort(key=lambda item: (str(item[0].acquisition_date or ""), item[1] is None))
+            for stamp, character_id in stamps:
+                # The stamp's units are the oldest eligible residual units, at the stamp's place in the queue.
+                to_place = int(stamp.quantity)
+                for entry in residuals:
+                    if not to_place:
+                        break
+                    owner, lot = entry
+                    if not lot.quantity:
+                        continue
+                    if character_id is None:
+                        # Only units built or bought by the time the corp saw the blended stack.
+                        if (lot.reference_type, lot.reference_id) in stamped_keys or not _existed_by(lot, stamp.observed_at):
+                            continue
+                    elif owner != character_id:
+                        continue
+                    arrived = min(to_place, int(lot.quantity))
+                    type_lots.append(replace(lot, quantity=arrived, acquisition_date=stamp.acquisition_date))
+                    entry[1] = replace(lot, quantity=int(lot.quantity) - arrived)
+                    to_place -= arrived
+                if to_place:
+                    if character_id is not None:
                         uncancelled[int(type_id)] += to_place
-                        type_lots.append(replace(stamp, quantity=to_place))
-                type_lots.extend(lot for lot in residuals if (lot.reference_type, lot.reference_id) not in stamped_keys)
+                    type_lots.append(replace(stamp, quantity=to_place))
+            type_lots.extend(
+                lot for _, lot in residuals if lot.quantity and (lot.reference_type, lot.reference_id) not in stamped_keys)
         return dict(uncancelled)
 
     def _load_owner_context(self, *, owner_id: int) -> dict[str, Any]:

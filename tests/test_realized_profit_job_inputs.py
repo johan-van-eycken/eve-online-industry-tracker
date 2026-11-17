@@ -340,3 +340,43 @@ def test_next_fifo_unit_costs_reads_every_type_from_one_replay(session_provider)
 
     assert costs[MODULE] == (13_500_000.0, "fifo: industry job 1003")
     assert len(blueprint_queries) == 1  # the three jobs' blueprints in one batched lookup
+
+
+def _blended_stamp(quantity: int, observed: str = "2026-06-11T00:00:00Z"):
+    """A blended transfer lot: an average over character jobs, naming none."""
+    return CorporationAssetHistoryModel(
+        corporation_id=50, item_id=9100, observed_at=observed, snapshot_source="asset_refresh", type_id=MODULE,
+        quantity=quantity, acquisition_source="industry_build_transferred_avg", acquisition_unit_cost=15_000_000.0)
+
+
+def _queue(app_session, sde_session) -> list[tuple]:
+    lots = _corp_service(app_session, sde_session)._replay_owner(owner_id=50)["lots_by_type"][MODULE]
+    return sorted((lot.reference_id or 0, lot.quantity, lot.unit_price, str(lot.acquisition_date)[:10]) for lot in lots)
+
+
+def test_a_blended_stamp_takes_the_character_residual_it_stands_for(session_provider) -> None:
+    app_session, sde_session = session_provider.app_session(), session_provider.sde_session()
+    _blueprints(sde_session)
+    app_session.add(CorporationModel(corporation_id=50, corporation_name="Corp"))
+    app_session.add(_build(CharacterIndustryJobsModel, {"character_id": 1}, 1001, "2026-03-20T00:00:00Z", 25, 16_000_000.0))
+    app_session.add(_blended_stamp(30))
+    app_session.commit()
+
+    # 25 as the residual (identity and cost) at the stamp's date, 5 left blended; not 55.
+    assert _queue(app_session, sde_session) == [
+        (0, 5, 15_000_000.0, "2026-06-11"), (1001, 25, 16_000_000.0, "2026-06-11")]
+
+
+def test_a_blended_stamp_takes_the_oldest_residuals_across_characters(session_provider) -> None:
+    app_session, sde_session = session_provider.app_session(), session_provider.sde_session()
+    _blueprints(sde_session)
+    app_session.add(CorporationModel(corporation_id=50, corporation_name="Corp"))
+    app_session.add(_build(CharacterIndustryJobsModel, {"character_id": 1}, 1001, "2026-03-20T00:00:00Z", 20, 16_000_000.0))
+    app_session.add(_build(CharacterIndustryJobsModel, {"character_id": 2}, 1005, "2026-03-10T00:00:00Z", 20, 14_000_000.0))
+    app_session.add(_blended_stamp(30))
+    app_session.commit()
+
+    # Character 2's older 20, then 10 of character 1's; its other 10 stay a residual of their own.
+    assert _queue(app_session, sde_session) == [
+        (1001, 10, 16_000_000.0, "2026-03-20"), (1001, 10, 16_000_000.0, "2026-06-11"),
+        (1005, 20, 14_000_000.0, "2026-06-11")]

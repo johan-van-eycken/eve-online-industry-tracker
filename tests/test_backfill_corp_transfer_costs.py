@@ -896,12 +896,13 @@ def test_recosted_types_are_the_jobs_whose_unit_cost_changed(app_session):
 
 
 def _ledger_with_sale(s):
-    """A sale of all 11 units: job 5002's 3, then the 8 of the corp rows (job
-    5001's lot is already in row 1 and the row 2 blend, so it is not queued twice)."""
+    """A sale of the 8 units of the corp rows. The stamps stand for the pilot's
+    units: row 1 is job 5001's, the row 2 blend takes 2 of job 5002 and the row 3
+    average its last 1, so 4 stay blended (no job's units are queued twice)."""
     s.add(CorporationModel(corporation_id=CORP, corporation_name="Fake"))
     s.add(CorporationWalletTransactionsModel(
-        corporation_id=CORP, transaction_id=6001, date="2026-06-06T00:00:00Z", is_buy=False, quantity=11,
-        type_id=PRODUCT, unit_price=200.0, total_price=2200.0))
+        corporation_id=CORP, transaction_id=6001, date="2026-06-06T00:00:00Z", is_buy=False, quantity=8,
+        type_id=PRODUCT, unit_price=200.0, total_price=1600.0))
     s.commit()
     return CorporationRealizedProfitLedgerService(app_session=s, sde_session=None, market_prices=[])
 
@@ -936,7 +937,8 @@ def test_after_resolve_the_ledger_goes_stale_and_takes_the_restamped_cost(app_se
     assert ledger.stale_resolved_cost_owner_ids(ledger.list_rows(corporation_id=CORP)) == {CORP}
     rows = ledger.rebuild(corporation_id=CORP)
     assert rows[0]["cost_lower_bound_reason"] is None
-    assert sorted(a["unit_cost"] for a in _blended_entries(rows[0])) == pytest.approx([95.0, 96.0])
+    # Only the row 3 average stays blended (row 2's units are job 5002's now).
+    assert sorted(a["unit_cost"] for a in _blended_entries(rows[0])) == pytest.approx([96.0])
     assert all("cost_unknown_reason" not in a for a in rows[0]["allocation_details"])
 
 
