@@ -380,3 +380,22 @@ def test_a_blended_stamp_takes_the_oldest_residuals_across_characters(session_pr
     assert _queue(app_session, sde_session) == [
         (1001, 10, 16_000_000.0, "2026-03-20"), (1001, 10, 16_000_000.0, "2026-06-11"),
         (1005, 20, 14_000_000.0, "2026-06-11")]
+
+
+def test_a_placed_residual_never_enters_the_corp_queue_before_it_was_built(session_provider) -> None:
+    """The blended lot is dated 1 March, the character built the units on 1 April:
+    a corp sale on 15 March cannot have sold them."""
+    app_session, sde_session = session_provider.app_session(), session_provider.sde_session()
+    _blueprints(sde_session)
+    app_session.add(CorporationModel(corporation_id=50, corporation_name="Corp"))
+    app_session.add(_build(CharacterIndustryJobsModel, {"character_id": 1}, 1001, "2026-04-01T00:00:00Z", 25, 16_000_000.0))
+    stamp = _blended_stamp(25)
+    stamp.acquisition_source, stamp.acquisition_date = "industry_build_transferred", "2026-03-01T00:00:00Z"
+    app_session.add(stamp)
+    app_session.add(_corp_sale(3001, "2026-03-15T00:00:00Z", 2))
+    app_session.commit()
+
+    [row] = _corp_service(app_session, sde_session).rebuild(corporation_id=50)
+
+    assert 1001 not in {a["reference_id"] for a in row["allocation_details"]}
+    assert _queue(app_session, sde_session) == [(1001, 25, 16_000_000.0, "2026-04-01")]

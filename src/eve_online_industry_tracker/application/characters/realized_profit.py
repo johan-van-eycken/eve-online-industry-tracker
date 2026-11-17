@@ -1434,8 +1434,8 @@ class CorporationRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
         character; other residuals stay in the queue. A blended lot (an average naming no
         job or buy) does the same with the oldest unstamped residuals of its type of any
         character; what no residual covers stays blended. Stamps are placed in stamp-date
-        order, keyed first on a tie, each residual at the stamp's date (its place in the
-        corp queue). Keyed stamp units beyond the character's residuals are kept as
+        order, keyed first on a tie, each residual at the later of the stamp's date (its
+        place in the corp queue) and its own acquisition date. Keyed stamp units beyond the character's residuals are kept as
         stamped and returned per type."""
         character_service = CharacterRealizedProfitLedgerService(
             app_session=self._app_session, sde_session=self._sde_session,
@@ -1495,7 +1495,9 @@ class CorporationRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
                     elif owner != character_id:
                         continue
                     arrived = min(to_place, int(lot.quantity))
-                    type_lots.append(replace(lot, quantity=arrived, acquisition_date=stamp.acquisition_date))
+                    # At the stamp's date, never before the residual was built or bought.
+                    placed_at = lot.acquisition_date if not _existed_by(lot, stamp.acquisition_date) else stamp.acquisition_date
+                    type_lots.append(replace(lot, quantity=arrived, acquisition_date=placed_at))
                     entry[1] = replace(lot, quantity=int(lot.quantity) - arrived)
                     to_place -= arrived
                 if to_place:
