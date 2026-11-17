@@ -27,6 +27,7 @@ from eve_online_industry_tracker.application.characters.asset_provenance import 
 )
 from eve_online_industry_tracker.db_models import (
     Blueprints,
+    CharacterAssetHistoryModel,
     CharacterIndustryJobsModel,
     CharacterModel,
     CharacterRealizedSalesLedgerModel,
@@ -607,9 +608,15 @@ class _BaseRealizedProfitLedgerService:
 
         persisted_rows: list[Any] = []
         for current_owner_id in owner_ids:
-            persisted_rows.extend(self._rebuild_owner(owner_id=int(current_owner_id)))
-
-        self._app_session.commit()
+            # One transaction per owner: a failure rolls back its deleted ledger rows and
+            # re-priced jobs and asset history, so no later commit saves half a rebuild.
+            try:
+                owner_rows = self._rebuild_owner(owner_id=int(current_owner_id))
+                self._app_session.commit()
+            except BaseException:
+                self._app_session.rollback()
+                raise
+            persisted_rows.extend(owner_rows)
         return [self._serialize_row(row) for row in persisted_rows]
 
     def owner_ids(self) -> list[int]:
@@ -1040,6 +1047,10 @@ class _BaseRealizedProfitLedgerService:
         if moved and _pass < 4:
             return self._replay_owner(
                 owner_id=int(owner_id), _opening_job_costs={**(_opening_job_costs or {}), **moved}, _pass=_pass + 1)
+        if moved:
+            logger.warning(
+                "%s %s ledger: opening lots priced from %d re-priced job(s) did not settle after %d passes; "
+                "their sales keep the last pass's cost", self.owner_id_field, int(owner_id), len(moved), _pass)
         # The sales in the per-item order the ledger rows always had.
         sales = [sale for type_id in type_ids for sale in sales_by_type.get(int(type_id), [])]
 
@@ -1058,6 +1069,7 @@ class _BaseRealizedProfitLedgerService:
             for field_name, value in fields.items():
                 setattr(job, field_name, value)
         self._app_session.flush()
+        self._restamp_keyed_history({job_id: fields["unit_build_cost"] for job_id, (_, fields) in replay["repriced"].items()})
         if restamp_types:
             from eve_online_industry_tracker.application.characters.corp_transfer_costs import (
                 restamp_blended_corp_transfer_lots,
@@ -1067,6 +1079,30 @@ class _BaseRealizedProfitLedgerService:
             logger.info("%s ledger: priced %d industry job(s) from the FIFO replay; %d kept their cost "
                         "(an input with no lot and no market price)",
                         self.owner_id_field, len(replay["repriced"]), len(replay["unpriced_jobs"]))
+
+    def _restamp_keyed_history(self, unit_cost_by_job_id: dict[int, float | None]) -> None:
+        """The corp and character asset history rows that name a re-priced job carry its
+        new cost (readers of acquisition_unit_cost, e.g. the job sync's input lookup, then
+        see the ledger's costs). Rows already at that cost are left alone."""
+        wanted = {int(job_id): float(unit) for job_id, unit in unit_cost_by_job_id.items() if unit}
+        if not wanted:
+            return
+        for model in (CorporationAssetHistoryModel, CharacterAssetHistoryModel):
+            rows = (
+                self._app_session.query(model.id, model.acquisition_reference_id, model.quantity,
+                                        model.acquisition_unit_cost)
+                .filter(model.acquisition_reference_type == "industry_job", model.acquisition_reference_id.isnot(None))
+                .all()
+            )
+            updates = [
+                {"id": row_id, "acquisition_unit_cost": wanted[int(job_id)],
+                 "acquisition_total_cost": wanted[int(job_id)] * float(quantity or 0)}
+                for row_id, job_id, quantity, unit_cost in rows
+                if int(job_id) in wanted and not _same_cost(unit_cost, wanted[int(job_id)])
+            ]
+            if updates:
+                self._app_session.bulk_update_mappings(model, updates)
+        self._app_session.flush()
 
     def _rebuild_owner(self, *, owner_id: int) -> list[Any]:
         self._app_session.query(self.ledger_model).filter(getattr(self.ledger_model, self.owner_id_field) == int(owner_id)).delete()
@@ -1374,8 +1410,11 @@ class CorporationRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
         character_service = CharacterRealizedProfitLedgerService(
             app_session=self._app_session, sde_session=self._sde_session,
             market_prices=self._market_prices, admin_settings=self._admin_settings)
+        # The caller holds the corp's lock; the characters' are taken after it, in id order
+        # (a character rebuild takes only its own), so the two never deadlock.
         for character_id in sorted(self._load_character_source_lots()):
-            character_service._persist_job_costs(character_service._replay_owner(owner_id=int(character_id)))
+            with ledger_rebuild_lock("character_id", int(character_id)):
+                character_service._persist_job_costs(character_service._replay_owner(owner_id=int(character_id)))
         return super()._rebuild_owner(owner_id=int(owner_id))
 
     def list_rows(self, *, corporation_id: int | None = None) -> list[dict[str, Any]]:

@@ -968,6 +968,30 @@ def test_the_decryptor_resnapshot_restamps_the_types_it_recosts(app_session, mon
     assert rows[4].acquisition_unit_cost == 10.0
 
 
+def test_the_decryptor_resnapshot_keeps_a_ledger_priced_jobs_materials(app_session, monkeypatch):
+    _restamp_seed(app_session)
+    job = app_session.query(CharacterIndustryJobsModel).filter_by(job_id=5001).one()
+    job.invention_cost_unknown_reason = f"{ap.NO_DECRYPTOR_CHOICE_REASON} for blueprint 990002"
+    job.raw = {"job_id": 5001, "activity_id": 1, "blueprint_type_id": 990002, "product_type_id": PRODUCT}
+    job.materials_cost, job.build_cost_source, job.historical_input_costs = 100.0, "ledger_fifo", {"34": {}}
+    app_session.commit()
+    monkeypatch.setattr(ap, "build_invention_cost_per_run_by_blueprint_type", lambda **kw: {})
+    monkeypatch.setattr(ap, "industry_job_material_type_ids", lambda **kw: [])
+    monkeypatch.setattr(ap, "resolve_industry_job_cost_snapshot", lambda **kw: {
+        "output_quantity": 2, "materials_cost": 999.0, "unit_cost": 90.0, "total_cost": 180.0,
+        "invention_cost": 20.0, "invention_cost_unknown_reason": None, "source": "test"})
+    from eve_online_industry_tracker.application.characters import asset_history
+    monkeypatch.setattr(asset_history, "build_historical_input_cost_lookup", lambda **kw: {})
+
+    ap.resnapshot_jobs_without_decryptor_choice(
+        app_session=app_session, sde_session=None, market_price_map={},
+        invention_refresh=ap.RealizedInventionRefresh(inputs=None))
+
+    job = app_session.query(CharacterIndustryJobsModel).filter_by(job_id=5001).one()
+    assert (job.materials_cost, job.build_cost_source, job.historical_input_costs) == (100.0, "ledger_fifo", {"34": {}})
+    assert (job.total_build_cost, job.unit_build_cost) == (121.0, 60.5)  # 100 + fee 1 + invention 20, over 2
+
+
 def test_a_character_job_refresh_restamps_the_types_it_recosts(app_session, monkeypatch):
     _restamp_seed(app_session)
     fetched = [{"job_id": 5001, "status": "delivered", "activity_id": 1, "runs": 2, "blueprint_type_id": 990002,

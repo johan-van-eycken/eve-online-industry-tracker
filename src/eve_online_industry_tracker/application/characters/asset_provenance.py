@@ -494,11 +494,39 @@ def is_ledger_priced(job: Any) -> bool:
     return str(getattr(job, "build_cost_source", None) or "").startswith(LEDGER_FIFO_SOURCE)
 
 
+#: The materials part of a job's cost that the ledger prices; the fee, copy and
+#: invention cost and the output stay the job sync's.
+LEDGER_MATERIAL_FIELDS = (
+    "materials_cost", "historical_materials_cost", "historical_material_cost_source",
+    "historical_material_coverage_fraction", "historical_input_costs", "materials_cost_lower_bound_reason",
+    "build_cost_source",
+)
+
+
+def ledger_build_totals(
+    *, materials_cost: Any, cost: Any, copy_cost: Any, invention_cost: Any, output_quantity: Any,
+) -> tuple[float, float | None]:
+    """(total, unit) build cost of a ledger-priced job: its materials plus the install
+    fee, copy and invention cost, over its output (unit None without an output)."""
+    total = float(_safe_float(materials_cost) or 0.0) + sum(
+        float(_safe_float(part) or 0.0) for part in (cost, copy_cost, invention_cost))
+    output = _safe_int(output_quantity)
+    return total, (total / float(output) if output and output > 0 else None)
+
+
 def keep_ledger_job_cost(row: dict[str, Any], existing_job: Any) -> None:
-    """A job sync row keeps the cost the ledger already priced (the sync's own FIFO would fight it)."""
-    if existing_job is not None and is_ledger_priced(existing_job):
-        for field_name in LEDGER_JOB_COST_FIELDS:
-            row[field_name] = getattr(existing_job, field_name, None)
+    """A job sync row keeps the materials the ledger already priced (the sync's own FIFO
+    would fight it); its total and unit are recomputed from the row's own fee, copy and
+    invention cost and output, so a change there moves the unit cost (and the ledger goes stale)."""
+    if existing_job is None or not is_ledger_priced(existing_job):
+        return
+    for field_name in LEDGER_MATERIAL_FIELDS:
+        row[field_name] = getattr(existing_job, field_name, None)
+    total, unit = ledger_build_totals(
+        materials_cost=row["materials_cost"], cost=row.get("cost"), copy_cost=row.get("copy_cost"),
+        invention_cost=row.get("invention_cost"), output_quantity=row.get("output_quantity"))
+    row["total_build_cost"] = total
+    row["unit_build_cost"] = unit if unit is not None else getattr(existing_job, "unit_build_cost", None)
 
 
 def ledger_job_cost(job: Any, inputs_by_type: Mapping[int, Mapping[str, Any]], output_quantity: int) -> dict[str, Any]:
@@ -513,8 +541,9 @@ def ledger_job_cost(job: Any, inputs_by_type: Mapping[int, Mapping[str, Any]], o
     source = LEDGER_FIFO_SOURCE + (
         f"+{LEDGER_MARKET_ESTIMATE}" if any(lot["source"] == LEDGER_MARKET_ESTIMATE for lot in lots) else "")
     unpriced = sorted(t for t, detail in inputs_by_type.items() if any(lot["source"] == "unpriced" for lot in detail["lots"]))
-    total = materials + sum(float(_safe_float(getattr(job, name, None)) or 0.0)
-                            for name in ("cost", "copy_cost", "invention_cost"))
+    total, unit = ledger_build_totals(
+        materials_cost=materials, cost=getattr(job, "cost", None), copy_cost=getattr(job, "copy_cost", None),
+        invention_cost=getattr(job, "invention_cost", None), output_quantity=output_quantity)
 
     def _priced_unit_cost(detail: Mapping[str, Any]) -> float | None:
         priced = [lot for lot in detail["lots"] if lot["unit_cost"]]
@@ -537,7 +566,7 @@ def ledger_job_cost(job: Any, inputs_by_type: Mapping[int, Mapping[str, Any]], o
             f"materials cost is a lower bound: no price for material type(s) {', '.join(map(str, unpriced))}"
             if unpriced else None),
         "total_build_cost": float(total),
-        "unit_build_cost": float(total) / float(output_quantity),
+        "unit_build_cost": unit,
         "build_cost_source": source,
     }
 
@@ -805,8 +834,9 @@ def resnapshot_jobs_without_decryptor_choice(
             if is_ledger_priced(row):
                 # The ledger priced the materials from its FIFO replay: only the invention part changes.
                 output_quantity = _safe_int(row.output_quantity) or _safe_int(snapshot.get("output_quantity"))
-                total = (_safe_float(row.materials_cost) or 0.0) + sum(
-                    _safe_float(v) or 0.0 for v in (row.cost, row.copy_cost, snapshot.get("invention_cost")))
+                total, unit = ledger_build_totals(
+                    materials_cost=row.materials_cost, cost=row.cost, copy_cost=row.copy_cost,
+                    invention_cost=snapshot.get("invention_cost"), output_quantity=output_quantity)
                 snapshot = {
                     **snapshot,
                     **{name: getattr(row, name) for name in (
@@ -815,7 +845,7 @@ def resnapshot_jobs_without_decryptor_choice(
                         "materials_cost_lower_bound_reason")},
                     "output_quantity": output_quantity,
                     "total_cost": total,
-                    "unit_cost": total / float(output_quantity) if output_quantity else row.unit_build_cost,
+                    "unit_cost": unit if unit is not None else row.unit_build_cost,
                     "source": row.build_cost_source,
                 }
             row.output_quantity = snapshot.get("output_quantity")

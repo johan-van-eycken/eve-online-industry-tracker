@@ -111,7 +111,7 @@ def test_a_re_snapshot_subtracts_what_stored_earlier_jobs_took(app_session):
     assert [(lot["reference_id"], lot["quantity"]) for lot in left] == [(2, 400)]
 
 
-def test_the_job_sync_keeps_a_cost_the_ledger_priced(monkeypatch, app_session, sde_session):
+def test_the_job_sync_keeps_the_materials_the_ledger_priced(monkeypatch, app_session, sde_session):
     ledger_costs = {"materials_cost": 200.0, "historical_materials_cost": 200.0, "unit_build_cost": 7.5,
                     "total_build_cost": 7.5, "build_cost_source": "ledger_fifo",
                     "historical_input_costs": {"34": {"quantity": 1000, "unit_cost": 0.2, "lots": []}}}
@@ -123,4 +123,7 @@ def test_the_job_sync_keeps_a_cost_the_ledger_priced(monkeypatch, app_session, s
         _buy(1, "2026-01-01T00:00:00Z", 1000, 4.0),
     ], jobs=[_job(11, "2026-02-01T00:00:00Z", "2026-02-02T00:00:00Z")])
 
-    assert {field: getattr(jobs[11], field) for field in ledger_costs} == ledger_costs
+    materials = {k: v for k, v in ledger_costs.items() if k not in ("total_build_cost", "unit_build_cost")}
+    assert {field: getattr(jobs[11], field) for field in materials} == materials
+    # The total is the kept materials plus the refresh's own fee (0), over its output (1).
+    assert (jobs[11].total_build_cost, jobs[11].unit_build_cost) == (200.0, 200.0)

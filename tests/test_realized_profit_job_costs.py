@@ -214,3 +214,153 @@ def test_a_sale_drawing_from_the_opening_lot_keeps_the_first_known_cost(session_
 
     assert [(a["source"], a["quantity"], a["unit_cost"]) for a in row["allocation_details"]] == [
         ("opening_inventory", 5, 5.0)]
+
+
+# --- corp rebuilds, keyed asset history, failures ------------------------------------
+
+import pytest  # noqa: E402
+
+from eve_online_industry_tracker.application.characters.asset_provenance import keep_ledger_job_cost  # noqa: E402
+from eve_online_industry_tracker.application.characters.realized_profit import (  # noqa: E402
+    CorporationRealizedProfitLedgerService,
+)
+from eve_online_industry_tracker.infrastructure.models import (  # noqa: E402
+    CharacterAssetHistoryModel,
+    CorporationAssetHistoryModel,
+    CorporationIndustryJobsModel,
+    CorporationModel,
+    CorporationRealizedSalesLedgerModel,
+    CorporationWalletTransactionsModel,
+)
+
+CORP = 50
+
+
+def _corp_seed(app_session, sde_session) -> None:
+    """Character job 1001 builds 40 modules from bought Tritanium (its ledger cost: 7.5);
+    the corp's T2 job 2001 takes 10 of them; keyed history rows still carry 16.6M."""
+    _seed(app_session, sde_session)
+    app_session.query(CharacterIndustryJobsModel).filter_by(job_id=1002).delete()
+    app_session.add(CorporationModel(corporation_id=CORP, corporation_name="Corp"))
+    app_session.add(CorporationIndustryJobsModel(
+        corporation_id=CORP, job_id=2001, status="delivered", activity_id=1, start_date="2026-05-01T00:00:00Z",
+        end_date="2026-05-05T00:00:00Z", completed_date="2026-05-05T00:00:00Z", blueprint_type_id=T2_BP,
+        product_type_id=T2, runs=10, successful_runs=10, cost=25.0, blueprint_material_efficiency=2,
+        output_quantity=10, unit_build_cost=16_600_002.5, build_cost_source="historical_asset_acquisition_cost"))
+    app_session.add(CorporationAssetHistoryModel(
+        corporation_id=CORP, item_id=77, observed_at="2026-04-01T00:00:00Z", snapshot_source="asset_refresh",
+        type_id=MODULE, quantity=30, acquisition_source="industry_build_transferred",
+        acquisition_unit_cost=16_600_002.5, acquisition_total_cost=30 * 16_600_002.5,
+        acquisition_reference_type="industry_job", acquisition_reference_id=1001))
+    app_session.add(CharacterAssetHistoryModel(
+        character_id=1, item_id=78, observed_at="2026-03-20T00:00:00Z", type_id=MODULE, quantity=40,
+        acquisition_source="industry_build", acquisition_unit_cost=16_600_002.5,
+        acquisition_total_cost=40 * 16_600_002.5, acquisition_reference_type="industry_job",
+        acquisition_reference_id=1001))
+    app_session.add(CorporationWalletTransactionsModel(
+        corporation_id=CORP, division=1, transaction_id=701, date="2026-06-01T00:00:00Z", is_buy=False, quantity=2,
+        type_id=T2, type_name="T2", unit_price=50.0, total_price=100.0))
+    app_session.commit()
+
+
+def _corp_service(app_session, sde_session):
+    return CorporationRealizedProfitLedgerService(app_session=app_session, sde_session=sde_session, market_prices=[])
+
+
+def test_a_corp_rebuild_prices_the_character_jobs_first(session_provider) -> None:
+    app_session, sde_session = session_provider.app_session(), session_provider.sde_session()
+    _corp_seed(app_session, sde_session)
+
+    _corp_service(app_session, sde_session).rebuild(corporation_id=CORP)
+    jobs = _jobs(app_session)
+    corp_job = app_session.query(CorporationIndustryJobsModel).filter_by(job_id=2001).one()
+
+    assert jobs[1001].unit_build_cost == 7.5  # persisted by the corp rebuild itself
+    [lot] = corp_job.historical_input_costs[str(MODULE)]["lots"]
+    assert (lot["reference_id"], lot["source"], lot["unit_cost"]) == (1001, "industry_build_transferred", 7.5)
+    assert corp_job.unit_build_cost == 10.0
+
+
+def test_a_reprice_restamps_the_keyed_asset_history_rows(session_provider) -> None:
+    app_session, sde_session = session_provider.app_session(), session_provider.sde_session()
+    _corp_seed(app_session, sde_session)
+
+    _corp_service(app_session, sde_session).rebuild(corporation_id=CORP)
+
+    for model in (CorporationAssetHistoryModel, CharacterAssetHistoryModel):
+        row = app_session.query(model).filter_by(acquisition_reference_id=1001).one()
+        assert (row.acquisition_unit_cost, row.acquisition_total_cost) == (7.5, 7.5 * row.quantity)
+
+
+def test_a_failed_rebuild_leaves_every_row_as_it_was(session_provider, monkeypatch) -> None:
+    app_session, sde_session = session_provider.app_session(), session_provider.sde_session()
+    _corp_seed(app_session, sde_session)
+    app_session.add(CorporationRealizedSalesLedgerModel(
+        corporation_id=CORP, transaction_id=699, date="2026-01-01T00:00:00Z", quantity=1))
+    app_session.commit()
+
+    def broken(self, **kwargs):
+        raise RuntimeError("fee breakdown failed")
+
+    monkeypatch.setattr(CorporationRealizedProfitLedgerService, "_fee_breakdown", broken)
+    with pytest.raises(RuntimeError):
+        _corp_service(app_session, sde_session).rebuild(corporation_id=CORP)
+
+    fresh = session_provider.app_session()
+    assert fresh.query(CharacterIndustryJobsModel).filter_by(job_id=1001).one().unit_build_cost == 16_600_002.5
+    assert fresh.query(CorporationAssetHistoryModel).one().acquisition_unit_cost == 16_600_002.5
+    assert [row.transaction_id for row in fresh.query(CorporationRealizedSalesLedgerModel)] == [699]
+    assert not app_session.dirty and not app_session.new and not app_session.deleted
+
+
+def test_an_opening_lot_drawn_by_several_jobs_prices_each_at_its_own_start_date(session_provider) -> None:
+    app_session, sde_session = session_provider.app_session(), session_provider.sde_session()
+    _seed(app_session, sde_session)
+    _late_tritanium_buy(app_session)  # 28 Feb close 4.0; the buy only on 1 April
+    app_session.add(MarketHistoryModel(type_id=TRITANIUM, region_id=10000002, date="2026-03-09", close=4.5,
+                                       volume=1, order_count=1))
+    app_session.add(CharacterIndustryJobsModel(
+        character_id=1, job_id=1003, status="delivered", activity_id=1, start_date="2026-03-10T00:00:00Z",
+        end_date="2026-03-25T00:00:00Z", completed_date="2026-03-25T00:00:00Z", blueprint_type_id=MODULE_BP,
+        product_type_id=MODULE, runs=40, successful_runs=40, cost=0.0, blueprint_material_efficiency=10,
+        output_quantity=40, unit_build_cost=1.0))
+    app_session.commit()
+
+    _service(app_session, sde_session).rebuild(character_id=1)
+    jobs = _jobs(app_session)
+
+    assert (jobs[1001].materials_cost, jobs[1003].materials_cost) == (160.0, 180.0)
+
+
+def test_the_job_sync_keeps_the_ledger_materials_and_recomputes_the_total() -> None:
+    existing = CharacterIndustryJobsModel(
+        job_id=1001, materials_cost=200.0, historical_materials_cost=200.0, historical_input_costs={"34": {}},
+        historical_material_cost_source="ledger_fifo", historical_material_coverage_fraction=1.0,
+        build_cost_source="ledger_fifo", total_build_cost=300.0, unit_build_cost=7.5)
+    row = {"materials_cost": 999.0, "historical_materials_cost": 999.0, "historical_input_costs": None,
+           "build_cost_source": "mixed", "cost": 150.0, "copy_cost": 10.0, "invention_cost": 40.0,
+           "output_quantity": 50, "total_build_cost": 1.0, "unit_build_cost": 1.0}
+
+    keep_ledger_job_cost(row, existing)
+
+    assert (row["materials_cost"], row["historical_input_costs"], row["build_cost_source"]) == (
+        200.0, {"34": {}}, "ledger_fifo")
+    assert (row["total_build_cost"], row["unit_build_cost"]) == (400.0, 8.0)  # 200 + 150 + 10 + 40, over 50
+
+
+def test_a_sync_change_to_a_ledger_priced_job_makes_the_ledger_stale(session_provider) -> None:
+    app_session, sde_session = session_provider.app_session(), session_provider.sde_session()
+    _seed(app_session, sde_session, sale=True)
+    service = _service(app_session, sde_session)
+    service.rebuild(character_id=1)
+    assert service.stale_resolved_cost_owner_ids(service.list_rows(character_id=1)) == set()
+
+    job = _jobs(app_session)[1002]
+    row = {name: getattr(job, name) for name in ("cost", "copy_cost", "output_quantity")} | {"invention_cost": 50.0}
+    keep_ledger_job_cost(row, job)
+    for name, value in row.items():
+        setattr(job, name, value)
+    app_session.commit()
+
+    assert job.unit_build_cost == 15.0  # (75 + 25 + 50) / 10
+    assert service.stale_resolved_cost_owner_ids(service.list_rows(character_id=1)) == {1}
