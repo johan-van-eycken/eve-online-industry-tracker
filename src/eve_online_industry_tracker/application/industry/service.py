@@ -264,6 +264,39 @@ class IndustryService(
             return ADMIN_SETTINGS_SCHEMA[category]["settings"][key]["default"]
         return admin.get(category, key)
 
+    def _priced_at_recent_trades(self, price_map: dict, hub: str) -> dict:
+        """The product sell prices at the planner's sale price: the market
+        depth cache's 5-day average trade price, else its cheapest sell order
+        without our own (ProfitabilityScorer._sell_price), so the overview
+        and the Daily Planner show the same margin. A type without a cache
+        row keeps its order-book price; that price stays as
+        order_book_unit_price."""
+        from eve_online_industry_tracker.infrastructure.models import MarketDepthCacheModel
+        type_ids = [int(t) for t in price_map]
+        if not type_ids:
+            return price_map
+        session = self._sessions.app_session()
+        try:
+            depth = {
+                int(r.type_id): r for r in session.query(MarketDepthCacheModel).filter(
+                    MarketDepthCacheModel.type_id.in_(type_ids), MarketDepthCacheModel.hub == hub,
+                ).all()
+            }
+        finally:
+            session.close()
+        out = dict(price_map)
+        for type_id, entry in price_map.items():
+            row = depth.get(int(type_id))
+            if row is None or not isinstance(entry, dict):
+                continue
+            for key in ("vwap_5d", "spot_sell_price"):
+                price = self._as_float(getattr(row, key, None))
+                if price is not None and price > 0:
+                    out[type_id] = {**entry, "unit_price": price, "price_source": f"market_depth:{key}",
+                                    "order_book_unit_price": entry.get("unit_price")}
+                    break
+        return out
+
     @staticmethod
     def _exclude_from_product_overview(row: dict[str, Any]) -> bool:
         type_name = str(row.get("type_name") or "").strip().lower()
@@ -2984,6 +3017,8 @@ class IndustryService(
         product_sell_price_map = pricing_service.get_type_price_map(
             type_ids=product_sell_price_type_ids, hub=normalized_market_hub, side=normalized_product_price_side,
         )
+        if normalized_product_price_side == "sell":
+            product_sell_price_map = self._priced_at_recent_trades(product_sell_price_map, normalized_market_hub)
         if progress_callback is not None:
             progress_callback(0.30, "Fetching material prices from market hub", {"stage": "material_prices", "product_types": len(product_sell_price_type_ids), "material_types": len(material_price_type_ids)})
         material_price_map = pricing_service.get_type_price_map(
