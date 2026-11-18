@@ -230,6 +230,19 @@ class TestPipelineAnalyzer:
         )
         assert states[0].total_pipeline_days == 5.0
 
+    def test_only_the_stock_at_the_market_hub_counts_not_the_production_structures(self):
+        """T1 modules in the Raitaru are job inputs; the hub stock (corp and
+        pilots') is what waits to be listed."""
+        row = _input_row(pipeline_units_in_jobs=0, pipeline_units_on_market=0)
+        raitaru = [SimpleNamespace(type_id=row.type_id, is_blueprint_copy=False, blueprint_runs=None, quantity=500)]
+        hub = [SimpleNamespace(type_id=row.type_id, is_blueprint_copy=False, blueprint_runs=None, quantity=30)]
+        states = PipelineAnalyzer().analyze(
+            input_rows=[row], industry_jobs=[], corp_assets=raitaru, stock_assets=hub,
+            market_depth_cache={}, weights={}, sell_velocities={row.type_id: 10.0},
+            meta_resolver=_NoBlueprints(),
+        )
+        assert states[0].total_pipeline_days == 3.0
+
     def test_pipeline_days_falls_back_to_units_over_velocity_when_producer_returns_none(self):
         row = _input_row(pipeline_days_supply=None, pipeline_units_in_jobs=40,
                           pipeline_units_on_market=60)

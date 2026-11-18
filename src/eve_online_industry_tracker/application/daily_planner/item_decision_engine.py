@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 import math
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from eve_online_industry_tracker.application.daily_planner.admin_setting import planner_setting as _adm
@@ -43,7 +43,10 @@ _MIN_HOURS_TO_FIRST_CHECK = 12
 def check_deadlines(now: datetime, check_hour: int, max_days: int) -> list[float]:
     """Seconds from `now` to each of the next `max_days` daily checks at
     `check_hour` local time (this machine's time zone, DST included); the
-    first at least _MIN_HOURS_TO_FIRST_CHECK away."""
+    first at least _MIN_HOURS_TO_FIRST_CHECK away. A naive `now` is UTC
+    (the planner's utc_now)."""
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
     day = now.astimezone().date()
     out: list[float] = []
     while len(out) < max_days:

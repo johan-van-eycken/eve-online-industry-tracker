@@ -69,6 +69,9 @@ class PipelineAnalyzer:
         meta_resolver: BlueprintCategorySource,
         sell_velocity_unavailable: dict[int, str] | None = None,  # type_id → why its sell history could not be read
         max_market_share_pct: float = DEFAULT_MAX_MARKET_SHARE_PCT,  # daily_planner/planner_max_market_share_pct
+        # The unsold stock (DailyPlannerService._get_hub_stock_assets: at the
+        # market hub). None: the corp assets' (a hand-built call).
+        stock_assets: list[Any] | None = None,
     ) -> list[PipelineState]:
         """Return one PipelineState for each input row."""
         now = _now()
@@ -108,14 +111,17 @@ class PipelineAnalyzer:
         meta_resolver.prefetch({t for t in asset_type_ids if t > 0})
 
         bpc_runs_by_type: dict[int, int] = {}
-        # Unsold product stock in the corp hangars (delivered, not yet listed).
+        # Unsold product stock (delivered, not yet listed).
         stock_by_type: dict[int, int] = {}
+        if stock_assets is not None:
+            meta_resolver.prefetch({int(_asset_attr(a, "type_id") or 0) for a in stock_assets} - {0})
+        for asset in corp_assets if stock_assets is None else stock_assets:
+            type_id = int(_asset_attr(asset, "type_id") or 0)
+            if type_id > 0 and not meta_resolver.is_blueprint(type_id):
+                stock_by_type[type_id] = stock_by_type.get(type_id, 0) + int(_asset_attr(asset, "quantity") or 0)
         for asset in corp_assets:
             type_id = int(_asset_attr(asset, "type_id") or 0)
-            if type_id <= 0:
-                continue
-            if not meta_resolver.is_blueprint(type_id):
-                stock_by_type[type_id] = stock_by_type.get(type_id, 0) + int(_asset_attr(asset, "quantity") or 0)
+            if type_id <= 0 or not meta_resolver.is_blueprint(type_id):
                 continue
             if not _asset_attr_bool(asset, "is_blueprint_copy"):
                 continue  # BPO — unlimited runs, not BPC stock
