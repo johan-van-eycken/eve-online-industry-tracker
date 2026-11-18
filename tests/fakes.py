@@ -31,6 +31,8 @@ class _Admin:
 
 class _AdminStub:
     def get(self, section, key, default=None):
+        if key == "planner_research_payback_days":
+            return None  # research is not weighed (test_research_payback.py weighs it)
         raise KeyError(key)  # forces ChainPlanner's own fallbacks
 
 

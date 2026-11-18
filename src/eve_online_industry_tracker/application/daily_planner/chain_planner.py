@@ -33,6 +33,8 @@ from eve_online_industry_tracker.application.daily_planner.models import (
 
 logger = logging.getLogger(__name__)
 
+DAY_SECONDS = 86_400
+
 # EVE Online meta_group_id for T1 items (eligible for BPO)
 META_GROUP_T1 = 1
 
@@ -152,6 +154,9 @@ class ChainPlanner:
         # EVE's percentage, 0..20 in steps of 2.
         te_research_target = int(admin_setting(self._admin, "industry", "max_blueprint_time_efficiency"))
         invention_min_attempts = int(_adm(self._admin, "planner_invention_min_attempts"))
+        # None (no settings store): research is never weighed, as before.
+        _payback = _adm(self._admin, "planner_research_payback_days")
+        research_payback_days = None if _payback is None else float(_payback)
 
         bpo_assets_by_type_id: dict[int, list] = phase1_data.get("bpo_assets_by_type_id", {})
         bpc_assets_by_type_id: dict[int, list] = phase1_data.get("bpc_assets_by_type_id", {})
@@ -264,6 +269,7 @@ class ChainPlanner:
                 market_depth_cache=market_depth_cache,
                 bpo_opportunities=bpo_opportunities,
                 te_research_target=te_research_target,
+                research_payback_days=research_payback_days,
                 busy_item_ids=busy_item_ids,
                 bpo_strong_buy_days=bpo_strong_buy_days,
                 bpo_consider_days=bpo_consider_days,
@@ -986,6 +992,7 @@ class ChainPlanner:
         bpo_consider_days: float,
         busy_item_ids: set[int] = frozenset(),
         busy_blueprint_type_ids: set[int] | frozenset[int] = frozenset(),
+        research_payback_days: float | None = None,
     ) -> dict[str, Any] | None:
         """Plan T1 chain: BPO path, ME/TE research, or BPC/shopping fallback.
 
@@ -1070,6 +1077,26 @@ class ChainPlanner:
             # one in an active job.
             if research_index is None:
                 current_me = current_te = None
+            # The lab blocks the only blueprint: research only when its saving
+            # pays back the production it stops within research_payback_days.
+            other_free = len(bpo_assets) - len(busy) > 1 or bool(bpc_assets_by_type_id.get(bp_type_id))
+            if research_payback_days is not None and not other_free:
+                lost_days = 0.0
+                if current_me is not None and optimal_me is not None and current_me < optimal_me:
+                    payback = _research_payback(decision, "research_material", current_me, optimal_me)
+                    if payback is not None and payback[0] > research_payback_days:
+                        _append_reason(decision, f"no ME research: pays back in {payback[0]:.0f} days "
+                                                 f"(max {research_payback_days:g})")
+                        current_me = None
+                    elif payback is not None:
+                        lost_days = payback[1]
+                if current_te is not None and current_te < optimal_te:
+                    payback = _research_payback(decision, "research_time", current_te // 2, optimal_te // 2,
+                                                queued_days=lost_days)
+                    if payback is not None and payback[0] > research_payback_days:
+                        _append_reason(decision, f"no TE research: pays back in {payback[0]:.0f} days "
+                                                 f"(max {research_payback_days:g})")
+                        current_te = None
             if current_me is not None and optimal_me is not None and current_me < optimal_me:
                 decision.overview_row["needs_me_research"] = True
                 decision.overview_row["me_research_target"] = optimal_me
@@ -2467,6 +2494,44 @@ def _research_label(row: dict[str, Any]) -> str | None:
     if me and te:
         return "ME and TE research"
     return "ME research" if me else ("TE research" if te else None)
+
+
+def _research_payback(
+    decision: ItemDecision, activity: str, from_level: int, to_level: int, *, queued_days: float = 0.0,
+) -> tuple[float, float] | None:
+    """(days until the research's saving pays back what it costs, research
+    days) for researching the row's only BPO from `from_level` to `to_level`,
+    or None when an input is unknown (research then goes ahead, as before).
+
+    While the BPO is in the lab (`queued_days` behind an earlier research,
+    plus its own days) it builds nothing: the cost is the row's daily profit
+    over those days plus the fee. The daily profit is what one slot makes
+    (24 x ISK/h), at most what the market buys (sell rate x unit profit).
+    ME saves 1% of the materials per level on what is sold; TE 2% of the job
+    time per level, which only adds profit when the slot, not the market, is
+    the limit."""
+    row = decision.overview_row
+    seconds = orow.get_research_duration_seconds(row, activity, from_level, to_level)
+    fee = orow.get_research_fee(row, activity, from_level, to_level)
+    quantity = orow.get_product_quantity(row)
+    unit_material = orow.get_material_cost_per_unit(row)
+    iph, velocity = decision.isk_per_hour, decision.effective_velocity
+    if (seconds is None or fee is None or quantity <= 0 or unit_material is None
+            or not iph or iph <= 0 or not velocity or velocity <= 0):
+        return None
+    unit_profit = (decision.absolute_profit_per_batch or 0.0) / quantity
+    slot_profit, market_profit = 24.0 * iph, velocity * unit_profit
+    daily_profit = min(slot_profit, market_profit)
+    if daily_profit <= 0:
+        return None
+    units_per_day = daily_profit / unit_profit if unit_profit > 0 else velocity
+    if activity == "research_material":
+        gain = (to_level - from_level) / 100 * unit_material * units_per_day
+    else:
+        gain = (to_level - from_level) * 2 / 100 * daily_profit if slot_profit < market_profit else 0.0
+    days = seconds / DAY_SECONDS
+    cost = daily_profit * (queued_days + days) + fee
+    return (float("inf") if gain <= 0 else cost / gain), days
 
 
 def _append_reason(decision: ItemDecision, reason: str) -> None:

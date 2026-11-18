@@ -472,6 +472,17 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
                 "help": "A batch on an owned BPO is sized to end just before one of the next this many "
                         "daily checks, the latest the market room allows.",
             },
+            "planner_research_payback_days": {
+                "type": "int",
+                "default": 30,
+                "min": 1,
+                "max": 365,
+                "step": 1,
+                "format": "%d",
+                "label": "Research payback (days)",
+                "help": "ME/TE research on a product's only blueprint stops its production while in the lab; "
+                        "it is planned only when the material/time saving pays that back within this many days.",
+            },
             "planner_daily_check_hour": {
                 "type": "int",
                 "default": 11,
