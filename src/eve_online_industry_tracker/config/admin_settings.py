@@ -545,16 +545,6 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
                 "label": "Invention min attempts",
                 "help": "Minimum invention attempts before actual success rate replaces the theoretical rate.",
             },
-            "planner_competition_index_gate": {
-                "type": "float",
-                "default": 4.0,
-                "min": 0.5,
-                "max": 20.0,
-                "step": 0.5,
-                "format": "%.1f",
-                "label": "Competition index gate",
-                "help": "competition_index above this value forces an item to 'watch' regardless of score.",
-            },
             "planner_mineral_correlation_threshold": {
                 "type": "float",
                 "default": -0.6,

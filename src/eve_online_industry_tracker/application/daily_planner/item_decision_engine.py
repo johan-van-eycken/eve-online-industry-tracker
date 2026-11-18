@@ -99,13 +99,11 @@ class ItemDecisionEngine:
                 overview_row=overview_row,
             )
 
-        competition_gate = float(_adm(admin_settings, "planner_competition_index_gate"))
         momentum_pause_threshold = float(_adm(admin_settings, "planner_momentum_pause_threshold"))
 
         price_trend_7d = pipeline.price_trend_7d_pct
         momentum_signal = pipeline.momentum_signal
         pipeline_days = pipeline.total_pipeline_days
-        competition_index = pipeline.competition_index
         has_active_jobs = pipeline.has_active_manufacturing_jobs
 
         # ── PAUSE check (hard override regardless of score) ───────────────────
@@ -183,11 +181,10 @@ class ItemDecisionEngine:
         if capital is None or capital <= 0:
             return _result("skip", "not built: batch cost unknown")
 
-        # ── WATCH check (market flooded, or no room left to sell a batch) ─────
-        # competition_index gate: only applied if competition_index is not None (Phase A: skip gate)
-        if competition_index is not None and competition_index >= competition_gate:
-            return _result("watch", f"Watch: competition index {competition_index:.1f} ≥ {competition_gate:.1f}")
-
+        # ── WATCH check (no room left to sell a batch) ────────────────────────
+        # No competition-index gate: it divides the hub's whole sell stock by our
+        # own sales, so it flagged ~300 of 330 items; the sell-time cap below
+        # already uses our real sell rate, which competition is part of.
         cap = market_cap_runs(
             batch_runs=batch_runs, units_per_run=units_per_run, velocity=velocity,
             pipeline_units=pipeline_units, max_days=max_days,
@@ -202,6 +199,8 @@ class ItemDecisionEngine:
         crpd = (scored.absolute_profit_per_batch / capital) / max(expected_days, 1.0)
         computed["expected_days_to_sell"] = expected_days
         computed["capital_return_per_day"] = crpd
+        if crpd <= 0:
+            return _result("skip", f"not built: no return on capital at the recent sale price ({100 * crpd:.2f}%/day)")
         return _result(
             "build",
             f"Build: margin {scored.margin_pct:.1f}%, {expected_days:.0f} days to sell, {100 * crpd:.2f}%/day on capital",

@@ -293,6 +293,31 @@ def test_margin_pct_is_the_fraction_as_a_percentage():
     assert scored.margin_pct == pytest.approx(18.0)
 
 
+def test_the_margin_uses_the_recent_sale_price_not_the_cheapest_sell_order():
+    """Standard L, 2026-11-18: a 30-unit order at 299,900 made a 99.9% margin
+    while it traded at ~35,000. The margin re-prices the row's proceeds at the
+    5-day average; costs (42,000) and fee share (90%) stay the row's own."""
+    row = _input_row(
+        quantity=1, profit_amount=270_000.0 - 42_000.0, profit_margin_fraction=228_000.0 / 270_000.0,
+        raw={"market_unit_price": 300_000.0, "net_proceeds": 270_000.0},
+    )
+    scored = ProfitabilityScorer().score(
+        pipeline=_pipeline_state(row.type_id), row=row, weights=None,
+        market_depth={"vwap_5d": 35_000.0, "spot_sell_price": 300_000.0}, margin_correlation=None,
+    )
+    assert scored.margin_pct == pytest.approx(100 * (31_500.0 - 42_000.0) / 31_500.0)
+
+
+def test_without_a_recent_price_the_margin_stays_the_rows_own():
+    row = _input_row(profit_margin_fraction=0.18, raw={"market_unit_price": 300_000.0, "net_proceeds": 270_000.0})
+    for depth in (None, {"vwap_5d": None, "spot_sell_price": None}):
+        scored = ProfitabilityScorer().score(
+            pipeline=_pipeline_state(row.type_id), row=row, weights=None,
+            market_depth=depth, margin_correlation=None,
+        )
+        assert scored.margin_pct == pytest.approx(18.0)
+
+
 class TestUnscoreableItems:
     """Finding 5 fix: an item the scorer cannot price is 'unscoreable', not 0.0-profitable."""
 
