@@ -21,12 +21,17 @@ from eve_online_industry_tracker.application.daily_planner.models import (
 logger = logging.getLogger(__name__)
 
 
+def market_room_runs(*, units_per_run: float, velocity: float, pipeline_units: float, max_days: float) -> int:
+    """Runs the market can absorb within max_days, given what is already in the pipeline."""
+    return max(0, math.floor((velocity * max_days - pipeline_units) / units_per_run))
+
+
 def market_cap_runs(
     *, batch_runs: int, units_per_run: float, velocity: float, pipeline_units: float, max_days: float,
 ) -> int:
-    """Runs of a batch the market can absorb within max_days, given what is already in the pipeline."""
-    room = math.floor((velocity * max_days - pipeline_units) / units_per_run)
-    return max(0, min(batch_runs, room))
+    """Runs of one batch the market can absorb within max_days (market_room_runs, at most the batch)."""
+    return min(batch_runs, market_room_runs(
+        units_per_run=units_per_run, velocity=velocity, pipeline_units=pipeline_units, max_days=max_days))
 
 
 class ItemDecisionEngine:
@@ -190,6 +195,9 @@ class ItemDecisionEngine:
             pipeline_units=pipeline_units, max_days=max_days,
         )
         computed["market_cap_runs"] = cap
+        computed["market_room_runs"] = market_room_runs(
+            units_per_run=units_per_run, velocity=velocity, pipeline_units=pipeline_units, max_days=max_days,
+        )
         if cap == 0:
             return _result("watch", f"market full: {pipeline_days:.0f} days of supply already, max {max_days:g}")
 

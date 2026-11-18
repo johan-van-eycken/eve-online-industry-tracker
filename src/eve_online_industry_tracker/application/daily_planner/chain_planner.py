@@ -670,6 +670,23 @@ class ChainPlanner:
                 unknown_rig,
             )
 
+        def _claim_parallel(decision: ItemDecision, runs: int, material_efficiency: int) -> dict[str, Any] | None:
+            # A free blueprint of the row's type for one more job of the same
+            # batch: a BPC with enough runs first (most runs first), then a BPO,
+            # at the batch's ME so its materials stay exact. Named items only.
+            bp_type_id = orow.get_blueprint_type_id(decision.overview_row) or 0
+            label = f"manufacture of {decision.type_name} ({decision.type_id}), parallel job"
+            for kind, key, asset in ledger.free_blueprints(bp_type_id):
+                if not isinstance(key, int) or isinstance(key, bool):
+                    continue
+                if _blueprint_efficiency(asset, "material") != int(material_efficiency):
+                    continue
+                if kind == "bpc" and _blueprint_runs(asset) < int(runs):
+                    continue
+                if ledger.claim(key, decision.type_id, label):
+                    return {"item_id": key, "owner_character_id": ledger.owner_of(key), "kind": kind}
+            return None
+
         return ChainPlan(
             decisions=all_decisions,
             bpo_opportunities=bpo_opportunities,
@@ -681,6 +698,7 @@ class ChainPlanner:
             rebuild_decisions=_rebuild,
             replan_released=_replan,
             undo_replan=_undo_replan,
+            claim_parallel_blueprint=_claim_parallel,
         )
 
     @staticmethod

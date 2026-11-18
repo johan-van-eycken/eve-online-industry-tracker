@@ -87,6 +87,9 @@ class ItemDecision:
     expected_days_to_sell: float | None = None
     capital_return_per_day: float | None = None
     market_cap_runs: int | None = None
+    # The runs the market absorbs within max days, not capped at one batch:
+    # room for parallel jobs of the same product (CharacterAssigner).
+    market_room_runs: int | None = None
     # Chain context flag — True for sub-components added in Phase 5 Pass 2
     is_sub_component: bool = False
     # overview row snapshot for downstream phases
@@ -186,3 +189,8 @@ class ChainPlan:
     replan_released: Any = field(default=None, repr=False, compare=False)
     #: Puts a re-planned row that still got no action back as it was.
     undo_replan: Any = field(default=None, repr=False, compare=False)
+    #: Books a free blueprint for a parallel job of a top-level row:
+    #: (decision, runs, material efficiency) -> {"item_id", "owner_character_id"}
+    #: of a blueprint of the row's type with that ME and at least those runs,
+    #: or None. None for a hand-built plan: no parallel jobs.
+    claim_parallel_blueprint: Any = field(default=None, repr=False, compare=False)
