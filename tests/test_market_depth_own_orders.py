@@ -110,7 +110,7 @@ def test_unreadable_own_orders_keep_the_previous_row_and_mark_it_stale(app_engin
     before = _cache_rows(app_engine)[0]
     assert before["competitor_units"] == 100
 
-    monkeypatch.setattr(c, "_query_own_sell_volume", _boom)
+    monkeypatch.setattr(c, "_query_own_sell_orders", _boom)
     state.esi_service = _book(999, price=6.0)
     with caplog.at_level(logging.WARNING):
         c.run()
@@ -134,7 +134,7 @@ def test_a_fresh_write_clears_the_stale_reason(app_engine, monkeypatch):
 
 def test_unreadable_own_orders_without_a_previous_row_write_nothing(app_engine, monkeypatch, caplog):
     c = _collector(monkeypatch, _state(app_engine))
-    monkeypatch.setattr(c, "_query_own_sell_volume", _boom)
+    monkeypatch.setattr(c, "_query_own_sell_orders", _boom)
     with caplog.at_level(logging.WARNING):
         c.run()
     assert _cache_rows(app_engine) == []
@@ -250,3 +250,40 @@ def test_the_velocity_fallback_leaves_out_non_personal_character_transactions(ap
     s.close()
     c = MarketDepthCollector(state=_own_sell_state(app_engine))
     assert c._get_effective_velocity(TYPE, {CORP}, {CHAR}) == pytest.approx(45 / 30)
+
+
+def _seed_history(app_engine, *days_ago_close_volume):
+    from eve_online_industry_tracker.infrastructure.models import MarketHistoryModel
+    s = sessionmaker(bind=app_engine, future=True)()
+    for days_ago, close, volume in days_ago_close_volume:
+        s.add(MarketHistoryModel(type_id=TYPE, region_id=10000002, close=close, volume=volume, order_count=1,
+                                 high=close, low=close,
+                                 date=(datetime.utcnow() - timedelta(days=days_ago)).date().isoformat()))
+    s.commit()
+    s.close()
+
+
+def test_the_spot_price_leaves_out_our_own_sell_orders(app_engine, monkeypatch):
+    """Capital rigs, 2026-11-18: the only order on the book was ours, so our own
+    asking price approved itself as the market price."""
+    _seed_orders(app_engine)   # our corp order ids 1 and 2
+    state = _state(app_engine)
+    state.esi_service = SimpleNamespace(get_sell_order_book=lambda type_ids, region_id=None: {TYPE: [
+        {"price": 120.0, "volume_remain": 10, "order_id": 1},    # ours
+        {"price": 150.0, "volume_remain": 5, "order_id": 777},   # a competitor
+    ]})
+    c = _collector(monkeypatch, state)
+    c.run()
+    assert _cache_rows(app_engine)[0]["spot_sell_price"] == 150.0
+
+
+def test_without_trades_in_the_window_the_vwap_is_the_last_known_trades(app_engine, monkeypatch):
+    """No trade in the last 5 days: the last trades (within 90 days) price it,
+    not the asking price."""
+    _seed_history(app_engine, (12, 100.0, 1), (20, 110.0, 1), (200, 999.0, 1))
+    state = _state(app_engine)
+    state.esi_service = SimpleNamespace(get_sell_order_book=lambda type_ids, region_id=None: {TYPE: [
+        {"price": 150.0, "volume_remain": 5, "order_id": 777}]})
+    c = _collector(monkeypatch, state)
+    c.run()
+    assert _cache_rows(app_engine)[0]["vwap_5d"] == pytest.approx(105.0)
