@@ -10,6 +10,7 @@ from typing import Any
 from eve_online_industry_tracker.application.daily_planner.input_row import PlannerInputRow
 from eve_online_industry_tracker.application.daily_planner.learning_weights import read_weight
 from eve_online_industry_tracker.application.daily_planner.models import PipelineState, ScoredItem
+from eve_online_industry_tracker.application.industry import overview_row as orow
 from eve_online_industry_tracker.config.admin_settings import ADMIN_SETTINGS_SCHEMA
 
 logger = logging.getLogger(__name__)
@@ -58,8 +59,8 @@ class ProfitabilityScorer:
         else:
             isk_per_hour = row.isk_per_hour
 
-        margin_fraction = row.profit_margin_fraction if row.profit_margin_fraction is not None else 0.0
-        margin_pct = margin_fraction * 100.0
+        margin_fraction = _margin_at_sale_price(row, _sell_price(market_depth))
+        margin_pct = (margin_fraction if margin_fraction is not None else 0.0) * 100.0
 
         # ── Self-learning multipliers ─────────────────────────────────────────
         accuracy_ema = read_weight(weights, "accuracy_ema")
@@ -186,6 +187,24 @@ def _compute_absolute_profit(
     if row.profit_amount is not None:
         return row.profit_amount, None
     return 0.0, "no cost basis (material cost and profit unavailable)"
+
+
+def _margin_at_sale_price(row: PlannerInputRow, sell_price: float | None) -> float | None:
+    """The row's margin with its proceeds re-priced at `sell_price` (the 5-day
+    average trade price, see _sell_price), costs and fee share unchanged.
+
+    The overview prices the product at the cheapest sell order, which a thin
+    market can put far above what the item trades at. The row's own margin
+    stays when either price is unknown.
+    """
+    raw = row.raw if isinstance(row.raw, dict) else {}
+    listed = orow._as_optional_float(raw.get("market_unit_price"))
+    net = orow._as_optional_float(raw.get("net_proceeds"))
+    if sell_price is None or not listed or listed <= 0 or not net or net <= 0 or row.profit_amount is None:
+        return row.profit_margin_fraction
+    total_cost = net - row.profit_amount
+    net_at_sale = net * sell_price / listed
+    return (net_at_sale - total_cost) / net_at_sale
 
 
 def _sell_price(market_depth: Any | None) -> float | None:

@@ -10,7 +10,6 @@ from eve_online_industry_tracker.application.daily_planner.models import Pipelin
 def _make_admin(
     min_isk=5_000_000,
     min_profit=20_000_000,
-    competition_gate=4.0,
     momentum_pause=-6.0,
     min_margin=10.0,
     max_days=45.0,
@@ -19,7 +18,6 @@ def _make_admin(
     settings = {
         "planner_min_isk_per_hour": min_isk,
         "planner_min_profit_per_batch": min_profit,
-        "planner_competition_index_gate": competition_gate,
         "planner_momentum_pause_threshold": momentum_pause,
         "planner_min_margin_pct": min_margin,
         "planner_max_days_to_sell": max_days,
@@ -112,15 +110,22 @@ class TestItemDecisionEngine:
         decision = self.engine.decide(scored, pipeline, row, admin)
         assert decision.decision == "watch", f"Expected watch, got {decision.decision}"
 
-    def test_watch_when_competition_flooded(self):
-        """competition_index >= 4.0 → watch (even with room on the market)."""
-        pipeline = _make_pipeline(total_pipeline_days=1.0, competition_index=4.5)
-        scored = _make_scored(adjusted_score=10_000_000, absolute_profit=50_000_000)
-        admin = _make_admin(competition_gate=4.0)
-        row = _make_overview_row()
+    def test_a_high_competition_index_no_longer_forces_watch(self):
+        """The index divides the hub's whole sell stock by our own sales, so it
+        flagged nearly every item; the sell-time rule decides instead."""
+        pipeline = _make_pipeline(total_pipeline_days=1.0, competition_index=17186.3)
+        decision = self.engine.decide(_make_scored(), pipeline, _make_overview_row(), _make_admin())
+        assert decision.decision == "build", decision.decision_reason
 
-        decision = self.engine.decide(scored, pipeline, row, admin)
-        assert decision.decision == "watch", f"Expected watch, got {decision.decision}"
+    def test_no_build_when_the_return_on_capital_is_not_positive(self):
+        """A loss at the realistic sale price is never built, whatever the margin says."""
+        pipeline = _make_pipeline(total_pipeline_days=1.0)
+        for profit in (-3_000_000, 0.0):
+            decision = self.engine.decide(
+                _make_scored(absolute_profit=profit), pipeline, _make_overview_row(), _make_admin(),
+            )
+            assert decision.decision == "skip", decision.decision_reason
+            assert "no return on capital" in decision.decision_reason
 
     def test_competition_index_none_does_not_force_watch(self):
         """Phase A: competition_index=None → no competition gate applied → can still 'build'."""
