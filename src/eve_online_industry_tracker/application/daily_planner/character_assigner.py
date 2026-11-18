@@ -30,6 +30,7 @@ from eve_online_industry_tracker.application.daily_planner.assigned_invention im
     invention_probability_floor,
 )
 from eve_online_industry_tracker.application.daily_planner import blueprint_stock as _stock
+from eve_online_industry_tracker.application.daily_planner import research_first
 from eve_online_industry_tracker.application.daily_planner.blueprint_ledger import BlueprintLedger
 from eve_online_industry_tracker.application.daily_planner.chain_planner import (
     NOT_BUILT_STAGE,
@@ -297,6 +298,15 @@ class CharacterAssigner:
                 # created -- two research actions on one item must not share a slot.
                 assigned_actions.extend(actions)
 
+        # Parallel pass: manufacturing slots still free, after every first job
+        # and its components, go to more jobs of the same top-level product.
+        claim_parallel = getattr(chain_plan, "claim_parallel_blueprint", None)
+        if callable(claim_parallel):
+            assigned_actions.extend(self._parallel_jobs(
+                top_level, emitted, chain_plan, claim_parallel, char_slots, characters, skill_gate,
+                bpc_pool, charger,
+            ))
+
         # Fill pass: research slots still free go to the candidates with no
         # science job yet, in rank order.
         for decision, kind, _cost in _candidates():
@@ -340,6 +350,86 @@ class CharacterAssigner:
             for cid, slot in char_slots.items()
         }
         return assigned_actions
+
+    def _parallel_jobs(
+        self, top_level: list[ItemDecision], emitted: dict[int, list[AssignedAction]], chain_plan: Any,
+        claim_parallel: Any, char_slots: dict[int, dict[str, Any]], characters: list[dict[str, Any]],
+        skill_gate: "_SkillGate", bpc_pool: dict[str, Any], charger: "_BuildCharger | None",
+    ) -> list[AssignedAction]:
+        """More jobs of a top-level product that got one whole-batch
+        manufacture: while the market has room for another whole batch
+        (market_room_runs), a free blueprint of the batch's ME and runs
+        (claim_parallel), a qualified pilot's slot and the wallet allow it.
+        In rank order, one extra job per product per round, so a higher
+        product does not take every slot. Not for a product with components
+        (sized for one batch), research or science on the row, or a batch
+        that is not one job on one owned blueprint."""
+        with_subs = {int(t) for t in getattr(chain_plan, "sub_request_parent_type_ids", None) or ()}
+        lanes: list[dict[str, Any]] = []
+        for decision in top_level:
+            actions = emitted.get(id(decision)) or []
+            mfg = [a for a in actions if a.action_type == "manufacture"]
+            row = decision.overview_row
+            segments = research_first.job_segments(row) or []
+            runs = mfg[0].runs if len(mfg) == 1 else None
+            if (decision.decision != "build" or runs is None or len(mfg) != len(actions)
+                    or int(decision.type_id) in with_subs or row.get("research_first") is not None
+                    or len(segments) != 1 or int(segments[0].get("runs") or 0) != runs
+                    or decision.market_room_runs is None):
+                continue
+            me = segments[0].get("blueprint_material_efficiency")
+            if me is None:
+                continue
+            room = int(decision.market_room_runs) - runs
+            if room < runs:
+                continue
+            qualified, blocked = skill_gate.check(orow.get_blueprint_type_id(row), "manufacturing")
+            if blocked is not None:
+                continue
+            lanes.append({"decision": decision, "first": mfg[0], "runs": runs, "me": int(me),
+                          "room": room, "qualified": qualified, "jobs": 1})
+
+        out: list[AssignedAction] = []
+        while lanes:
+            for lane in list(lanes):
+                decision, runs = lane["decision"], lane["runs"]
+                if lane["room"] < runs or not any(s["free_mfg"] > 0 for s in char_slots.values()):
+                    lanes.remove(lane)
+                    continue
+                blueprint = claim_parallel(decision, runs, lane["me"])
+                if blueprint is None:
+                    lanes.remove(lane)
+                    continue
+                owner = blueprint.get("owner_character_id")
+                char_id, char_name = self._best_mfg_char(
+                    char_slots, characters, only=[int(owner)] if owner is not None else None,
+                    qualified=lane["qualified"],
+                )
+                if char_id is None:
+                    lanes.remove(lane)
+                    continue
+                item_id = blueprint.get("item_id")
+                lane["jobs"] += 1
+                action = dataclasses.replace(
+                    lane["first"], character_id=char_id, character_name=char_name,
+                    materials=dict(lane["first"].materials) if lane["first"].materials is not None else None,
+                    blueprint_item_id=item_id,
+                    notes=f"Build: {decision.decision_reason}; parallel job {lane['jobs']} of this product"
+                          f"{f' (blueprint item {item_id})' if item_id is not None else ''}",
+                )
+                self._take_slot(char_slots, char_id, "manufacture")
+                if charger is not None and not charger.charge(decision, action, runs):
+                    self._release_slot(char_slots, char_id, "manufacture")
+                    lanes.remove(lane)
+                    continue
+                # One job per blueprint: no copy or invention on it today.
+                if item_id is not None:
+                    bpc_pool.setdefault("bpos" if blueprint.get("kind") == "bpo" else "bpcs", set()).add(int(item_id))
+                lane["room"] -= int(action.runs or runs)
+                out.append(action)
+                if int(action.runs or 0) < runs:
+                    lanes.remove(lane)   # cut to the wallet: nothing left for another
+        return out
 
     def _science_candidates(
         self, decisions: list[ItemDecision], char_slots: dict[int, dict[str, Any]],

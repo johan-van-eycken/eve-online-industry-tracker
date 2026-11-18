@@ -13,6 +13,9 @@ from eve_online_industry_tracker.infrastructure.esi_client import ESI_REQUEST_ER
 from eve_online_industry_tracker.infrastructure.models import MarketHistoryModel
 from eve_online_industry_tracker.infrastructure.session_provider import StateSessionProvider
 
+#: How far back the VWAP looks for a thin market's last trades.
+_LAST_TRADES_MAX_AGE_DAYS = 90
+
 #: A malformed value in one type's data: that type is skipped (kept stale),
 #: the others are still refreshed.
 _DATA_ERRORS: tuple[type[Exception], ...] = (ValueError,)   # a TypeError is a bug: it propagates
@@ -131,20 +134,18 @@ class MarketDepthCollector:
     def _compute_vwap_5d(self, type_id: int, region_id: int, days: int | None = None) -> float | None:
         """The VWAP over the last planner_vwap_days trading days (5 by
         default; the cache column keeps its vwap_5d name) from
-        MarketHistoryModel. None (the caller falls back to spot) with fewer
-        than min(3, days) days of data."""
+        MarketHistoryModel, within the last 90 days: a thin market's last
+        trades, not an asking price, price it. None (the caller falls back
+        to spot) without a trade in those 90 days."""
         days = self._vwap_days() if days is None else int(days)   # run() reads it once per cycle
         app_session = self._sessions.app_session()
         try:
-            cutoff = (datetime.utcnow() - timedelta(days=days)).date().isoformat()
+            cutoff = (datetime.utcnow() - timedelta(days=_LAST_TRADES_MAX_AGE_DAYS)).date().isoformat()
             rows = app_session.query(MarketHistoryModel).filter(
                 MarketHistoryModel.type_id == type_id,
                 MarketHistoryModel.region_id == region_id,
                 MarketHistoryModel.date >= cutoff,
             ).order_by(MarketHistoryModel.date.desc()).limit(days).all()
-
-            if len(rows) < min(3, days):
-                return None
 
             # Only include rows where both close price and volume are present
             valid_rows = [r for r in rows if r.volume and r.close]
@@ -206,11 +207,11 @@ class MarketDepthCollector:
                 out[int(character_id)] = int(corporation_id)
         return out
 
-    def _query_own_sell_volume(
+    def _query_own_sell_orders(
         self, type_id: int, corp_ids: set[int], character_ids: set[int], *, region_id: int,
         character_corporation_ids: dict[int, int] | None = None,
-    ) -> int:
-        """Total volume_remain of the open sell orders of every tracked
+    ) -> list[Any]:
+        """The open sell orders of every tracked
         corporation and character for this type_id in `region_id`, the
         region whose order book the competitor units are taken from (an
         order elsewhere is not on that book). A pilot's order placed for a
@@ -219,7 +220,7 @@ class MarketDepthCollector:
         region is left out, with a WARNING. A failed read raises
         (SQLAlchemyError): the caller keeps the previous row, marked stale."""
         if not corp_ids and not character_ids:
-            return 0
+            return []
         from eve_online_industry_tracker.infrastructure.models import (
             CharacterMarketOrdersModel,
             CorporationMarketOrdersModel,
@@ -253,11 +254,8 @@ class MarketDepthCollector:
                     "are not counted as own volume", type_id, len(no_region),
                     sorted(int(getattr(r, "order_id", 0) or 0) for r in no_region),
                 )
-            return sum(
-                int(getattr(r, "volume_remain", 0) or 0)
-                for r in rows
-                if getattr(r, "region_id", None) is not None and int(r.region_id) == int(region_id)
-            )
+            return [r for r in rows
+                    if getattr(r, "region_id", None) is not None and int(r.region_id) == int(region_id)]
         finally:
             try:
                 app_session.close()
@@ -344,7 +342,7 @@ class MarketDepthCollector:
             units = readable_int(order.get("volume_remain")) if isinstance(order, dict) else None
             if price is None or price <= 0 or units is None:
                 continue
-            readable.append({"price": price, "volume_remain": units})
+            readable.append({"price": price, "volume_remain": units, "order_id": order.get("order_id")})
         if len(readable) < len(orders):
             logging.warning("MarketDepthCollector: type_id=%s skipped %d of %d sell order(s) with an unreadable "
                             "price or volume", type_id, len(orders) - len(readable), len(orders))
@@ -365,18 +363,21 @@ class MarketDepthCollector:
                 filtered = orders
             orders = filtered
 
-        # Spot price = lowest price
-        spot_sell_price: float | None = min(o["price"] for o in orders) if orders else None
-
         # competitor_units = total volume_remain minus our own (every tracked corp and character)
         total_units = sum(o["volume_remain"] for o in orders)
         try:
-            own_units = self._query_own_sell_volume(type_id, corp_ids, character_ids, region_id=region_id)
+            own_orders = self._query_own_sell_orders(type_id, corp_ids, character_ids, region_id=region_id)
         except SQLAlchemyError as exc:
             # competitor_units would silently include our own orders: keep the previous row instead
             self._mark_stale(type_id, hub, f"own sell orders unreadable: {exc}")
             return
+        own_units = sum(int(getattr(r, "volume_remain", 0) or 0) for r in own_orders)
         competitor_units = max(0, total_units - own_units)
+
+        # Spot price = the lowest competitor price: our own asking price is no market price
+        own_ids = {int(r.order_id) for r in own_orders if getattr(r, "order_id", None) is not None}
+        competitor_prices = [o["price"] for o in orders if o.get("order_id") not in own_ids]
+        spot_sell_price: float | None = min(competitor_prices) if competitor_prices else None
 
         # VWAP
         vwap_5d = self._compute_vwap_5d(type_id, region_id, days=vwap_days)

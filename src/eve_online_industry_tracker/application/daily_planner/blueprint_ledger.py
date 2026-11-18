@@ -140,6 +140,13 @@ class BlueprintLedger:
         ]
         return sorted(out, key=lambda e: (-e[2], str(e[0])))
 
+    def free_blueprints(self, type_id: int) -> list[tuple[str, Hashable, Any]]:
+        """This type's unclaimed blueprints as (kind, key, asset): the BPCs,
+        most runs first, then the BPOs in asset order."""
+        bpcs = sorted(((k, a) for k, a in self._bpcs.get(int(type_id)) or [] if k not in self._claims),
+                      key=lambda e: (-_runs(e[1]), str(e[0])))
+        return [("bpc", k, a) for k, a in bpcs] + [("bpo", k, a) for k, a in self.free_bpos(type_id)]
+
     def bpc_key(self, type_id: int, item_id: int) -> Hashable | None:
         for key, asset in self._bpcs.get(int(type_id)) or []:
             if research_first.item_id(asset) == int(item_id):
