@@ -81,45 +81,31 @@ class TestPipelineAnalyzer:
         assert len(states) == 1
         assert abs(states[0].effective_velocity - 15.0) < 0.01, f"Got {states[0].effective_velocity}"
 
-    def test_effective_velocity_fallback_when_zero_velocity(self):
-        """When sell_velocity=0, fallback to 1/days_of_supply."""
-        rows = [_input_row(type_id=1, days_of_supply=10.0)]
-        velocities = {1: 0.0}
+    def test_without_own_sales_the_velocity_is_the_market_share(self):
+        """No own sales in 30 days: 5% of the region's 7-day daily volume, so a
+        product we never sold still gets a start (Mjolnir Heavy Missile: 3.3M/day)."""
+        rows = [_input_row(type_id=1, raw={"region_daily_volume_7d_avg": 3_000_000.0})]
+        states = self._run(rows, sell_velocities={1: 0.0})
+        assert states[0].effective_velocity == 150_000.0
+        assert states[0].velocity_unknown_reason is None
 
-        states = self._run(rows, sell_velocities=velocities)
-        assert len(states) == 1
-        # 1/10 = 0.1
-        assert abs(states[0].effective_velocity - 0.1) < 0.001, f"Got {states[0].effective_velocity}"
+    def test_own_sales_are_capped_at_the_market_share(self):
+        rows = [_input_row(type_id=1, raw={"region_daily_volume_7d_avg": 100.0})]
+        states = self._run(rows, sell_velocities={1: 40.0})
+        assert states[0].effective_velocity == 5.0
 
-    def test_effective_velocity_fallback_floored_at_0_01(self):
-        """effective_velocity is always >= 0.01."""
-        # sell_velocity=0, days_of_supply=0 → both zero → floor at 0.01
-        rows = [_input_row(type_id=1, days_of_supply=0.0)]
-        velocities = {1: 0.0}
+    def test_own_sales_below_the_market_share_stay_our_own_rate(self):
+        rows = [_input_row(type_id=1, raw={"region_daily_volume_7d_avg": 1_000.0})]
+        states = self._run(rows, sell_velocities={1: 10.0})
+        assert states[0].effective_velocity == 10.0
 
-        states = self._run(rows, sell_velocities=velocities)
-        assert len(states) == 1
-        assert states[0].effective_velocity >= 0.01, f"Got {states[0].effective_velocity}"
-        assert abs(states[0].effective_velocity - 0.01) < 0.001
-
-    def test_effective_velocity_minimum_floor_applies(self):
-        """Even with velocity=0 and huge days_of_supply, floor at 0.01."""
-        rows = [_input_row(type_id=1, days_of_supply=1000.0)]
-        velocities = {1: 0.0}
-
-        states = self._run(rows, sell_velocities=velocities)
-        # 1/1000 = 0.001 → floored to 0.01
-        assert states[0].effective_velocity >= 0.01
-
-    def test_effective_velocity_fallback_unknown_days_of_supply_floors_same_as_zero(self):
-        """days_of_supply=None must not be read as "sells out instantly": the velocity
-        fallback treats it exactly like a real 0.0 and floors at 0.01, not like a tiny
-        positive number (which 1.0/x would blow up into a huge, fabricated velocity)."""
-        rows = [_input_row(type_id=1, days_of_supply=None)]
-        velocities = {1: 0.0}
-
-        states = self._run(rows, sell_velocities=velocities)
-        assert abs(states[0].effective_velocity - 0.01) < 0.001
+    def test_no_own_sales_and_no_market_volume_is_an_unknown_velocity(self):
+        """The old 1 / days_of_supply fallback mixed units (it gave ~0.3 a day for
+        a 3.3M-a-day missile); without any volume the velocity is unknown."""
+        rows = [_input_row(type_id=1, days_of_supply=3.4, raw={})]
+        states = self._run(rows, sell_velocities={1: 0.0})
+        assert states[0].effective_velocity == 0.01
+        assert states[0].velocity_unknown_reason is not None
 
     def test_days_of_supply_unknown_reports_neutral_not_zero_downstream(self):
         """days_of_supply_current feeds ProfitabilityScorer.pipeline_saturation, where 0.0
@@ -220,15 +206,29 @@ class TestPipelineAnalyzer:
 
     # ── Real pipeline numbers ───────────────────────────────────────────────────
 
-    def test_pipeline_days_comes_from_the_producer_not_a_reimplementation(self):
-        row = _input_row(pipeline_days_supply=12.5, pipeline_units_in_jobs=40,
+    def test_pipeline_days_are_our_units_over_our_velocity_not_the_producers_market_days(self):
+        """The producer's pipeline_days_supply divides by the whole region's volume;
+        read back at our own rate it made our own stock almost vanish."""
+        row = _input_row(pipeline_days_supply=0.01, pipeline_units_in_jobs=40,
                           pipeline_units_on_market=60)
         states = PipelineAnalyzer().analyze(
             input_rows=[row], industry_jobs=[], corp_assets=[],
             market_depth_cache={}, weights={}, sell_velocities={row.type_id: 10.0},
             meta_resolver=_NoBlueprints(),
         )
-        assert states[0].total_pipeline_days == 12.5
+        assert states[0].total_pipeline_days == 10.0
+
+    def test_unsold_stock_in_the_hangar_counts_in_the_pipeline(self):
+        """Delivered but not yet listed (the 7 capital rigs of 2026-11-17) is supply too."""
+        row = _input_row(pipeline_units_in_jobs=0, pipeline_units_on_market=0)
+        stock = [SimpleNamespace(type_id=row.type_id, is_blueprint_copy=False, blueprint_runs=None, quantity=30),
+                 SimpleNamespace(type_id=row.type_id, is_blueprint_copy=False, blueprint_runs=None, quantity=20)]
+        states = PipelineAnalyzer().analyze(
+            input_rows=[row], industry_jobs=[], corp_assets=stock,
+            market_depth_cache={}, weights={}, sell_velocities={row.type_id: 10.0},
+            meta_resolver=_NoBlueprints(),
+        )
+        assert states[0].total_pipeline_days == 5.0
 
     def test_pipeline_days_falls_back_to_units_over_velocity_when_producer_returns_none(self):
         row = _input_row(pipeline_days_supply=None, pipeline_units_in_jobs=40,
@@ -364,15 +364,15 @@ def _analyze_one(row, sell_velocities):
 def test_no_velocity_signal_is_flagged_not_just_floored():
     state = _analyze_one(_input_row(type_id=1, days_of_supply=None), {})
     assert state.effective_velocity == 0.01
-    assert state.velocity_unknown_reason == "no corp sales in 30 days and no days-of-supply estimate"
+    assert state.velocity_unknown_reason == "no corp sales in 30 days and no market volume"
 
 
 def test_a_measured_velocity_has_no_unknown_reason():
     assert _analyze_one(_input_row(type_id=1), {1: 2.0}).velocity_unknown_reason is None
 
 
-def test_a_days_of_supply_fallback_has_no_unknown_reason():
-    state = _analyze_one(_input_row(type_id=1, days_of_supply=5.0), {})
+def test_a_market_share_fallback_has_no_unknown_reason():
+    state = _analyze_one(_input_row(type_id=1, raw={"region_daily_volume_7d_avg": 4.0}), {})
     assert abs(state.effective_velocity - 0.2) < 1e-12
     assert state.velocity_unknown_reason is None
 
@@ -391,14 +391,14 @@ def test_a_failed_sell_history_is_the_recorded_reason_when_nothing_else_is_known
         meta_resolver=_NoBlueprints(),
     )[0]
     assert state.velocity_unknown_reason == (
-        "sell history query failed (OperationalError) and no days-of-supply estimate"
+        "sell history query failed (OperationalError) and no market volume"
     )
 
 
-def test_days_of_supply_used_while_sell_history_was_unavailable_logs_a_warning(caplog):
+def test_the_market_share_used_while_sell_history_was_unavailable_logs_a_warning(caplog):
     with caplog.at_level(logging.WARNING):
         state = PipelineAnalyzer().analyze(
-            input_rows=[_input_row(type_id=1, days_of_supply=5.0)], industry_jobs=[],
+            input_rows=[_input_row(type_id=1, raw={"region_daily_volume_7d_avg": 4.0})], industry_jobs=[],
             corp_assets=[], market_depth_cache={}, weights={}, sell_velocities={},
             sell_velocity_unavailable={1: "corporation id unavailable"},
             meta_resolver=_NoBlueprints(),
@@ -407,7 +407,7 @@ def test_days_of_supply_used_while_sell_history_was_unavailable_logs_a_warning(c
     assert state.velocity_unknown_reason is None
     warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert any(
-        "type_id=1" in m and "corporation id unavailable" in m and "days of supply" in m
+        "type_id=1" in m and "corporation id unavailable" in m and "market share" in m
         for m in warnings
     ), warnings
 

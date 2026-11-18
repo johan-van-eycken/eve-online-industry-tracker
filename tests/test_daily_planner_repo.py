@@ -698,7 +698,7 @@ def _unknown_velocity_decision() -> ItemDecision:
     return dataclasses.replace(
         _decision(),
         effective_velocity=0.01,
-        velocity_unknown_reason="no corp sales in 30 days and no days-of-supply estimate",
+        velocity_unknown_reason="no corp sales in 30 days and no market volume",
     )
 
 

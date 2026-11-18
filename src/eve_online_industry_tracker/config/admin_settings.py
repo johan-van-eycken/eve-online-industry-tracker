@@ -450,6 +450,17 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
                 "label": "Maximum expected days to sell",
                 "help": "A batch is capped so pipeline plus batch sell within this many days; no room left means watch.",
             },
+            "planner_max_market_share_pct": {
+                "type": "float",
+                "default": 5.0,
+                "min": 0.1,
+                "max": 100.0,
+                "step": 0.5,
+                "format": "%.1f",
+                "label": "Maximum market share (%)",
+                "help": "The sell rate a build is sized on: our own 30-day sales, at most this share of the hub "
+                        "region's daily volume; without own sales this share is the start rate.",
+            },
             "planner_min_isk_per_hour": {
                 "type": "int",
                 "default": 2_000_000,

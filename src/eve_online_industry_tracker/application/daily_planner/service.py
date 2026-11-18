@@ -870,6 +870,7 @@ class DailyPlannerService:
             sell_velocities=phase1["sell_velocities"],
             sell_velocity_unavailable=phase1["sell_velocity_unavailable"],
             meta_resolver=self._meta_resolver,
+            max_market_share_pct=float(_adm(self._admin, "planner_max_market_share_pct")),
         )
 
     def _phase_3_score(

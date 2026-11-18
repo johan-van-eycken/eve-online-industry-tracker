@@ -667,7 +667,7 @@ def test_an_unknown_sell_velocity_skips_the_analysis_with_a_reason():
     row = _bpo_row(me_current=0)
     decision = _decision(
         row, effective_velocity=0.01,
-        velocity_unknown_reason="no corp sales in 30 days and no days-of-supply estimate",
+        velocity_unknown_reason="no corp sales in 30 days and no market volume",
     )
     phase1 = {"bpc_assets_by_type_id": {999: [object()]}, "blueprint_data": _bpo_bp_data(1000),
               "market_depth_cache": {999: {"spot_sell_price": 20_000.0}}}

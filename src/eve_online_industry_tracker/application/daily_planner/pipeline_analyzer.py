@@ -5,15 +5,10 @@ market depth cache, and learning weights; returns one PipelineState per item.
 
 `row.days_of_supply` (from the producer, industry/service.py:_calculate_days_of_supply)
 is `None` when the region's 7-day sell volume is itself unknown/zero, i.e. "we have no
-reliable read on how fast this sells" -- not "zero units already in the pipeline". Two
-places in this module read it, and None must not silently become "sells out instantly"
-in either:
+reliable read on how fast this sells" -- not "zero units already in the pipeline". It
+is read in one place, where None must not silently become "sells out instantly"
+(the sell rate itself comes from our own sales and the market share, not from it):
 
-  * The effective-velocity fallback (`1.0 / days_of_supply`) treats an unknown value as
-    0.0, which is safe only because of the `> 0.0` guard immediately below it: that
-    routes 0.0 to the same 0.01 floor as any other non-positive days_of_supply, i.e.
-    "assume a slow, unknown-quality signal", not "assume it sells out instantly" (which
-    `1.0 / small_number` would imply if the guard were absent).
   * `days_of_supply_current` is exposed on PipelineState and consumed by
     ProfitabilityScorer.pipeline_saturation (profitability_scorer.py, "Pipeline
     saturation": `max(floor, 1.0 - (days_supply - 3.0) / (full_days - 3.0))`, both
@@ -37,6 +32,7 @@ from eve_online_industry_tracker.application.daily_planner.character_assigner im
 from eve_online_industry_tracker.application.daily_planner.input_row import PlannerInputRow
 from eve_online_industry_tracker.application.daily_planner.learning_weights import read_weight
 from eve_online_industry_tracker.application.daily_planner.models import PipelineState
+from eve_online_industry_tracker.config.admin_settings import ADMIN_SETTINGS_SCHEMA
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +41,10 @@ logger = logging.getLogger(__name__)
 # ProfitabilityScorer.pipeline_saturation's own neutral point (profitability_scorer.py, "Pipeline
 # saturation": 1.0 at 3 days of supply, whatever the floor and full-days settings).
 _NEUTRAL_DAYS_OF_SUPPLY = 3.0
+
+#: The schema default of daily_planner/planner_max_market_share_pct, for a caller without settings.
+DEFAULT_MAX_MARKET_SHARE_PCT: float = float(
+    ADMIN_SETTINGS_SCHEMA["daily_planner"]["settings"]["planner_max_market_share_pct"]["default"])
 
 
 class BlueprintCategorySource(Protocol):
@@ -68,6 +68,7 @@ class PipelineAnalyzer:
         sell_velocities: dict[int, float],    # type_id → sell_velocity_per_day (from SalesHistoryService)
         meta_resolver: BlueprintCategorySource,
         sell_velocity_unavailable: dict[int, str] | None = None,  # type_id → why its sell history could not be read
+        max_market_share_pct: float = DEFAULT_MAX_MARKET_SHARE_PCT,  # daily_planner/planner_max_market_share_pct
     ) -> list[PipelineState]:
         """Return one PipelineState for each input row."""
         now = _now()
@@ -107,11 +108,14 @@ class PipelineAnalyzer:
         meta_resolver.prefetch({t for t in asset_type_ids if t > 0})
 
         bpc_runs_by_type: dict[int, int] = {}
+        # Unsold product stock in the corp hangars (delivered, not yet listed).
+        stock_by_type: dict[int, int] = {}
         for asset in corp_assets:
             type_id = int(_asset_attr(asset, "type_id") or 0)
             if type_id <= 0:
                 continue
             if not meta_resolver.is_blueprint(type_id):
+                stock_by_type[type_id] = stock_by_type.get(type_id, 0) + int(_asset_attr(asset, "quantity") or 0)
                 continue
             if not _asset_attr_bool(asset, "is_blueprint_copy"):
                 continue  # BPO — unlimited runs, not BPC stock
@@ -133,6 +137,8 @@ class PipelineAnalyzer:
                     weights=weights,
                     sell_velocities=sell_velocities,
                     sell_velocity_unavailable=sell_velocity_unavailable or {},
+                    stock_units=stock_by_type.get(type_id, 0),
+                    max_market_share=float(max_market_share_pct) / 100.0,
                     now=now,
                 )
                 result.append(state)
@@ -152,24 +158,33 @@ class PipelineAnalyzer:
         weights: dict[int, Any],
         sell_velocities: dict[int, float],
         sell_velocity_unavailable: dict[int, str],
-        now: datetime,
+        stock_units: int = 0,
+        max_market_share: float = DEFAULT_MAX_MARKET_SHARE_PCT / 100.0,
+        now: datetime | None = None,
     ) -> PipelineState:
         # ── Velocity ──────────────────────────────────────────────────────────
         sell_velocity_per_day = float(sell_velocities.get(type_id, 0.0))
         velocity_multiplier = read_weight(weights.get(type_id), "velocity_multiplier")
 
-        # See module docstring: an unknown days_of_supply is 0.0 here, which
-        # the `> 0.0` test below routes to "no signal".
-        days_of_supply_for_velocity = row.days_of_supply if row.days_of_supply is not None else 0.0
+        # Our own sell rate, never above max_market_share of the region's daily
+        # volume; without own sales that share is the start rate, so a product we
+        # never sold can still be built. Without either it is unknown.
+        region_volume = row.raw.get("region_daily_volume_7d_avg") if isinstance(row.raw, dict) else None
+        try:
+            region_volume = float(region_volume) if region_volume is not None else None
+        except (TypeError, ValueError):
+            region_volume = None
+        market_cap = max_market_share * region_volume if region_volume and region_volume > 0 else None
 
         velocity_unknown_reason: str | None = None
         if sell_velocity_per_day > 0.0:
-            effective_velocity = max(0.01, sell_velocity_per_day * velocity_multiplier)
-        elif days_of_supply_for_velocity > 0.0:
-            effective_velocity = max(0.01, 1.0 / days_of_supply_for_velocity)
+            own = sell_velocity_per_day * velocity_multiplier
+            effective_velocity = max(0.01, min(own, market_cap) if market_cap is not None else own)
+        elif market_cap is not None:
+            effective_velocity = max(0.01, market_cap)
             if type_id in sell_velocity_unavailable:
                 logger.warning(
-                    "PipelineAnalyzer: type_id=%s %s; velocity estimated from days of supply",
+                    "PipelineAnalyzer: type_id=%s %s; velocity is the market share",
                     type_id, sell_velocity_unavailable[type_id],
                 )
         else:
@@ -178,23 +193,17 @@ class PipelineAnalyzer:
             # a measured sell rate.
             effective_velocity = 0.01
             why_no_sales = sell_velocity_unavailable.get(type_id, "no corp sales in 30 days")
-            velocity_unknown_reason = f"{why_no_sales} and no days-of-supply estimate"
+            velocity_unknown_reason = f"{why_no_sales} and no market volume"
 
         # ── Pipeline days ─────────────────────────────────────────────────────
-        # The producer already computes this (industry/service.py:2004-2012) as
-        # (pipeline_units_in_jobs + pipeline_units_on_market) / vol_7d, returning
-        # None only when vol_7d == 0. pipeline_units_in_jobs is itself
-        # SUM(output_quantity) over jobs with status in ("active", "ready")
-        # (industry/service.py:1872-1889) -- i.e. it already IS the units
-        # sitting in manufacturing. The fallback below must reuse that same
-        # numerator verbatim and differ only in the denominator (effective_velocity
-        # standing in for the unavailable vol_7d); adding a second, independently
-        # computed "units in manufacturing" term here would double-count them.
-        if row.pipeline_days_supply is not None:
-            total_pipeline_days = float(row.pipeline_days_supply)
-        else:
-            units_in_pipeline = float(row.pipeline_units_in_jobs) + float(row.pipeline_units_on_market)
-            total_pipeline_days = units_in_pipeline / effective_velocity
+        # Our own supply in units -- in jobs (active/ready output), on the
+        # market (our sell orders) and unsold in the hangar -- at our own rate.
+        # Not the producer's pipeline_days_supply: that divides by the whole
+        # region's volume, and read back at our rate our own stock vanished.
+        units_in_pipeline = (
+            float(row.pipeline_units_in_jobs) + float(row.pipeline_units_on_market) + float(stock_units)
+        )
+        total_pipeline_days = units_in_pipeline / effective_velocity
 
         # ── Competition (from pre-computed cache, Phase A = None) ─────────────
         cache_entry = market_depth_cache.get(type_id)

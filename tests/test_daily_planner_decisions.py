@@ -255,7 +255,7 @@ class TestItemDecisionEngine:
 
 def test_the_decision_carries_the_pipelines_velocity_unknown_reason():
     import dataclasses
-    reason = "no corp sales in 30 days and no days-of-supply estimate"
+    reason = "no corp sales in 30 days and no market volume"
     pipeline = dataclasses.replace(_make_pipeline(), velocity_unknown_reason=reason)
     for scored in (_make_scored(), _make_scored(unscoreable_reason="no cost basis")):
         decision = ItemDecisionEngine().decide(
