@@ -461,6 +461,39 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
                 "help": "The sell rate a build is sized on: our own 30-day sales, at most this share of the hub "
                         "region's daily volume; without own sales this share is the start rate.",
             },
+            "planner_max_job_days": {
+                "type": "int",
+                "default": 7,
+                "min": 1,
+                "max": 30,
+                "step": 1,
+                "format": "%d",
+                "label": "Maximum BPO job length (days)",
+                "help": "A batch on an owned BPO is sized to end just before one of the next this many "
+                        "daily checks, the latest the market room allows.",
+            },
+            "planner_research_payback_days": {
+                "type": "int",
+                "default": 30,
+                "min": 1,
+                "max": 365,
+                "step": 1,
+                "format": "%d",
+                "label": "Research payback (days)",
+                "help": "ME/TE research on a product's only blueprint stops its production while in the lab; "
+                        "it is planned only when the material/time saving pays that back within this many days.",
+            },
+            "planner_daily_check_hour": {
+                "type": "int",
+                "default": 11,
+                "min": 0,
+                "max": 23,
+                "step": 1,
+                "format": "%d",
+                "label": "Daily industry check (local hour)",
+                "help": "The hour (this machine's time zone) you deliver and start jobs each day; "
+                        "BPO batches are sized to end before it.",
+            },
             "planner_min_isk_per_hour": {
                 "type": "int",
                 "default": 2_000_000,

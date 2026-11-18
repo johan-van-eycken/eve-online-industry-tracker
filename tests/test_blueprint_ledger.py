@@ -34,6 +34,8 @@ from eve_online_industry_tracker.application.daily_planner.service import merge_
 
 class _Adm:
     def get(self, section, key, default=None):
+        if key == "planner_research_payback_days":
+            return None  # research is not weighed (test_research_payback.py weighs it)
         raise KeyError(key)
 
 

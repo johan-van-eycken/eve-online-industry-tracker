@@ -61,6 +61,8 @@ def _build_service(
         lambda self, *, owned_blueprints_scope, **kwargs: owned_item_inventory or ({}, {}),
         service,
     )
+    # No market depth cache: the order-book prices stand (test_overview_recent_trade_price.py covers it).
+    service._priced_at_recent_trades = MethodType(lambda self, price_map, hub: price_map, service)  # type: ignore[attr-defined]
     service._get_adjusted_market_price_map = MethodType(  # type: ignore[attr-defined]
         lambda self: adjusted_price_map,
         service,

@@ -51,7 +51,7 @@ def test_build_ranks_by_capital_return():
     assert d.market_cap_runs == 30
     assert d.expected_days_to_sell == pytest.approx(30)
     assert d.capital_return_per_day == pytest.approx(0.2 / 30)
-    assert d.decision_reason == "Build: margin 15.0%, 30 days to sell, 0.67%/day on capital"
+    assert d.decision_reason == "margin 15.0%, 30 days to sell, 0.67%/day on capital"
 
 
 def test_low_isk_per_hour_still_builds():

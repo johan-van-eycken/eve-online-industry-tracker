@@ -48,6 +48,7 @@ from eve_online_industry_tracker.application.daily_planner.shopping_list_builder
 )
 from eve_online_industry_tracker.application.industry import overview_row as orow
 from eve_online_industry_tracker.application.industry.type_metadata import TypeMetadataResolver
+from eve_online_industry_tracker.application.market_pricing.service import MarketPricingService
 from eve_online_industry_tracker.infrastructure.models import (
     BuildPlanItemModel,
     BuildPlanModel,
@@ -717,6 +718,8 @@ class DailyPlannerService:
             industry_jobs = self._get_industry_jobs()
         with _ComputeStep(self, "reading corp assets"):
             corp_assets = self._get_corp_assets()
+        with _ComputeStep(self, "reading stock at the market hub"):
+            hub_stock_assets = self._get_hub_stock_assets()
         # Material stock (blueprints excluded), shared by chain planning and
         # the shopping list.
         with _ComputeStep(self, "indexing corp material stock"):
@@ -824,6 +827,7 @@ class DailyPlannerService:
             # flag is often NULL; chain planning adds the current snapshot).
             "blueprint_copy_flags": self._blueprint_copy_flags(busy_item_ids) if busy_item_ids else {},
             "corp_assets": corp_assets,
+            "hub_stock_assets": hub_stock_assets,
             "corp_material_stock": corp_material_stock,
             "corp_orders": corp_orders,
             "weights": weights,
@@ -865,6 +869,7 @@ class DailyPlannerService:
             input_rows=phase1["input_rows"],
             industry_jobs=phase1["industry_jobs"],
             corp_assets=phase1["corp_assets"],
+            stock_assets=phase1.get("hub_stock_assets"),
             market_depth_cache=phase1["market_depth_cache"],
             weights=phase1["weights"],
             sell_velocities=phase1["sell_velocities"],
@@ -1297,6 +1302,32 @@ class DailyPlannerService:
             return session.query(CorporationAssetsModel).filter(
                 CorporationAssetsModel.corporation_id.in_(corporation_ids)
             ).all()
+        finally:
+            session.close()
+
+    def _get_hub_stock_assets(self) -> list[Any]:
+        """The known pilots' and their corporations' assets at the market
+        hub's station: the stock waiting to be listed. Stock in the
+        production structure is input for its jobs (delivered output moves
+        to the hub), so it is not counted as unsold product.
+
+        No error handler (like _get_corp_assets): a failed query must fail
+        the compute, not read as "no stock"."""
+        character_ids, corporation_ids = self._known_owner_ids()
+        hub = str(_adm(self._admin, "planner_market_hub"))
+        station_id = MarketPricingService._MARKET_HUBS[hub]["station_id"]
+        session = self._session_provider.app_session()
+        try:
+            from eve_online_industry_tracker.infrastructure.models import CharacterAssetsModel, CorporationAssetsModel
+            corp = session.query(CorporationAssetsModel).filter(
+                CorporationAssetsModel.corporation_id.in_(corporation_ids),
+                CorporationAssetsModel.top_location_id == station_id,
+            ).all()
+            chars = session.query(CharacterAssetsModel).filter(
+                CharacterAssetsModel.character_id.in_(character_ids),
+                CharacterAssetsModel.top_location_id == station_id,
+            ).all()
+            return [*corp, *chars]
         finally:
             session.close()
 

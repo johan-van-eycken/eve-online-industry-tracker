@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import math
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from eve_online_industry_tracker.application.daily_planner.admin_setting import planner_setting as _adm
@@ -32,6 +33,45 @@ def market_cap_runs(
     """Runs of one batch the market can absorb within max_days (market_room_runs, at most the batch)."""
     return min(batch_runs, market_room_runs(
         units_per_run=units_per_run, velocity=velocity, pipeline_units=pipeline_units, max_days=max_days))
+
+
+DAY_SECONDS = 86_400
+#: A check closer than this to the plan is today's own session: the job aims for the next one.
+_MIN_HOURS_TO_FIRST_CHECK = 12
+
+
+def check_deadlines(now: datetime, check_hour: int, max_days: int) -> list[float]:
+    """Seconds from `now` to each of the next `max_days` daily checks at
+    `check_hour` local time (this machine's time zone, DST included); the
+    first at least _MIN_HOURS_TO_FIRST_CHECK away. A naive `now` is UTC
+    (the planner's utc_now)."""
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    day = now.astimezone().date()
+    out: list[float] = []
+    while len(out) < max_days:
+        check = datetime(day.year, day.month, day.day, check_hour).astimezone()
+        gap = (check - now).total_seconds()
+        if gap >= _MIN_HOURS_TO_FIRST_CHECK * 3600:
+            out.append(gap)
+        day += timedelta(days=1)
+    return out
+
+
+def day_sized_runs(*, seconds_per_run: float, room_runs: int, deadlines: list[float]) -> int | None:
+    """Runs of a BPO job that ends just before one of the next daily checks
+    (`deadlines`, check_deadlines), the latest the market room allows; the
+    room when even the first check fits more. None when no run fits before
+    the last check or the market has no room."""
+    if seconds_per_run <= 0 or room_runs < 1:
+        return None
+    for gap in reversed(deadlines):
+        runs = math.floor(gap / seconds_per_run)
+        if 1 <= runs <= room_runs:
+            return runs
+    if deadlines and math.floor(deadlines[0] / seconds_per_run) > room_runs:
+        return room_runs
+    return None
 
 
 class ItemDecisionEngine:
@@ -211,5 +251,5 @@ class ItemDecisionEngine:
             return _result("skip", f"not built: no return on capital at the recent sale price ({100 * crpd:.2f}%/day)")
         return _result(
             "build",
-            f"Build: margin {scored.margin_pct:.1f}%, {expected_days:.0f} days to sell, {100 * crpd:.2f}%/day on capital",
+            f"margin {scored.margin_pct:.1f}%, {expected_days:.0f} days to sell, {100 * crpd:.2f}%/day on capital",
         )
