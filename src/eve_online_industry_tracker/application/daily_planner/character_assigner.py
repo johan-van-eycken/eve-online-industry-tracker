@@ -40,6 +40,11 @@ from eve_online_industry_tracker.application.daily_planner.chain_planner import 
     build_product_to_blueprint_index,
 )
 from eve_online_industry_tracker.application.daily_planner.input_row import require_batch_runs
+from eve_online_industry_tracker.application.daily_planner.admin_setting import (
+    planner_setting as _adm,
+    schema_default,
+)
+from eve_online_industry_tracker.application.daily_planner.item_decision_engine import DAY_SECONDS, day_sized_runs
 from eve_online_industry_tracker.application.daily_planner.models import AssignedAction, ItemDecision
 from eve_online_industry_tracker.application.daily_planner.shopping_list_builder import (
     action_material_needs,
@@ -152,11 +157,24 @@ class CharacterAssigner:
         # it must never take a slot ahead of a parent. Slots only decrease, so
         # a parent left without a slot leaves none for its components either.
         build_decisions = [d for d in chain_plan.decisions if d.decision in ("build", "pause")]
-        # Capital-return order (phase 4); rows without one keep the score order.
-        top_level = sorted(
-            (d for d in build_decisions if not d.is_sub_component),
-            key=lambda d: (-(d.capital_return_per_day or 0), -d.adjusted_score),
-        )
+        top_level = [d for d in build_decisions if not d.is_sub_component]
+        # {type_id: runs} of the BPO batches sized to whole days of job time.
+        with_subs = {int(t) for t in getattr(chain_plan, "sub_request_parent_type_ids", None) or ()}
+        max_job_days = int(_adm(admin_settings, "planner_max_job_days") or schema_default(
+            "daily_planner", "planner_max_job_days"))
+        self._day_runs = {
+            int(d.type_id): runs for d in top_level
+            if (runs := _day_sized_batch(d, with_subs, max_job_days)) is not None
+        }
+        # Capital-return order (phase 4) while the wallet is short; when it
+        # pays every batch the slots are the limit, so profit per slot-day.
+        # Rows without either keep the score order.
+        need = sum(_job_capital(d, self._job_runs(d)) for d in top_level)
+        by_slot = budget is None or need <= budget.available
+        top_level.sort(key=lambda d: (
+            -(_slot_day_profit(d, self._job_runs(d)) if by_slot else 0.0),
+            -(d.capital_return_per_day or 0), -d.adjusted_score,
+        ))
         sub_components = [d for d in build_decisions if d.is_sub_component]
         charger = None if budget is None else _BuildCharger(
             self, budget, StockLedger(corp_material_stock or {}), price_map or {}, blueprint_data,
@@ -351,6 +369,17 @@ class CharacterAssigner:
         }
         return assigned_actions
 
+    def _job_runs(self, decision: ItemDecision) -> int | None:
+        """The runs the row's job will get: its whole-day BPO size, else its
+        batch at most the market cap."""
+        day_runs = getattr(self, "_day_runs", {}).get(int(decision.type_id))
+        if day_runs is not None:
+            return day_runs
+        batch = orow.get_manufacturing_job(decision.overview_row).get("runs")
+        if not isinstance(batch, int) or isinstance(batch, bool):
+            return None
+        return min(batch, getattr(decision, "market_cap_runs", None) or batch)
+
     def _parallel_jobs(
         self, top_level: list[ItemDecision], emitted: dict[int, list[AssignedAction]], chain_plan: Any,
         claim_parallel: Any, char_slots: dict[int, dict[str, Any]], characters: list[dict[str, Any]],
@@ -374,7 +403,9 @@ class CharacterAssigner:
             runs = mfg[0].runs if len(mfg) == 1 else None
             if (decision.decision != "build" or runs is None or len(mfg) != len(actions)
                     or int(decision.type_id) in with_subs or row.get("research_first") is not None
-                    or len(segments) != 1 or int(segments[0].get("runs") or 0) != runs
+                    or len(segments) != 1
+                    # A BPO batch may be sized to whole days (_day_sized_batch); a BPC's is its runs.
+                    or (int(segments[0].get("runs") or 0) != runs and segments[0].get("source") != _BPO_SOURCE)
                     or decision.market_room_runs is None):
                 continue
             me = segments[0].get("blueprint_material_efficiency")
@@ -1321,6 +1352,13 @@ class CharacterAssigner:
                     "manufacture", type_id,
                 ),
             ))
+            day_runs = self._day_runs.get(int(type_id)) if first is None else None
+            if day_runs is not None and day_runs != runs:
+                hours = (orow.get_elapsed_time_seconds(row) or 0) * day_runs / runs / 3600
+                cut_batch(actions[-1], day_runs, runs)
+                actions[-1].notes += f"; sized to {day_runs} runs, {hours:.0f}h of job time (whole days)"
+                # The charger cuts to market_cap_runs: the sized batch is the cap now.
+                decision.market_cap_runs = runs = day_runs
             self._take_slot(char_slots, char_id, "manufacture")
             if charger is not None and not charger.charge(decision, actions[-1], runs):
                 actions.pop()
@@ -2839,6 +2877,52 @@ def science_cost(action: AssignedAction) -> float | None:
     if fee is None or action.action_type != "invent":
         return fee
     return None if action.estimated_cost_isk is None else fee + action.estimated_cost_isk
+
+
+_BPO_SOURCE = "owned_blueprint_original"
+
+
+def _day_sized_batch(decision: ItemDecision, with_subs: set[int], max_days: int) -> int | None:
+    """The runs of a top-level build on one owned BPO sized to whole days of
+    job time (day_sized_runs), or None: kept as the producer sized it. Not
+    for a row with components (sized for its batch), research first, or a
+    batch on BPCs (their runs are the copy's)."""
+    row = decision.overview_row
+    segments = research_first.job_segments(row) or []
+    batch = orow.get_manufacturing_job(row).get("runs")
+    seconds = orow.get_elapsed_time_seconds(row)
+    if (decision.decision != "build" or getattr(decision, "market_room_runs", None) is None
+            or int(decision.type_id) in with_subs or row.get("research_first") is not None
+            or len(segments) != 1 or segments[0].get("source") != _BPO_SOURCE
+            or not isinstance(batch, int) or isinstance(batch, bool) or batch <= 0
+            or not seconds or seconds <= 0):
+        return None
+    return day_sized_runs(
+        seconds_per_run=seconds / batch, room_runs=int(decision.market_room_runs), max_days=max_days)
+
+
+def _batch_fraction(decision: ItemDecision, runs: int | None) -> float | None:
+    batch = orow.get_manufacturing_job(decision.overview_row).get("runs")
+    if runs is None or not isinstance(batch, int) or isinstance(batch, bool) or batch <= 0:
+        return None
+    return runs / batch
+
+
+def _job_capital(decision: ItemDecision, runs: int | None) -> float:
+    """What the row's job ties up (its batch cost at `runs`); 0 when unknown."""
+    fraction, cost = _batch_fraction(decision, runs), orow.get_total_cost(decision.overview_row)
+    return 0.0 if fraction is None or cost is None else cost * fraction
+
+
+def _slot_day_profit(decision: ItemDecision, runs: int | None) -> float:
+    """The job's profit per day it holds a slot: jobs are checked once a day,
+    so a job holds its slot for whole days, at least one. 0 when unknown."""
+    fraction = _batch_fraction(decision, runs)
+    seconds = orow.get_elapsed_time_seconds(decision.overview_row)
+    if fraction is None or not seconds or seconds <= 0:
+        return 0.0
+    days = max(1, math.ceil(seconds * fraction / DAY_SECONDS))
+    return (getattr(decision, "absolute_profit_per_batch", None) or 0.0) * fraction / days
 
 
 def cut_batch(action: AssignedAction, runs: int, batch_runs: int) -> None:

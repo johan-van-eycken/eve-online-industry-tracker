@@ -461,6 +461,17 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
                 "help": "The sell rate a build is sized on: our own 30-day sales, at most this share of the hub "
                         "region's daily volume; without own sales this share is the start rate.",
             },
+            "planner_max_job_days": {
+                "type": "int",
+                "default": 7,
+                "min": 1,
+                "max": 30,
+                "step": 1,
+                "format": "%d",
+                "label": "Maximum BPO job length (days)",
+                "help": "A batch on an owned BPO is sized to whole days of job time (1, 2, ... this many), "
+                        "so it ends before the daily check; within the market room.",
+            },
             "planner_min_isk_per_hour": {
                 "type": "int",
                 "default": 2_000_000,

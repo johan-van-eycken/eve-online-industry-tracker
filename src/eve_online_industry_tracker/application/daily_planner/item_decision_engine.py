@@ -34,6 +34,20 @@ def market_cap_runs(
         units_per_run=units_per_run, velocity=velocity, pipeline_units=pipeline_units, max_days=max_days))
 
 
+DAY_SECONDS = 86_400
+
+
+def day_sized_runs(*, seconds_per_run: float, room_runs: int, max_days: int) -> int | None:
+    """Runs of a BPO job that ends on a whole day of job time (1, 2, ... max_days
+    days), within the market room; the room when it is less than a day. None
+    when one run takes more than a day or the market has no room."""
+    per_day = math.floor(DAY_SECONDS / seconds_per_run) if seconds_per_run > 0 else 0
+    if per_day < 1 or room_runs < 1:
+        return None
+    days = max(1, min(room_runs // per_day, max_days))
+    return min(room_runs, days * per_day)
+
+
 class ItemDecisionEngine:
     """Phase 4: assign a decision to each scored item."""
 
@@ -211,5 +225,5 @@ class ItemDecisionEngine:
             return _result("skip", f"not built: no return on capital at the recent sale price ({100 * crpd:.2f}%/day)")
         return _result(
             "build",
-            f"Build: margin {scored.margin_pct:.1f}%, {expected_days:.0f} days to sell, {100 * crpd:.2f}%/day on capital",
+            f"margin {scored.margin_pct:.1f}%, {expected_days:.0f} days to sell, {100 * crpd:.2f}%/day on capital",
         )
