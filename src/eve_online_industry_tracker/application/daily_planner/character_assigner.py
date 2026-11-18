@@ -44,7 +44,11 @@ from eve_online_industry_tracker.application.daily_planner.admin_setting import 
     planner_setting as _adm,
     schema_default,
 )
-from eve_online_industry_tracker.application.daily_planner.item_decision_engine import DAY_SECONDS, day_sized_runs
+from eve_online_industry_tracker.application.daily_planner.item_decision_engine import (
+    DAY_SECONDS,
+    check_deadlines,
+    day_sized_runs,
+)
 from eve_online_industry_tracker.application.daily_planner.models import AssignedAction, ItemDecision
 from eve_online_industry_tracker.application.daily_planner.shopping_list_builder import (
     action_material_needs,
@@ -162,9 +166,12 @@ class CharacterAssigner:
         with_subs = {int(t) for t in getattr(chain_plan, "sub_request_parent_type_ids", None) or ()}
         max_job_days = int(_adm(admin_settings, "planner_max_job_days") or schema_default(
             "daily_planner", "planner_max_job_days"))
+        check_hour = int(_adm(admin_settings, "planner_daily_check_hour") or schema_default(
+            "daily_planner", "planner_daily_check_hour"))
+        deadlines = check_deadlines(now, check_hour, max_job_days)
         self._day_runs = {
             int(d.type_id): runs for d in top_level
-            if (runs := _day_sized_batch(d, with_subs, max_job_days)) is not None
+            if (runs := _day_sized_batch(d, with_subs, deadlines)) is not None
         }
         # Capital-return order (phase 4) while the wallet is short; when it
         # pays every batch the slots are the limit, so profit per slot-day.
@@ -1356,7 +1363,7 @@ class CharacterAssigner:
             if day_runs is not None and day_runs != runs:
                 hours = (orow.get_elapsed_time_seconds(row) or 0) * day_runs / runs / 3600
                 cut_batch(actions[-1], day_runs, runs)
-                actions[-1].notes += f"; sized to {day_runs} runs, {hours:.0f}h of job time (whole days)"
+                actions[-1].notes += f"; sized to {day_runs} runs, {hours:.0f}h of job time (ends before a daily check)"
                 # The charger cuts to market_cap_runs: the sized batch is the cap now.
                 decision.market_cap_runs = runs = day_runs
             self._take_slot(char_slots, char_id, "manufacture")
@@ -2882,9 +2889,9 @@ def science_cost(action: AssignedAction) -> float | None:
 _BPO_SOURCE = "owned_blueprint_original"
 
 
-def _day_sized_batch(decision: ItemDecision, with_subs: set[int], max_days: int) -> int | None:
-    """The runs of a top-level build on one owned BPO sized to whole days of
-    job time (day_sized_runs), or None: kept as the producer sized it. Not
+def _day_sized_batch(decision: ItemDecision, with_subs: set[int], deadlines: list[float]) -> int | None:
+    """The runs of a top-level build on one owned BPO sized to end before a
+    daily check (day_sized_runs), or None: kept as the producer sized it. Not
     for a row with components (sized for its batch), research first, or a
     batch on BPCs (their runs are the copy's)."""
     row = decision.overview_row
@@ -2898,7 +2905,7 @@ def _day_sized_batch(decision: ItemDecision, with_subs: set[int], max_days: int)
             or not seconds or seconds <= 0):
         return None
     return day_sized_runs(
-        seconds_per_run=seconds / batch, room_runs=int(decision.market_room_runs), max_days=max_days)
+        seconds_per_run=seconds / batch, room_runs=int(decision.market_room_runs), deadlines=deadlines)
 
 
 def _batch_fraction(decision: ItemDecision, runs: int | None) -> float | None:

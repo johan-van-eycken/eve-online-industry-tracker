@@ -469,8 +469,19 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
                 "step": 1,
                 "format": "%d",
                 "label": "Maximum BPO job length (days)",
-                "help": "A batch on an owned BPO is sized to whole days of job time (1, 2, ... this many), "
-                        "so it ends before the daily check; within the market room.",
+                "help": "A batch on an owned BPO is sized to end just before one of the next this many "
+                        "daily checks, the latest the market room allows.",
+            },
+            "planner_daily_check_hour": {
+                "type": "int",
+                "default": 11,
+                "min": 0,
+                "max": 23,
+                "step": 1,
+                "format": "%d",
+                "label": "Daily industry check (local hour)",
+                "help": "The hour (this machine's time zone) you deliver and start jobs each day; "
+                        "BPO batches are sized to end before it.",
             },
             "planner_min_isk_per_hour": {
                 "type": "int",

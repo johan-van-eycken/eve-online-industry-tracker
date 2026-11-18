@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import math
+from datetime import datetime, timedelta
 from typing import Any
 
 from eve_online_industry_tracker.application.daily_planner.admin_setting import planner_setting as _adm
@@ -35,17 +36,39 @@ def market_cap_runs(
 
 
 DAY_SECONDS = 86_400
+#: A check closer than this to the plan is today's own session: the job aims for the next one.
+_MIN_HOURS_TO_FIRST_CHECK = 12
 
 
-def day_sized_runs(*, seconds_per_run: float, room_runs: int, max_days: int) -> int | None:
-    """Runs of a BPO job that ends on a whole day of job time (1, 2, ... max_days
-    days), within the market room; the room when it is less than a day. None
-    when one run takes more than a day or the market has no room."""
-    per_day = math.floor(DAY_SECONDS / seconds_per_run) if seconds_per_run > 0 else 0
-    if per_day < 1 or room_runs < 1:
+def check_deadlines(now: datetime, check_hour: int, max_days: int) -> list[float]:
+    """Seconds from `now` to each of the next `max_days` daily checks at
+    `check_hour` local time (this machine's time zone, DST included); the
+    first at least _MIN_HOURS_TO_FIRST_CHECK away."""
+    day = now.astimezone().date()
+    out: list[float] = []
+    while len(out) < max_days:
+        check = datetime(day.year, day.month, day.day, check_hour).astimezone()
+        gap = (check - now).total_seconds()
+        if gap >= _MIN_HOURS_TO_FIRST_CHECK * 3600:
+            out.append(gap)
+        day += timedelta(days=1)
+    return out
+
+
+def day_sized_runs(*, seconds_per_run: float, room_runs: int, deadlines: list[float]) -> int | None:
+    """Runs of a BPO job that ends just before one of the next daily checks
+    (`deadlines`, check_deadlines), the latest the market room allows; the
+    room when even the first check fits more. None when no run fits before
+    the last check or the market has no room."""
+    if seconds_per_run <= 0 or room_runs < 1:
         return None
-    days = max(1, min(room_runs // per_day, max_days))
-    return min(room_runs, days * per_day)
+    for gap in reversed(deadlines):
+        runs = math.floor(gap / seconds_per_run)
+        if 1 <= runs <= room_runs:
+            return runs
+    if deadlines and math.floor(deadlines[0] / seconds_per_run) > room_runs:
+        return room_runs
+    return None
 
 
 class ItemDecisionEngine:
