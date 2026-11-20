@@ -176,7 +176,10 @@ class CharacterAssigner:
         # Capital-return order (phase 4) while the wallet is short; when it
         # pays every batch the slots are the limit, so profit per slot-day.
         # Rows without either keep the score order.
-        need = sum(_job_capital(d, self._job_runs(d)) for d in top_level)
+        # Only the rows that can get a slot count: the best ones per slot-day.
+        slots = sum(int(c.get("free_mfg", 0)) for c in char_slots.values())
+        best = sorted(top_level, key=lambda d: -_slot_day_profit(d, self._job_runs(d)))[:slots]
+        need = sum(_job_capital(d, self._job_runs(d)) for d in best)
         by_slot = budget is None or need <= budget.available
         top_level.sort(key=lambda d: (
             -(_slot_day_profit(d, self._job_runs(d)) if by_slot else 0.0),
@@ -409,7 +412,7 @@ class CharacterAssigner:
             segments = research_first.job_segments(row) or []
             runs = mfg[0].runs if len(mfg) == 1 else None
             if (decision.decision != "build" or runs is None or len(mfg) != len(actions)
-                    or int(decision.type_id) in with_subs or row.get("research_first") is not None
+                    or int(decision.type_id) in with_subs or _research_first_changes_batch(row)
                     or len(segments) != 1
                     # A BPO batch may be sized to whole days (_day_sized_batch); a BPC's is its runs.
                     or (int(segments[0].get("runs") or 0) != runs and segments[0].get("source") != _BPO_SOURCE)
@@ -1359,7 +1362,7 @@ class CharacterAssigner:
                     "manufacture", type_id,
                 ),
             ))
-            day_runs = self._day_runs.get(int(type_id)) if first is None else None
+            day_runs = self._day_runs.get(int(type_id)) if first is None or first["mode"] == "other_bpo" else None
             if day_runs is not None and day_runs != runs:
                 hours = (orow.get_elapsed_time_seconds(row) or 0) * day_runs / runs / 3600
                 cut_batch(actions[-1], day_runs, runs)
@@ -2889,6 +2892,14 @@ def science_cost(action: AssignedAction) -> float | None:
 _BPO_SOURCE = "owned_blueprint_original"
 
 
+def _research_first_changes_batch(row: dict[str, Any]) -> bool:
+    """Whether research first changes what the row builds (a part, a variant,
+    nothing). Not mode other_bpo: the row builds as usual from another BPO
+    (e.g. while its own BPO is copied)."""
+    first = row.get("research_first")
+    return isinstance(first, dict) and first.get("mode") != "other_bpo"
+
+
 def _day_sized_batch(decision: ItemDecision, with_subs: set[int], deadlines: list[float]) -> int | None:
     """The runs of a top-level build on one owned BPO sized to end before a
     daily check (day_sized_runs), or None: kept as the producer sized it. Not
@@ -2899,7 +2910,7 @@ def _day_sized_batch(decision: ItemDecision, with_subs: set[int], deadlines: lis
     batch = orow.get_manufacturing_job(row).get("runs")
     seconds = orow.get_elapsed_time_seconds(row)
     if (decision.decision != "build" or getattr(decision, "market_room_runs", None) is None
-            or int(decision.type_id) in with_subs or row.get("research_first") is not None
+            or int(decision.type_id) in with_subs or _research_first_changes_batch(row)
             or len(segments) != 1 or segments[0].get("source") != _BPO_SOURCE
             or not isinstance(batch, int) or isinstance(batch, bool) or batch <= 0
             or not seconds or seconds <= 0):
