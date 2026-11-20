@@ -148,5 +148,23 @@ def test_with_money_for_every_batch_the_one_slot_goes_to_the_most_profit_per_slo
 
 
 def test_with_too_little_money_the_order_stays_return_on_capital():
-    actions = _assign(list(_two_products()), [_char(1, 1)], budget=WalletBudget(balance=15 * M, reserve_pct=0))
+    # 5M: not even the best batch for the one slot (10M) fits.
+    actions = _assign(list(_two_products()), [_char(1, 1)], budget=WalletBudget(balance=5 * M, reserve_pct=0))
     assert len(_jobs(actions, 100)) == 1 and not _jobs(actions, 200)
+
+
+def test_only_the_rows_that_can_get_a_slot_count_for_the_wallet_check():
+    """A wallet that pays the batches for the free slots ranks by slot-day,
+    even when every build row together would not fit (plan 35: ~240 rows)."""
+    a, b = _two_products()
+    big = _row_decision(type_id=300, runs=10, hours_per_run=1.0, profit=0.1 * M, crpd=0.01,
+                        source="owned_blueprint_copy")
+    big.overview_row["manufacturing_job"]["total_cost"] = 500 * M
+    actions = _assign([a, b, big], [_char(1, 1)], budget=WalletBudget(balance=100 * M, reserve_pct=0))
+    assert len(_jobs(actions, 200)) == 1
+
+
+def test_a_batch_built_from_another_bpo_while_its_own_is_copied_is_day_sized():
+    d = _row_decision(runs=10, room_runs=1000)
+    d.overview_row["research_first"] = {"mode": "other_bpo", "note": "its BPO is copied"}
+    assert _jobs(_assign([d], [_char(1, 2)]))[0].runs == 69
