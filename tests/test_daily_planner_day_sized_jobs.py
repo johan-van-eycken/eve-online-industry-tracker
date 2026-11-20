@@ -168,3 +168,16 @@ def test_a_batch_built_from_another_bpo_while_its_own_is_copied_is_day_sized():
     d = _row_decision(runs=10, room_runs=1000)
     d.overview_row["research_first"] = {"mode": "other_bpo", "note": "its BPO is copied"}
     assert _jobs(_assign([d], [_char(1, 2)]))[0].runs == 69
+
+
+def test_the_assigner_records_why_the_slots_went_where_they_went():
+    assigner = CharacterAssigner()
+    bpc = _row_decision(type_id=200, source="owned_blueprint_copy")
+    plan = ChainPlan(decisions=[_row_decision(), bpc])
+    assigner.assign(plan, [], _Chars([_char(1, 2)]), _AdminStub(), {MAT: {"vwap_5d": 1.0 * M}},
+                    blueprint_data=NO_SKILL_REQUIREMENTS, budget=WalletBudget(balance=1000 * M, reserve_pct=0))
+    order = assigner.slot_order
+    assert order["order"] == "profit per slot-day" and order["free_slots"] == 2
+    rows = {r["type_id"]: r for r in order["rows"]}
+    assert rows[100]["day_sized"] is True and rows[100]["runs"] == 69
+    assert rows[200]["not_day_sized"] == "source owned_blueprint_copy"

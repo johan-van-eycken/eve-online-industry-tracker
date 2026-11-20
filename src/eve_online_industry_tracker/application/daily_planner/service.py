@@ -1130,6 +1130,7 @@ class DailyPlannerService:
                 }
                 for slot in self._character_assigner.free_slots_after.values()
             }
+            summary["slot_order"] = getattr(self._character_assigner, "slot_order", None)
         plan = BuildPlanModel(
             created_at=now,
             updated_at=now,

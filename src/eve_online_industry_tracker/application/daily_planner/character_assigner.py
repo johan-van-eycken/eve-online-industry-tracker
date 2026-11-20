@@ -185,6 +185,20 @@ class CharacterAssigner:
             -(_slot_day_profit(d, self._job_runs(d)) if by_slot else 0.0),
             -(d.capital_return_per_day or 0), -d.adjusted_score,
         ))
+        # Persisted in the plan summary: why the slots went where they went.
+        self.slot_order = {
+            "order": "profit per slot-day" if by_slot else "return on capital",
+            "free_slots": slots, "need_for_best": round(need),
+            "available": None if budget is None else round(budget.available),
+            "rows": [
+                {"type_id": int(d.type_id), "type_name": getattr(d, "type_name", None), "runs": self._job_runs(d),
+                 "slot_day_profit": round(_slot_day_profit(d, self._job_runs(d))),
+                 "capital": round(_job_capital(d, self._job_runs(d))),
+                 "day_sized": int(d.type_id) in self._day_runs,
+                 "not_day_sized": None if int(d.type_id) in self._day_runs else _day_size_skip(d, with_subs)}
+                for d in top_level[:40]
+            ],
+        }
         sub_components = [d for d in build_decisions if d.is_sub_component]
         charger = None if budget is None else _BuildCharger(
             self, budget, StockLedger(corp_material_stock or {}), price_map or {}, blueprint_data,
@@ -2900,23 +2914,41 @@ def _research_first_changes_batch(row: dict[str, Any]) -> bool:
     return isinstance(first, dict) and first.get("mode") != "other_bpo"
 
 
-def _day_sized_batch(decision: ItemDecision, with_subs: set[int], deadlines: list[float]) -> int | None:
-    """The runs of a top-level build on one owned BPO sized to end before a
-    daily check (day_sized_runs), or None: kept as the producer sized it. Not
-    for a row with components (sized for its batch), research first, or a
-    batch on BPCs (their runs are the copy's)."""
+def _day_size_skip(decision: ItemDecision, with_subs: set[int]) -> str | None:
+    """Why a top-level row keeps the producer's batch size (not day-sized), or None."""
     row = decision.overview_row
     segments = research_first.job_segments(row) or []
     batch = orow.get_manufacturing_job(row).get("runs")
     seconds = orow.get_elapsed_time_seconds(row)
-    if (decision.decision != "build" or getattr(decision, "market_room_runs", None) is None
-            or int(decision.type_id) in with_subs or _research_first_changes_batch(row)
-            or len(segments) != 1 or segments[0].get("source") != _BPO_SOURCE
-            or not isinstance(batch, int) or isinstance(batch, bool) or batch <= 0
-            or not seconds or seconds <= 0):
+    if decision.decision != "build":
+        return f"decision {decision.decision}"
+    if getattr(decision, "market_room_runs", None) is None:
+        return "market room unknown"
+    if int(decision.type_id) in with_subs:
+        return "has components"
+    if _research_first_changes_batch(row):
+        return f"research first ({row['research_first'].get('mode')})"
+    if len(segments) != 1:
+        return f"{len(segments)} job segments"
+    if segments[0].get("source") != _BPO_SOURCE:
+        return f"source {segments[0].get('source')}"
+    if not isinstance(batch, int) or isinstance(batch, bool) or batch <= 0:
+        return "batch runs unknown"
+    if not seconds or seconds <= 0:
+        return "job time unknown"
+    return None
+
+
+def _day_sized_batch(decision: ItemDecision, with_subs: set[int], deadlines: list[float]) -> int | None:
+    """The runs of a top-level build on one owned BPO sized to end before a
+    daily check (day_sized_runs), or None: kept as the producer sized it
+    (_day_size_skip says why)."""
+    if _day_size_skip(decision, with_subs) is not None:
         return None
+    batch = orow.get_manufacturing_job(decision.overview_row)["runs"]
     return day_sized_runs(
-        seconds_per_run=seconds / batch, room_runs=int(decision.market_room_runs), deadlines=deadlines)
+        seconds_per_run=orow.get_elapsed_time_seconds(decision.overview_row) / batch,
+        room_runs=int(decision.market_room_runs), deadlines=deadlines)
 
 
 def _batch_fraction(decision: ItemDecision, runs: int | None) -> float | None:
