@@ -607,7 +607,8 @@ class MarketEnrichmentMixin:
             stats = price_stats_map.get(tid, {})
 
             # Price trend signals
-            row["price_trend_7d_pct"] = stats.get("trend_pct")
+            # Week over week: a price that settled lower months ago is not "declining" now.
+            row["price_trend_7d_pct"] = stats.get("trend_7d_wow_pct")
             row["price_trend_30d_pct"] = stats.get("trend_30d_pct")
             row["price_avg_7d"] = stats.get("avg_7d")
             row["price_avg_42w"] = stats.get("avg_42w")
