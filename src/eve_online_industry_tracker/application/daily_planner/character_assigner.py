@@ -173,21 +173,17 @@ class CharacterAssigner:
             int(d.type_id): runs for d in top_level
             if (runs := _day_sized_batch(d, with_subs, deadlines)) is not None
         }
-        # Capital-return order (phase 4) while the wallet is short; when it
-        # pays every batch the slots are the limit, so profit per slot-day.
-        # Rows without either keep the score order.
-        # Only the rows that can get a slot count: the best ones per slot-day.
+        # Profit per slot-day order: the slots are the limit (plan 37: 20 free
+        # slots, ~240 build rows). The wallet still cuts a batch it cannot pay.
+        # shortcut: a short wallet gets its best batches cut, not a return-on-capital order; upgrade if the wallet binds.
         slots = sum(int(c.get("free_mfg", 0)) for c in char_slots.values())
-        best = sorted(top_level, key=lambda d: -_slot_day_profit(d, self._job_runs(d)))[:slots]
-        need = sum(_job_capital(d, self._job_runs(d)) for d in best)
-        by_slot = budget is None or need <= budget.available
         top_level.sort(key=lambda d: (
-            -(_slot_day_profit(d, self._job_runs(d)) if by_slot else 0.0),
-            -(d.capital_return_per_day or 0), -d.adjusted_score,
+            -_slot_day_profit(d, self._job_runs(d)), -(d.capital_return_per_day or 0), -d.adjusted_score,
         ))
+        need = sum(_job_capital(d, self._job_runs(d)) for d in top_level[:slots])
         # Persisted in the plan summary: why the slots went where they went.
         self.slot_order = {
-            "order": "profit per slot-day" if by_slot else "return on capital",
+            "order": "profit per slot-day",
             "free_slots": slots, "need_for_best": round(need),
             "available": None if budget is None else round(budget.available),
             "rows": [
