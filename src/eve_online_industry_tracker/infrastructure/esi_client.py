@@ -160,13 +160,23 @@ _COMPATIBILITY_DATE_WARNED: set[str] = set()
 _COMPATIBILITY_DATE_WARNED_LOCK = threading.Lock()
 
 
+def transaction_key(entry: Any) -> tuple[int, bool]:
+    """A wallet transaction's identity: (transaction_id, is_buy). A self-trade
+    (buying from one's own sell order) is one transaction_id that ESI returns
+    twice, as the sell and as the buy."""
+    get = entry.get if isinstance(entry, dict) else (lambda k: getattr(entry, k, None))
+    return int(get("transaction_id")), bool(get("is_buy"))
+
+
 def esi_get_back_to_known(
     esi_get: Callable[..., Any], endpoint: str, known_ids: Any, *, id_key: str = "transaction_id",
+    key: Optional[Callable[[Dict[str, Any]], Any]] = None,
 ) -> List[Dict[str, Any]]:
     """The entries of a newest-first `from_id` endpoint (wallet transactions)
-    not in `known_ids`. ESI returns only the newest batch per call, so this
-    walks back with from_id until a batch reaches a known id, is empty, or
-    brings nothing new."""
+    whose `key` (default: the `id_key` value) is not in `known_ids`. ESI
+    returns only the newest batch per call, so this walks back with from_id
+    until a batch reaches a known entry, is empty, or brings nothing new."""
+    key = key or (lambda e: e[id_key])
     entries: List[Dict[str, Any]] = []
     seen: set = set()
     params: Optional[Dict[str, Any]] = None
@@ -177,12 +187,12 @@ def esi_get_back_to_known(
             page = jsonlib.loads(page)
         if not isinstance(page, list):
             break
-        ids = [e[id_key] for e in page if isinstance(e, dict) and e.get(id_key) is not None]
-        fresh = [e for e in page if isinstance(e, dict) and e.get(id_key) is not None
-                 and e[id_key] not in known_ids and e[id_key] not in seen]
+        valid = [e for e in page if isinstance(e, dict) and e.get(id_key) is not None]
+        ids = [e[id_key] for e in valid]
+        fresh = [e for e in valid if key(e) not in known_ids and key(e) not in seen]
         entries.extend(fresh)
-        seen.update(e[id_key] for e in fresh)
-        if not fresh or any(i in known_ids for i in ids):
+        seen.update(key(e) for e in fresh)
+        if not fresh or any(key(e) in known_ids for e in valid):
             break
         params = {"from_id": min(ids)}
     return entries

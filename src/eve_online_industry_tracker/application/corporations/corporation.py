@@ -6,7 +6,9 @@ from typing import Optional, List, Dict, Any
 
 from sqlalchemy.exc import SQLAlchemyError
 
-from eve_online_industry_tracker.infrastructure.esi_client import ESI_REQUEST_ERRORS, esi_get_back_to_known
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
+from eve_online_industry_tracker.infrastructure.esi_client import ESI_REQUEST_ERRORS, esi_get_back_to_known, transaction_key
 
 from eve_online_industry_tracker.config.config_manager import ConfigManager
 from eve_online_industry_tracker.infrastructure.database_manager import DatabaseManager
@@ -720,9 +722,11 @@ class Corporation:
                 return
 
             new_entries: List[Dict[str, Any]] = []
-            # transaction_id is unique across corporations, so the check is too.
+            # (transaction_id, is_buy) is unique across corporations, so the check is too;
+            # the pair, so a self-trade's missing half is still fetched.
             known_ids = {
-                row[0] for row in self._db_app.session.query(CorporationWalletTransactionsModel.transaction_id)
+                transaction_key(row) for row in self._db_app.session.query(
+                    CorporationWalletTransactionsModel.transaction_id, CorporationWalletTransactionsModel.is_buy)
             }
             for wallet in corp_wallets:
                 if not isinstance(wallet, dict):
@@ -734,7 +738,7 @@ class Corporation:
                 for entry in esi_get_back_to_known(
                     self._default_esi_character._esi_client.esi_get,
                     ESI_CORP_WALLETS_TRANSACTIONS.format(corporation_id=self.corporation_id, division=division),
-                    known_ids,
+                    known_ids, key=transaction_key,
                 ):
                     entry["division"] = division
                     new_entries.append(entry)
@@ -806,7 +810,11 @@ class Corporation:
                 )
 
             if rows:
-                self._db_app.session.bulk_save_objects([CorporationWalletTransactionsModel(**r) for r in rows])
+                # Idempotent on (transaction_id, is_buy); a self-trade's buy and sell are both kept.
+                self._db_app.session.execute(
+                    sqlite_insert(CorporationWalletTransactionsModel).values(rows)
+                    .on_conflict_do_nothing(index_elements=["transaction_id", "is_buy"])
+                )
                 self._db_app.session.commit()
 
             self._backfill_wallet_transaction_client_names()
@@ -821,6 +829,7 @@ class Corporation:
                 for entry in corporation_wallet_transactions
             ]
         except Exception as e:
+            self._db_app.session.rollback()
             logging.warning(
                 "Skipping corporation wallet transactions refresh for %s (%s): %s",
                 self.corporation_name,

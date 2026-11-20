@@ -46,3 +46,45 @@ def test_the_session_works_again_after_a_failed_refresh(app_engine):
     _rollback_session(SimpleNamespace(_db_app=SimpleNamespace(session=session)))
     _char(session).save_wallet_transactions([_tx(6, char=2)])  # the next character's refresh
     assert [t for (t,) in session.query(CharacterWalletTransactionsModel.transaction_id)] == [6]
+
+
+def test_a_self_trade_keeps_both_its_sell_and_its_buy(app_engine):
+    """Buying from one's own sell order: ESI returns one transaction_id twice."""
+    session = sessionmaker(bind=app_engine, future=True)()
+    sell, buy = _tx(7), {**_tx(7), "is_buy": True}
+    _char(session).save_wallet_transactions([sell, buy])
+    _char(session).save_wallet_transactions([sell, buy])          # a retry: nothing doubled
+    rows = session.query(CharacterWalletTransactionsModel.transaction_id, CharacterWalletTransactionsModel.is_buy)
+    assert sorted(rows) == [(7, False), (7, True)]
+
+
+def test_the_migration_rebuilds_the_old_key_and_keeps_the_rows(tmp_path):
+    from sqlalchemy import create_engine, text
+    from eve_online_industry_tracker.infrastructure.schema_migrations import _ensure_transaction_side_key
+    engine = create_engine(f"sqlite:///{tmp_path / 'app.db'}")
+    with engine.begin() as c:
+        c.execute(text("CREATE TABLE character_wallet_transactions (id INTEGER NOT NULL, transaction_id BIGINT NOT NULL, "
+                       "is_buy BOOLEAN, PRIMARY KEY (id), UNIQUE (transaction_id))"))
+        c.execute(text("INSERT INTO character_wallet_transactions VALUES (1, 7, 0)"))
+
+    class _Db:
+        def __init__(self): self.engine = engine
+        def query(self, sql, params=None):
+            with engine.begin() as c:
+                return c.execute(text(sql), params or {}).fetchall()
+    _ensure_transaction_side_key(_Db(), "character_wallet_transactions")
+    _ensure_transaction_side_key(_Db(), "character_wallet_transactions")   # idempotent
+    with engine.begin() as c:
+        c.execute(text("INSERT INTO character_wallet_transactions VALUES (2, 7, 1)"))   # the buy half
+        assert c.execute(text("SELECT transaction_id, is_buy FROM character_wallet_transactions ORDER BY id")).fetchall() == [(7, 0), (7, 1)]
+
+
+def test_the_refresh_fetches_a_self_trades_missing_half():
+    """2026-11-20: only the sell half of two self-trades was stored; the walk
+    keys on (transaction_id, is_buy), so the buy half still comes in."""
+    from eve_online_industry_tracker.infrastructure.esi_client import esi_get_back_to_known, transaction_key
+    page = [{"transaction_id": 9, "is_buy": False}, {"transaction_id": 8, "is_buy": False},
+            {"transaction_id": 8, "is_buy": True}, {"transaction_id": 7, "is_buy": False}]
+    known = {(8, False), (7, False)}
+    fresh = esi_get_back_to_known(lambda *a, **k: page, "/wallet/transactions", known, key=transaction_key)
+    assert [transaction_key(e) for e in fresh] == [(9, False), (8, True)]
