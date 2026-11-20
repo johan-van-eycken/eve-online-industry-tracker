@@ -164,6 +164,7 @@ class CharacterAssigner:
         top_level = [d for d in build_decisions if not d.is_sub_component]
         # {type_id: runs} of the BPO batches sized to whole days of job time.
         with_subs = {int(t) for t in getattr(chain_plan, "sub_request_parent_type_ids", None) or ()}
+        self._with_subs = with_subs
         max_job_days = int(_adm(admin_settings, "planner_max_job_days") or schema_default(
             "daily_planner", "planner_max_job_days"))
         check_hour = int(_adm(admin_settings, "planner_daily_check_hour") or schema_default(
@@ -173,21 +174,17 @@ class CharacterAssigner:
             int(d.type_id): runs for d in top_level
             if (runs := _day_sized_batch(d, with_subs, deadlines)) is not None
         }
-        # Capital-return order (phase 4) while the wallet is short; when it
-        # pays every batch the slots are the limit, so profit per slot-day.
-        # Rows without either keep the score order.
-        # Only the rows that can get a slot count: the best ones per slot-day.
+        # Profit per slot-day order: the slots are the limit (plan 37: 20 free
+        # slots, ~240 build rows). The wallet still cuts a batch it cannot pay.
+        # shortcut: a short wallet gets its best batches cut, not a return-on-capital order; upgrade if the wallet binds.
         slots = sum(int(c.get("free_mfg", 0)) for c in char_slots.values())
-        best = sorted(top_level, key=lambda d: -_slot_day_profit(d, self._job_runs(d)))[:slots]
-        need = sum(_job_capital(d, self._job_runs(d)) for d in best)
-        by_slot = budget is None or need <= budget.available
         top_level.sort(key=lambda d: (
-            -(_slot_day_profit(d, self._job_runs(d)) if by_slot else 0.0),
-            -(d.capital_return_per_day or 0), -d.adjusted_score,
+            -_slot_day_profit(d, self._job_runs(d)), -(d.capital_return_per_day or 0), -d.adjusted_score,
         ))
+        need = sum(_job_capital(d, self._job_runs(d)) for d in top_level[:slots])
         # Persisted in the plan summary: why the slots went where they went.
         self.slot_order = {
-            "order": "profit per slot-day" if by_slot else "return on capital",
+            "order": "profit per slot-day",
             "free_slots": slots, "need_for_best": round(need),
             "available": None if budget is None else round(budget.available),
             "rows": [
@@ -258,6 +255,9 @@ class CharacterAssigner:
                 with_science.add(id(decision))
             return actions
 
+        # Extra (parallel) jobs of a product: {id(decision): lane}, see _parallel_step.
+        claim_parallel = getattr(chain_plan, "claim_parallel_blueprint", None)
+        lanes: dict[int, dict[str, Any] | None] = {}
         for pass_decisions in (top_level, None):
             if pass_decisions is None:
                 # Blueprints claimed for a job that
@@ -332,7 +332,17 @@ class CharacterAssigner:
                         sorted(fell_back), sorted(scale), sorted(no_build),
                     )
                 pass_decisions = sub_components
-            for decision in pass_decisions:
+            for decision, extra in (_with_extras(top_level, slots, self._job_runs) if pass_decisions is top_level
+                                    else ((d, False) for d in pass_decisions)):
+                if extra:
+                    if callable(claim_parallel):
+                        job = self._parallel_step(
+                            lanes, decision, emitted, claim_parallel, char_slots, characters, skill_gate,
+                            bpc_pool, charger,
+                        )
+                        if job is not None:
+                            assigned_actions.append(job)
+                    continue
                 actions = _assign_one(decision)
                 if pass_decisions is top_level:
                     emitted[id(decision)] = actions
@@ -340,14 +350,16 @@ class CharacterAssigner:
                 # created -- two research actions on one item must not share a slot.
                 assigned_actions.extend(actions)
 
-        # Parallel pass: manufacturing slots still free, after every first job
-        # and its components, go to more jobs of the same top-level product.
-        claim_parallel = getattr(chain_plan, "claim_parallel_blueprint", None)
+        # Leftover pass: manufacturing slots still free after every row (a
+        # first job that failed, an extra job without a blueprint) go to more
+        # jobs of the top-level products, best per slot-day first.
         if callable(claim_parallel):
-            assigned_actions.extend(self._parallel_jobs(
-                top_level, emitted, chain_plan, claim_parallel, char_slots, characters, skill_gate,
-                bpc_pool, charger,
-            ))
+            for decision in top_level:
+                while (job := self._parallel_step(
+                    lanes, decision, emitted, claim_parallel, char_slots, characters, skill_gate,
+                    bpc_pool, charger,
+                )) is not None:
+                    assigned_actions.append(job)
 
         # Fill pass: research slots still free go to the candidates with no
         # science job yet, in rank order.
@@ -404,87 +416,92 @@ class CharacterAssigner:
             return None
         return min(batch, getattr(decision, "market_cap_runs", None) or batch)
 
-    def _parallel_jobs(
-        self, top_level: list[ItemDecision], emitted: dict[int, list[AssignedAction]], chain_plan: Any,
+    def _parallel_step(
+        self, lanes: dict[int, Any], decision: ItemDecision, emitted: dict[int, list[AssignedAction]],
         claim_parallel: Any, char_slots: dict[int, dict[str, Any]], characters: list[dict[str, Any]],
         skill_gate: "_SkillGate", bpc_pool: dict[str, Any], charger: "_BuildCharger | None",
-    ) -> list[AssignedAction]:
-        """More jobs of a top-level product that got one whole-batch
-        manufacture: while the market has room for another whole batch
+    ) -> AssignedAction | None:
+        """One more job of a top-level product that got one whole-batch
+        manufacture, while the market has room for another whole batch
         (market_room_runs), a free blueprint of the batch's ME and runs
-        (claim_parallel), a qualified pilot's slot and the wallet allow it.
-        In rank order, one extra job per product per round, so a higher
-        product does not take every slot. Not for a product with components
-        (sized for one batch), research or science on the row, or a batch
-        that is not one job on one owned blueprint."""
-        with_subs = {int(t) for t in getattr(chain_plan, "sub_request_parent_type_ids", None) or ()}
-        lanes: list[dict[str, Any]] = []
-        for decision in top_level:
-            actions = emitted.get(id(decision)) or []
-            mfg = [a for a in actions if a.action_type == "manufacture"]
-            row = decision.overview_row
-            segments = research_first.job_segments(row) or []
-            runs = mfg[0].runs if len(mfg) == 1 else None
-            if (decision.decision != "build" or runs is None or len(mfg) != len(actions)
-                    or int(decision.type_id) in with_subs or _research_first_changes_batch(row)
-                    or len(segments) != 1
-                    # A BPO batch may be sized to whole days (_day_sized_batch); a BPC's is its runs.
-                    or (int(segments[0].get("runs") or 0) != runs and segments[0].get("source") != _BPO_SOURCE)
-                    or decision.market_room_runs is None):
-                continue
-            me = segments[0].get("blueprint_material_efficiency")
-            if me is None:
-                continue
-            room = int(decision.market_room_runs) - runs
-            if room < runs:
-                continue
-            qualified, blocked = skill_gate.check(orow.get_blueprint_type_id(row), "manufacturing")
-            if blocked is not None:
-                continue
-            lanes.append({"decision": decision, "first": mfg[0], "runs": runs, "me": int(me),
-                          "room": room, "qualified": qualified, "jobs": 1})
+        (claim_parallel), a qualified pilot's slot and the wallet allow it;
+        None (and the lane closes) otherwise. A product with components buys
+        them for its extra jobs: they were sized and reserved for the first
+        job, and the producer prices them at the market (or the stock's
+        cost), so the batch's profit stands. Not for research or science on
+        the row, or a batch that is not one job on one owned blueprint."""
+        key = id(decision)
+        if key not in lanes:
+            lanes[key] = self._parallel_lane(decision, emitted, skill_gate)
+        lane = lanes[key]
+        if lane is None:
+            return None
+        runs = lane["runs"]
+        if lane["room"] < runs or not any(s["free_mfg"] > 0 for s in char_slots.values()):
+            lanes[key] = None
+            return None
+        blueprint = claim_parallel(decision, runs, lane["me"])
+        if blueprint is None:
+            lanes[key] = None
+            return None
+        owner = blueprint.get("owner_character_id")
+        char_id, char_name = self._best_mfg_char(
+            char_slots, characters, only=[int(owner)] if owner is not None else None, qualified=lane["qualified"],
+        )
+        if char_id is None:
+            lanes[key] = None
+            return None
+        item_id = blueprint.get("item_id")
+        lane["jobs"] += 1
+        first = lane["first"]
+        notes = f"Build: {decision.decision_reason}; parallel job {lane['jobs']} of this product"
+        if item_id is not None:
+            notes += f" (blueprint item {item_id})"
+        if lane["with_subs"]:
+            notes += "; its components are bought (the planner builds them for the first job)"
+        action = dataclasses.replace(
+            first, character_id=char_id, character_name=char_name,
+            materials=dict(first.materials) if first.materials is not None else None,
+            blueprint_item_id=item_id, notes=notes,
+        )
+        self._take_slot(char_slots, char_id, "manufacture")
+        if charger is not None and not charger.charge(decision, action, runs, extra=True):
+            self._release_slot(char_slots, char_id, "manufacture")
+            lanes[key] = None
+            return None
+        # One job per blueprint: no copy or invention on it today.
+        if item_id is not None:
+            bpc_pool.setdefault("bpos" if blueprint.get("kind") == "bpo" else "bpcs", set()).add(int(item_id))
+        lane["room"] -= int(action.runs or runs)
+        if int(action.runs or 0) < runs:
+            lanes[key] = None   # cut to the wallet: nothing left for another
+        return action
 
-        out: list[AssignedAction] = []
-        while lanes:
-            for lane in list(lanes):
-                decision, runs = lane["decision"], lane["runs"]
-                if lane["room"] < runs or not any(s["free_mfg"] > 0 for s in char_slots.values()):
-                    lanes.remove(lane)
-                    continue
-                blueprint = claim_parallel(decision, runs, lane["me"])
-                if blueprint is None:
-                    lanes.remove(lane)
-                    continue
-                owner = blueprint.get("owner_character_id")
-                char_id, char_name = self._best_mfg_char(
-                    char_slots, characters, only=[int(owner)] if owner is not None else None,
-                    qualified=lane["qualified"],
-                )
-                if char_id is None:
-                    lanes.remove(lane)
-                    continue
-                item_id = blueprint.get("item_id")
-                lane["jobs"] += 1
-                action = dataclasses.replace(
-                    lane["first"], character_id=char_id, character_name=char_name,
-                    materials=dict(lane["first"].materials) if lane["first"].materials is not None else None,
-                    blueprint_item_id=item_id,
-                    notes=f"Build: {decision.decision_reason}; parallel job {lane['jobs']} of this product"
-                          f"{f' (blueprint item {item_id})' if item_id is not None else ''}",
-                )
-                self._take_slot(char_slots, char_id, "manufacture")
-                if charger is not None and not charger.charge(decision, action, runs):
-                    self._release_slot(char_slots, char_id, "manufacture")
-                    lanes.remove(lane)
-                    continue
-                # One job per blueprint: no copy or invention on it today.
-                if item_id is not None:
-                    bpc_pool.setdefault("bpos" if blueprint.get("kind") == "bpo" else "bpcs", set()).add(int(item_id))
-                lane["room"] -= int(action.runs or runs)
-                out.append(action)
-                if int(action.runs or 0) < runs:
-                    lanes.remove(lane)   # cut to the wallet: nothing left for another
-        return out
+    def _parallel_lane(
+        self, decision: ItemDecision, emitted: dict[int, list[AssignedAction]], skill_gate: "_SkillGate",
+    ) -> dict[str, Any] | None:
+        """The state of a product's extra jobs, or None when it gets none."""
+        actions = emitted.get(id(decision)) or []
+        mfg = [a for a in actions if a.action_type == "manufacture"]
+        row = decision.overview_row
+        segments = research_first.job_segments(row) or []
+        runs = mfg[0].runs if len(mfg) == 1 else None
+        if (decision.decision != "build" or runs is None or len(mfg) != len(actions)
+                or _research_first_changes_batch(row)
+                or len(segments) != 1
+                # A BPO batch may be sized to whole days (_day_sized_batch); a BPC's is its runs.
+                or (int(segments[0].get("runs") or 0) != runs and segments[0].get("source") != _BPO_SOURCE)
+                or decision.market_room_runs is None):
+            return None
+        me = segments[0].get("blueprint_material_efficiency")
+        room = int(decision.market_room_runs) - runs
+        if me is None or room < runs:
+            return None
+        qualified, blocked = skill_gate.check(orow.get_blueprint_type_id(row), "manufacturing")
+        if blocked is not None:
+            return None
+        return {"first": mfg[0], "runs": runs, "me": int(me), "room": room, "qualified": qualified, "jobs": 1,
+                "with_subs": int(decision.type_id) in getattr(self, "_with_subs", set())}
 
     def _science_candidates(
         self, decisions: list[ItemDecision], char_slots: dict[int, dict[str, Any]],
@@ -2906,6 +2923,25 @@ def science_cost(action: AssignedAction) -> float | None:
 _BPO_SOURCE = "owned_blueprint_original"
 
 
+def _with_extras(top_level: list[ItemDecision], slots: int, job_runs: Any):
+    """(decision, extra) in profit per slot-day order: every first job, and
+    each product's possible extra jobs (market_room_runs / its runs - 1, at
+    most the free slots) at the same value, after the first jobs of that
+    value. An extra job beats a weaker product's first job; whether it gets
+    a blueprint, a slot and the wallet is _parallel_step's to say."""
+    entries: list[tuple[float, int, int, ItemDecision, bool]] = []
+    for index, decision in enumerate(top_level):
+        runs = job_runs(decision)
+        value = _slot_day_profit(decision, runs)
+        entries.append((-value, 0, index, decision, False))
+        room = getattr(decision, "market_room_runs", None)
+        if runs and room is not None and value > 0:
+            for _ in range(min(slots, max(0, int(room) // int(runs) - 1))):
+                entries.append((-value, 1, index, decision, True))
+    entries.sort(key=lambda e: e[:3])
+    return [(e[3], e[4]) for e in entries]
+
+
 def _research_first_changes_batch(row: dict[str, Any]) -> bool:
     """Whether research first changes what the row builds (a part, a variant,
     nothing). Not mode other_bpo: the row builds as usual from another BPO
@@ -3093,9 +3129,11 @@ class _BuildCharger:
             if int(sub.type_id) in self.reserved:
                 sub.overview_row["reserved_sub_pilots"] = list(self.reserved[int(sub.type_id)])
 
-    def charge(self, decision: ItemDecision, action: AssignedAction, batch_runs: int) -> bool:
+    def charge(self, decision: ItemDecision, action: AssignedAction, batch_runs: int, *, extra: bool = False) -> bool:
         """Cut `action` to the runs the wallet allows and charge it; False
-        (nothing charged, reason on the decision) when not even 1 run fits."""
+        (nothing charged, reason on the decision) when not even 1 run fits.
+        `extra`: a parallel job; its cut never re-sizes the parent's
+        components (they were sized for the first job)."""
         parent_type_id = int(decision.type_id)
         fresh = self._reserve_subs(parent_type_id)
         # {sub type_id: (cost of one run, units one run outputs)}.
@@ -3169,7 +3207,8 @@ class _BuildCharger:
         cost = cost_of(runs, commit=True)
         if runs < batch_runs:
             cut_batch(action, runs, batch_runs)
-            self.scale[parent_type_id] = runs / batch_runs
+            if not extra:
+                self.scale[parent_type_id] = runs / batch_runs
             action.notes = f"{action.notes}; cut from {batch_runs} to {_count(runs, 'run', 'runs')} (wallet / market)"
         budget.charge(cost)
         return True

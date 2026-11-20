@@ -99,11 +99,47 @@ def test_no_extra_job_without_a_free_slot():
     assert len(jobs) == 1
 
 
-def test_a_product_with_components_gets_no_extra_job():
-    """Its components are sized for one batch; a parallel job would build without them."""
+def test_a_product_with_components_gets_extra_jobs_that_buy_them():
+    """Its components are sized for the first job; an extra job buys them
+    (the producer prices them at the market, so the batch's profit stands)."""
     blueprints = _Blueprints({"item_id": 2, "owner_character_id": None})
     jobs = _jobs(_assign([_missiles(room_runs=100)], [_char(1, 5)], blueprints, sub_parents={100}))
-    assert len(jobs) == 1
+    assert len(jobs) == 2
+    assert "its components are bought" in jobs[1].notes
+    assert "components are bought" not in jobs[0].notes
+
+
+def test_an_extra_job_beats_a_weaker_products_first_job():
+    """Slots go by profit per slot-day: a second job of a 5M product before the first of a 1M one."""
+    high = _missiles(room_runs=100, type_id=100)
+    low = _missiles(room_runs=10, type_id=200)
+    low.absolute_profit_per_batch = 1 * M
+    for d in (high, low):
+        d.overview_row["manufacturing_job"]["time_seconds"] = 3600.0
+    blueprints = _Blueprints({"item_id": 2, "owner_character_id": None})
+    actions = _assign([high, low], [_char(1, 2)], blueprints)
+    assert len(_jobs(actions, 100)) == 2 and not _jobs(actions, 200)
+
+
+def test_an_extra_job_cut_by_the_wallet_does_not_resize_the_first_jobs_components():
+    from eve_online_industry_tracker.application.daily_planner.character_assigner import _BuildCharger
+    seen = {}
+    real = _BuildCharger.charge
+
+    def spy(self, decision, action, batch_runs, *, extra=False):
+        ok = real(self, decision, action, batch_runs, extra=extra)
+        seen[extra] = dict(self.scale)
+        return ok
+    _BuildCharger.charge = spy
+    try:
+        blueprints = _Blueprints({"item_id": 2, "owner_character_id": None})
+        budget = WalletBudget(balance=15 * M, reserve_pct=0)   # 10M a batch: the extra job is cut to 5 runs
+        jobs = _jobs(_assign([_missiles(room_runs=100)], [_char(1, 5)], blueprints, budget=budget,
+                             sub_parents={100}))
+    finally:
+        _BuildCharger.charge = real
+    assert [j.runs for j in jobs] == [10, 5]
+    assert seen[True] == {}
 
 
 def test_extra_jobs_are_charged_to_the_wallet():

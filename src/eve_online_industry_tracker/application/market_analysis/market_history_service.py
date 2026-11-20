@@ -181,6 +181,10 @@ class MarketHistoryService:
             # Price trend (7d vs 30d)
             trend_30d_pct = ((avg_7d - avg_30d) / avg_30d * 100) if (avg_30d is not None and avg_30d > 0) else None
 
+            # The last 7 days against the 7 before them; None under 14 days of history.
+            prior_7d = float(statistics.mean(prices[-14:-7])) if len(prices) >= 14 else None
+            trend_7d_wow_pct = ((avg_7d - prior_7d) / prior_7d * 100) if prior_7d else None
+
             return {
                 "has_data": True,
                 "avg_42w": avg_42w,
@@ -193,7 +197,8 @@ class MarketHistoryService:
                     "min": float(min(prices)),
                     "max": float(max(prices)),
                 },
-                "trend_pct": trend_pct,  # positive = trending up
+                "trend_pct": trend_pct,  # positive = trending up (7d vs 42w)
+                "trend_7d_wow_pct": trend_7d_wow_pct,
                 "trend_30d_pct": trend_30d_pct,
                 "record_count": len(records),
             }

@@ -65,16 +65,19 @@ def stock_gaps(
     invention_source_index: dict[int, int], min_bpc: int, min_invented: int,
     product_of: Callable[[int], int | None],
 ) -> list[StockGap]:
-    """A "copy" gap per owned BPO type below `min_bpc` BPCs, an "invent" gap
-    per T2 blueprint inventable from an owned BPO below `min_invented`."""
+    """A "copy" gap per owned BPO type that is an invention source and has
+    fewer than `min_bpc` BPCs, an "invent" gap per T2 blueprint inventable
+    from an owned BPO below `min_invented`. A T1 product builds from its BPO
+    (ChainPlanner._prefer_free_bpo), so only invention needs copies."""
     owned = {int(t) for t in bpo_type_ids}
+    sources = {int(s) for s in invention_source_index.values()}
 
     def _have(bp: int) -> float:
         return bpc_counts.get(bp, 0) + in_progress.get(bp, 0.0)
 
     gaps = [
         StockGap("copy", bp, None, _have(bp), min_bpc, product_of(bp))
-        for bp in sorted(owned) if _have(bp) < min_bpc
+        for bp in sorted(owned) if bp in sources and _have(bp) < min_bpc
     ]
     gaps.extend(
         StockGap("invent", int(t2), int(src), _have(int(t2)), min_invented, product_of(int(t2)))
