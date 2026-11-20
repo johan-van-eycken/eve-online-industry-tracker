@@ -13,7 +13,7 @@ from eve_online_industry_tracker.application import market_fees
 from eve_online_industry_tracker.config.admin_settings import AdminSettingInvalid
 from eve_online_industry_tracker.infrastructure.database_manager import DatabaseManager
 from eve_online_industry_tracker.config.config_manager import ConfigManager
-from eve_online_industry_tracker.infrastructure.esi_client import ESI_REQUEST_ERRORS, ESIClient, esi_get_back_to_known
+from eve_online_industry_tracker.infrastructure.esi_client import ESI_REQUEST_ERRORS, ESIClient, esi_get_back_to_known, transaction_key
 from eve_online_industry_tracker.infrastructure.esi_service import ESIService
 from eve_online_industry_tracker.infrastructure.sde.types import asset_volumes
 from eve_online_industry_tracker.infrastructure.models import CharacterModel, CharacterWalletJournalModel \
@@ -852,13 +852,16 @@ class Character:
     def refresh_wallet_transactions(self) -> None:
         try:
             self.ensure_esi()
+            # (transaction_id, is_buy): a self-trade's missing half is still fetched.
             known_ids = {
-                row[0]
-                for row in self._db_app.session.query(CharacterWalletTransactionsModel.transaction_id)
+                transaction_key(row)
+                for row in self._db_app.session.query(
+                    CharacterWalletTransactionsModel.transaction_id, CharacterWalletTransactionsModel.is_buy)
                 .filter_by(character_id=self.character_id)
             }
             new_transaction_entries = esi_get_back_to_known(
                 self._esi_client.esi_get, ESI_CHAR_WALLET_TRANSACTIONS.format(character_id=self.character_id), known_ids,
+                key=transaction_key,
             )
 
             # Step 1: Collect unique client IDs

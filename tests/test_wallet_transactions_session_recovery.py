@@ -77,3 +77,14 @@ def test_the_migration_rebuilds_the_old_key_and_keeps_the_rows(tmp_path):
     with engine.begin() as c:
         c.execute(text("INSERT INTO character_wallet_transactions VALUES (2, 7, 1)"))   # the buy half
         assert c.execute(text("SELECT transaction_id, is_buy FROM character_wallet_transactions ORDER BY id")).fetchall() == [(7, 0), (7, 1)]
+
+
+def test_the_refresh_fetches_a_self_trades_missing_half():
+    """2026-11-20: only the sell half of two self-trades was stored; the walk
+    keys on (transaction_id, is_buy), so the buy half still comes in."""
+    from eve_online_industry_tracker.infrastructure.esi_client import esi_get_back_to_known, transaction_key
+    page = [{"transaction_id": 9, "is_buy": False}, {"transaction_id": 8, "is_buy": False},
+            {"transaction_id": 8, "is_buy": True}, {"transaction_id": 7, "is_buy": False}]
+    known = {(8, False), (7, False)}
+    fresh = esi_get_back_to_known(lambda *a, **k: page, "/wallet/transactions", known, key=transaction_key)
+    assert [transaction_key(e) for e in fresh] == [(9, False), (8, True)]
