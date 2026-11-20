@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import SQLAlchemyError
 
 from eve_online_industry_tracker.application import market_fees
@@ -371,14 +372,22 @@ class Character:
                 self.wallet_transactions.append(new_trans)
             
             if self.wallet_transactions:
-                self._db_app.session.bulk_save_objects(self.wallet_transactions)
+                # Idempotent: a transaction already stored (a refresh that ran
+                # alongside, or a retry) is skipped instead of failing the batch.
+                rows = [{c.name: getattr(t, c.name) for c in CharacterWalletTransactionsModel.__table__.columns
+                         if c.name != "id"} for t in self.wallet_transactions]
+                self._db_app.session.execute(
+                    sqlite_insert(CharacterWalletTransactionsModel).values(rows)
+                    .on_conflict_do_nothing(index_elements=["transaction_id"])
+                )
                 self._db_app.session.commit()
             else:
                 logging.debug(f"No new wallet transactions to save for {self.character_name}.")
-            
+
             logging.debug(f"Bulk wallet transactions saved ({len(self.wallet_transactions)}) for {self.character_name}.")
-        
+
         except Exception as e:
+            self._db_app.session.rollback()
             error_message = f"Failed to save wallet transactions for {self.character_name}. Error: {str(e)}"
             logging.error(error_message)
             raise Exception(error_message)
