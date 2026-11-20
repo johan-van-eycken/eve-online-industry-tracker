@@ -263,6 +263,9 @@ class CharacterManager:
                     char.ensure_esi()
                 getattr(char, method_name)()
             except Exception as e:   # the batch boundary: one character must not stop the others
+                # A failed flush leaves the shared session unusable (and its pending
+                # rows queued for the next flush): roll it back before the next character.
+                _rollback_session(char)
                 logging.error("Error during %s for %s: %s", method_name, char.character_name, e,
                               exc_info=not isinstance(e, ESI_REQUEST_ERRORS))   # a traceback unless ESI failed
                 errors[char.character_name] = f"{type(e).__name__}: {e}"
@@ -307,3 +310,14 @@ class CharacterManager:
         if errors:
             raise CharacterRefreshError("refresh_realized_profit_inputs", errors)
 
+
+def _rollback_session(owner) -> None:
+    """Roll back `owner`'s app session after a failed refresh; a session
+    that cannot even roll back is logged, not raised over the real error."""
+    session = getattr(getattr(owner, "_db_app", None), "session", None)
+    if session is None:
+        return
+    try:
+        session.rollback()
+    except Exception:   # the refresh's own error is what gets reported
+        logging.exception("Rolling back the session after a failed refresh failed")

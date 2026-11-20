@@ -229,6 +229,9 @@ class CorporationManager:
                 getattr(corp, method_name)()
                 return None
             except Exception as e:   # the batch boundary: one corporation must not stop the others
+                # A failed flush leaves the shared session unusable (and its pending
+                # rows queued for the next flush): roll it back before the next corporation.
+                _rollback_session(corp)
                 logging.error("Error during %s for %s: %s", method_name, _corp_label(corp), e,
                               exc_info=not isinstance(e, ESI_REQUEST_ERRORS))   # a traceback unless ESI failed
                 return f"{type(e).__name__}: {e}"
@@ -297,3 +300,15 @@ class CorporationManager:
 def _corp_label(corp: Corporation) -> str:
     """The corporation's name, else 'corporation <id>'."""
     return corp.corporation_name or f"corporation {corp.corporation_id}"
+
+
+def _rollback_session(owner) -> None:
+    """Roll back `owner`'s app session after a failed refresh; a session
+    that cannot even roll back is logged, not raised over the real error."""
+    session = getattr(getattr(owner, "_db_app", None), "session", None)
+    if session is None:
+        return
+    try:
+        session.rollback()
+    except Exception:   # the refresh's own error is what gets reported
+        logging.exception("Rolling back the session after a failed refresh failed")
