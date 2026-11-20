@@ -5,6 +5,7 @@ import logging
 import sqlite3
 from typing import Any
 
+from sqlalchemy import text  # pyright: ignore[reportMissingImports]
 from sqlalchemy.exc import SQLAlchemyError  # pyright: ignore[reportMissingImports]
 
 from eve_online_industry_tracker.infrastructure.database_manager import DatabaseManager
@@ -93,6 +94,34 @@ def _ensure_market_orderbook_view_cache_unique_key(db: DatabaseManager) -> None:
             "ON market_orderbook_view_cache(hub, region_id, station_id, side, type_id, at_hub)"
         ),
     )
+
+
+def _ensure_transaction_side_key(db: DatabaseManager, table: str) -> None:
+    """Replace a wallet transactions table's UNIQUE(transaction_id) by
+    UNIQUE(transaction_id, is_buy): a self-trade is one transaction_id that ESI
+    returns as the sell and as the buy, and the old key failed the whole
+    refresh on it (2026-11-20). SQLite cannot drop an inline constraint, so the
+    table is rebuilt from its own DDL in one transaction; rows are kept.
+    Idempotent: a table without the old key is left alone. A failed rebuild
+    raises SchemaMigrationError (the transaction is rolled back)."""
+    rows = db.query("SELECT sql FROM sqlite_master WHERE type='table' AND name=:t", {"t": table})
+    ddl = str(rows[0][0]) if rows and rows[0][0] else ""
+    old_key = "UNIQUE (transaction_id)"
+    if old_key not in ddl:
+        return
+    new_ddl = ddl.replace(old_key, f"CONSTRAINT uq_{table}_transaction_side UNIQUE (transaction_id, is_buy)", 1)
+    new_ddl = new_ddl.replace(f"CREATE TABLE {table}", f"CREATE TABLE {table}__rebuild", 1)
+    try:
+        with db.engine.begin() as conn:
+            conn.execute(text(f"DROP TABLE IF EXISTS {table}__rebuild"))
+            conn.execute(text(new_ddl))
+            conn.execute(text(f"INSERT INTO {table}__rebuild SELECT * FROM {table}"))
+            conn.execute(text(f"DROP TABLE {table}"))
+            conn.execute(text(f"ALTER TABLE {table}__rebuild RENAME TO {table}"))
+        logging.info("Rebuilt %s with UNIQUE(transaction_id, is_buy)", table)
+    except _SCHEMA_ERRORS as e:
+        logging.error("Failed rebuilding %s with UNIQUE(transaction_id, is_buy): %s", table, str(e))
+        raise SchemaMigrationError(f"could not rebuild {table}", e) from e
 
 
 def _table_columns(db: DatabaseManager, table: str) -> set[str]:
@@ -328,6 +357,9 @@ def ensure_app_schema(db_app: DatabaseManager) -> None:
     SchemaMigrationError (startup fails with it); the indexes and backfills
     stay best-effort, logged.
     """
+
+    for table in ("character_wallet_transactions", "corporation_wallet_transactions"):
+        _ensure_transaction_side_key(db_app, table)
 
     # Character assets cost-basis/provenance columns
     for table in ("character_assets", "corporation_assets"):

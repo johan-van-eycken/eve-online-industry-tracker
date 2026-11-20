@@ -372,13 +372,14 @@ class Character:
                 self.wallet_transactions.append(new_trans)
             
             if self.wallet_transactions:
-                # Idempotent: a transaction already stored (a refresh that ran
-                # alongside, or a retry) is skipped instead of failing the batch.
+                # Idempotent on (transaction_id, is_buy): a row already stored (a
+                # refresh that ran alongside, a retry) is skipped; a self-trade's
+                # buy and sell are both kept.
                 rows = [{c.name: getattr(t, c.name) for c in CharacterWalletTransactionsModel.__table__.columns
                          if c.name != "id"} for t in self.wallet_transactions]
                 self._db_app.session.execute(
                     sqlite_insert(CharacterWalletTransactionsModel).values(rows)
-                    .on_conflict_do_nothing(index_elements=["transaction_id"])
+                    .on_conflict_do_nothing(index_elements=["transaction_id", "is_buy"])
                 )
                 self._db_app.session.commit()
             else:
