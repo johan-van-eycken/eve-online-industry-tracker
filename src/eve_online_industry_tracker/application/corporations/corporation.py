@@ -6,6 +6,8 @@ from typing import Optional, List, Dict, Any
 
 from sqlalchemy.exc import SQLAlchemyError
 
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
 from eve_online_industry_tracker.infrastructure.esi_client import ESI_REQUEST_ERRORS, esi_get_back_to_known
 
 from eve_online_industry_tracker.config.config_manager import ConfigManager
@@ -806,7 +808,11 @@ class Corporation:
                 )
 
             if rows:
-                self._db_app.session.bulk_save_objects([CorporationWalletTransactionsModel(**r) for r in rows])
+                # Idempotent on (transaction_id, is_buy); a self-trade's buy and sell are both kept.
+                self._db_app.session.execute(
+                    sqlite_insert(CorporationWalletTransactionsModel).values(rows)
+                    .on_conflict_do_nothing(index_elements=["transaction_id", "is_buy"])
+                )
                 self._db_app.session.commit()
 
             self._backfill_wallet_transaction_client_names()
@@ -821,6 +827,7 @@ class Corporation:
                 for entry in corporation_wallet_transactions
             ]
         except Exception as e:
+            self._db_app.session.rollback()
             logging.warning(
                 "Skipping corporation wallet transactions refresh for %s (%s): %s",
                 self.corporation_name,

@@ -89,10 +89,13 @@ class CharacterWalletJournalModel(BaseApp):
 
 class CharacterWalletTransactionsModel(BaseApp):
     __tablename__ = "character_wallet_transactions"
+    # A self-trade (buying from one's own sell order) is one transaction_id
+    # ESI returns twice, as the sell and as the buy: both rows are real.
+    __table_args__ = (UniqueConstraint("transaction_id", "is_buy", name="uq_character_wallet_transactions_transaction_side"),)
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     character_id: Mapped[int] = mapped_column(Integer, nullable=False)
-    transaction_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False)
+    transaction_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     client_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     client_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     date: Mapped[str] = mapped_column(String, nullable=True)
@@ -564,12 +567,15 @@ class CorporationIndustryJobsModel(BaseApp):
 
 class CorporationWalletTransactionsModel(BaseApp):
     __tablename__ = "corporation_wallet_transactions"
+    # A self-trade (buying from one's own sell order) is one transaction_id
+    # ESI returns twice, as the sell and as the buy: both rows are real.
+    __table_args__ = (UniqueConstraint("transaction_id", "is_buy", name="uq_corporation_wallet_transactions_transaction_side"),)
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     corporation_id: Mapped[int] = mapped_column(Integer, nullable=False)
     division: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
-    transaction_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False)
+    transaction_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     client_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     client_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     date: Mapped[Optional[str]] = mapped_column(String, nullable=True)
