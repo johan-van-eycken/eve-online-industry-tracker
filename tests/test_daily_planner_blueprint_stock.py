@@ -83,8 +83,14 @@ def _gaps(bpc_counts, in_progress=None, sources=None):
     )
 
 
-def test_copy_gap_below_minimum():
-    assert _gaps({10: 1}, {10: 1.0}) == [StockGap("copy", 10, None, 2.0, 3, 100)]
+def test_copy_gap_below_minimum_for_an_invention_source():
+    gaps = _gaps({10: 1}, {10: 1.0}, sources={30: 10})
+    assert StockGap("copy", 10, None, 2.0, 3, 100) in gaps
+
+
+def test_no_copy_gap_for_a_bpo_that_is_no_invention_source():
+    """Its product builds from the BPO itself (ChainPlanner._prefer_free_bpo): no BPCs needed."""
+    assert _gaps({10: 1}) == []
 
 
 def test_no_gap_at_minimum():

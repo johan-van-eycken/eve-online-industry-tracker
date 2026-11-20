@@ -420,7 +420,8 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
                 "min": 0,
                 "max": 50,
                 "label": "Minimum BPCs in stock per owned BPO",
-                "help": "Leftover research slots copy an owned BPO with fewer BPCs than this (jobs in progress count).",
+                "help": "Leftover research slots copy an owned BPO that is an invention source and has fewer BPCs "
+                        "than this (jobs in progress count).",
             },
             "planner_min_invented_bpc_stock": {
                 "type": "int",

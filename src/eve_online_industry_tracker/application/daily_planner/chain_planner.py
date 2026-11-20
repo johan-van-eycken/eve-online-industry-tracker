@@ -303,6 +303,7 @@ class ChainPlanner:
                     index: claim[1] for index, claim in ((i, ledger.claim_of(k)) for i, k in enumerate(keys))
                     if claim is not None and claim[0] != int(decision.type_id)
                 }
+                self._prefer_free_bpo(decision, bpo_plan, keys, ledger)
                 self._apply_research_first(
                     decision, bp_type_id, bpo_plan, ctx["variants"],
                     raw_market_depth.get(int(decision.type_id)),
@@ -894,6 +895,49 @@ class ChainPlanner:
             "unconditional": True,
         }
         logger.info("ChainPlanner: type_id=%s: %s", decision.type_id, note)
+
+    @staticmethod
+    def _prefer_free_bpo(
+        decision: ItemDecision, bpo_plan: dict[str, Any], keys: list[Any], ledger: BlueprintLedger,
+    ) -> None:
+        """A T1 batch on one owned BPC builds from a free BPO of the same ME/TE
+        instead (research first mode other_bpo): the same materials and cost
+        per run, but a BPO has no run limit, so CharacterAssigner can size the
+        batch to the daily check, and the BPC stays free for parallel jobs
+        and invention. Not on a BPO in a job, in research or claimed today."""
+        row = decision.overview_row
+        segments = research_first.job_segments(row) or []
+        if (len(segments) != 1 or str(segments[0].get("source")) != research_first.OWNED_BPC_SOURCE
+                or isinstance(row.get("research_first"), dict)):
+            return
+        levels = (segments[0].get("blueprint_material_efficiency"), segments[0].get("blueprint_time_efficiency"))
+        if None in levels:
+            return
+        researching = row.get("needs_me_research") or row.get("needs_te_research")
+        unavailable = set(bpo_plan.get("busy") or ()) | (
+            {bpo_plan["research"]} if researching and bpo_plan.get("research") is not None else set()
+        )
+        for index, asset in enumerate(bpo_plan["assets"]):
+            if index in unavailable or ledger.claim_of(keys[index]) is not None:
+                continue
+            if research_first.bpo_levels(asset) != (int(levels[0]), int(levels[1])):
+                continue
+            build = research_first.describe_bpo(asset)
+            segment = {k: v for k, v in segments[0].items() if k not in ("item_id", "blueprint_item_id")}
+            job = orow.get_manufacturing_job(row)
+            decision.overview_row = {**row, "manufacturing_job": {
+                **job, "job_segments": [{**segment, "source": "owned_blueprint_original"}],
+                "blueprint_source_kind": "owned_blueprint_original",
+                "blueprint_original": {"item_id": research_first.item_id(asset)},
+            }, "research_first": {
+                "mode": "other_bpo",
+                "note": f"built from a free BPO at {build} instead of a BPC: no run limit, the BPC stays free",
+                "build_note": f"built from the BPO at {build} instead of a BPC",
+                "build_index": index,
+            }}
+            logger.info("ChainPlanner: type_id=%s: %s", decision.type_id,
+                        decision.overview_row["research_first"]["note"])
+            return
 
     @staticmethod
     def _claim_row_bpcs(ledger: BlueprintLedger, row: dict[str, Any], decision: ItemDecision, label: str) -> None:

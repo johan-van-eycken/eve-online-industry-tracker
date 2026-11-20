@@ -175,3 +175,54 @@ def test_the_assigner_records_why_the_slots_went_where_they_went():
     rows = {r["type_id"]: r for r in order["rows"]}
     assert rows[100]["day_sized"] is True and rows[100]["runs"] == 69
     assert rows[200]["not_day_sized"] == "source owned_blueprint_copy"
+
+
+# --- ChainPlanner: a batch on a BPC builds from a free BPO of the same ME/TE ---
+
+def _bpc_row_planner_run(*, bpo_me=10, busy=()):
+    from types import SimpleNamespace
+    from test_chain_planner_keying import _decision, _planner, _row
+    row = _row(runs=300, blueprint_source_kind="owned_blueprint_copy", blueprint_copy={"item_id": 501},
+               job_segments=[{"runs": 300, "source": "owned_blueprint_copy", "blueprint_item_id": 501,
+                              "blueprint_material_efficiency": 10, "blueprint_time_efficiency": 20}],
+               materials={"34": {"type_id": 34, "quantity": 300}})
+    decision = _decision(row)
+    bpo = SimpleNamespace(type_id=999, item_id=900, is_blueprint_copy=False,
+                          blueprint_material_efficiency=bpo_me, blueprint_time_efficiency=20, owner_character_id=None)
+    bpc = SimpleNamespace(type_id=999, item_id=501, is_blueprint_copy=True, blueprint_runs=300,
+                          blueprint_material_efficiency=10, blueprint_time_efficiency=20, owner_character_id=None)
+    from test_chain_planner_keying import _SUB_PHASE1
+    phase1 = {**_SUB_PHASE1, "bpo_assets_by_type_id": {999: [bpo]}, "bpc_assets_by_type_id": {999: [bpc]},
+              "busy_blueprint_item_ids": list(busy)}
+    plan = _planner(own_parent_blueprints=False).plan_chain([decision], phase1)
+    return plan, decision
+
+
+def test_a_bpc_batch_moves_to_a_free_bpo_of_the_same_levels_and_keeps_the_bpc_free():
+    plan, decision = _bpc_row_planner_run()
+    segment = decision.overview_row["manufacturing_job"]["job_segments"][0]
+    assert segment["source"] == "owned_blueprint_original" and segment["runs"] == 300
+    assert decision.overview_row["research_first"]["mode"] == "other_bpo"
+    # The BPC is still free for a parallel job.
+    assert plan.claim_parallel_blueprint(decision, 300, 10)["item_id"] == 501
+
+
+def test_a_bpo_of_other_levels_or_in_a_job_is_not_used():
+    _plan, decision = _bpc_row_planner_run(bpo_me=8)
+    assert decision.overview_row["manufacturing_job"]["job_segments"][0]["source"] == "owned_blueprint_copy"
+    _plan, decision = _bpc_row_planner_run(busy=[900])
+    assert decision.overview_row["manufacturing_job"]["job_segments"][0]["source"] == "owned_blueprint_copy"
+
+
+def test_end_to_end_the_moved_batch_is_day_sized():
+    plan, decision = _bpc_row_planner_run()
+    decision.market_room_runs = 10_000
+    decision.overview_row["manufacturing_job"]["time_seconds"] = 300 * HOUR / 10   # 6 minutes a run
+    decision.overview_row["manufacturing_job"]["manufacturing_job_cost"] = 0.0
+    actions = CharacterAssigner().assign(
+        plan, [], _Chars([_char(1, 2)]), _AdminStub(), {34: {"vwap_5d": 1.0}},
+        blueprint_data=NO_SKILL_REQUIREMENTS, budget=WalletBudget(balance=1000 * M, reserve_pct=0),
+    )
+    job = [a for a in actions if a.action_type == "manufacture" and a.type_id == decision.type_id][0]
+    assert job.runs == 695                      # 69.5h of 6-minute runs, before the third 11:00 check
+    assert "sized to 695 runs" in job.notes
