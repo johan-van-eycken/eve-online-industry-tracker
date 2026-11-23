@@ -3189,8 +3189,9 @@ class _BuildCharger:
         target = min(batch_runs, decision.market_cap_runs or batch_runs)
         runs = 0 if budget.blocked_reason else max_affordable_runs(cost_of, target, budget.available)
         if runs == 0:
-            self._release(fresh)
+            # Priced before the release: cost_of reads the reservations it frees (KeyError otherwise).
             one_run = cost_of(1)
+            self._release(fresh)
             if budget.blocked_reason:
                 why = budget.blocked_reason
             elif one_run is None:
