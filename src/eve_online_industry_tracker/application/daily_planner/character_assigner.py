@@ -201,6 +201,10 @@ class CharacterAssigner:
             self, budget, StockLedger(corp_material_stock or {}), price_map or {}, blueprint_data,
             sub_components, char_slots, characters, skill_gate,
         )
+        # None (no settings store): no cap. The app's settings always carry one (default 25%).
+        pct = _adm(admin_settings, "planner_max_product_capital_pct")
+        if charger is not None and pct is not None:
+            charger.product_cap = budget.spendable * float(pct) / 100
 
         resize = getattr(chain_plan, "resize_sub_components", None)
         # Research-first parents that got no research slot and build from
@@ -3064,6 +3068,11 @@ class _BuildCharger:
         self.science_dropped: dict[int, str] = {}
         #: A build was dropped or cut for money (free_slots_after's manufacturing reason).
         self.wallet_limited = False
+        #: The most one product's jobs (first and extra) may take from the
+        #: wallet (planner_max_product_capital_pct of the budget); None: no cap.
+        self.product_cap: float | None = None
+        #: {parent type_id: ISK its jobs took so far}.
+        self.product_spent: dict[int, float] = {}
 
     def _unit_price(self, type_id: int) -> float | None:
         return price_map_unit_price(self._price_map.get(type_id))[0]
@@ -3187,13 +3196,21 @@ class _BuildCharger:
 
         budget = self._budget
         target = min(batch_runs, decision.market_cap_runs or batch_runs)
-        runs = 0 if budget.blocked_reason else max_affordable_runs(cost_of, target, budget.available)
+        limit = budget.available
+        capped = False
+        if self.product_cap is not None:
+            cap_left = max(self.product_cap - self.product_spent.get(parent_type_id, 0.0), 0.0)
+            capped = cap_left < limit
+            limit = min(limit, cap_left)
+        runs = 0 if budget.blocked_reason else max_affordable_runs(cost_of, target, limit)
         if runs == 0:
             # Priced before the release: cost_of reads the reservations it frees (KeyError otherwise).
             one_run = cost_of(1)
             self._release(fresh)
             if budget.blocked_reason:
                 why = budget.blocked_reason
+            elif capped and one_run is not None and one_run <= budget.available:
+                why = f"product capital cap ({self.product_cap:,.0f} ISK a product)"
             elif one_run is None:
                 why = f"wallet charge unknown ({self._unknown_input(base, fee, action)})"
             else:
@@ -3203,7 +3220,7 @@ class _BuildCharger:
             _append_reason(decision, f"not built today: {why}")
             return False
         # Cut for money, not because one more run's charge is unknown.
-        if runs < target and cost_of(runs + 1) is not None:
+        if runs < target and cost_of(runs + 1) is not None and not capped:
             self.wallet_limited = True
         cost = cost_of(runs, commit=True)
         if runs < batch_runs:
@@ -3212,6 +3229,7 @@ class _BuildCharger:
                 self.scale[parent_type_id] = runs / batch_runs
             action.notes = f"{action.notes}; cut from {batch_runs} to {_count(runs, 'run', 'runs')} (wallet / market)"
         budget.charge(cost)
+        self.product_spent[parent_type_id] = self.product_spent.get(parent_type_id, 0.0) + (cost or 0.0)
         return True
 
     def charge_science(self, decision: ItemDecision, action: AssignedAction) -> bool:

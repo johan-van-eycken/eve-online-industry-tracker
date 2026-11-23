@@ -265,16 +265,22 @@ class IndustryService(
         return admin.get(category, key)
 
     def _priced_at_recent_trades(self, price_map: dict, hub: str) -> dict:
-        """The product sell prices at the planner's sale price: the market
-        depth cache's 5-day average trade price, else its cheapest sell order
-        without our own (ProfitabilityScorer._sell_price), so the overview
-        and the Daily Planner show the same margin. A type without a cache
-        row keeps its order-book price; that price stays as
-        order_book_unit_price."""
-        from eve_online_industry_tracker.infrastructure.models import MarketDepthCacheModel
+        """The product sell prices at the planner's sale price
+        (ProfitabilityScorer._sell_price): the lower of the market depth
+        cache's recent trade price (vwap_5d) and its cheapest sell order
+        without our own (spot_sell_price), so the overview and the Daily
+        Planner show the same margin. A type without a cache row is priced at
+        the lower of its order book and the average of its last 5 trading
+        days within 30 days (market history), so one troll order does not
+        price it (Target Painter I at ~1M, trading at 61-98K, 2026-11-23); it
+        keeps the order book without a recent trade. The order-book price
+        stays as order_book_unit_price."""
+        from eve_online_industry_tracker.infrastructure.models import MarketDepthCacheModel, MarketHistoryModel
         type_ids = [int(t) for t in price_map]
         if not type_ids:
             return price_map
+        region_id = MarketPricingService._MARKET_HUBS.get(hub, {}).get("region_id")
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).date().isoformat()
         session = self._sessions.app_session()
         try:
             depth = {
@@ -282,19 +288,36 @@ class IndustryService(
                     MarketDepthCacheModel.type_id.in_(type_ids), MarketDepthCacheModel.hub == hub,
                 ).all()
             }
+            history: dict[int, list] = {}
+            missing = [t for t in type_ids if t not in depth]
+            if missing and region_id is not None:
+                for r in session.query(MarketHistoryModel).filter(
+                    MarketHistoryModel.type_id.in_(missing), MarketHistoryModel.region_id == region_id,
+                    MarketHistoryModel.date >= cutoff,
+                ).order_by(MarketHistoryModel.date.desc()).all():
+                    if r.close and r.volume and len(history.setdefault(int(r.type_id), [])) < 5:
+                        history[int(r.type_id)].append(r)
         finally:
             session.close()
         out = dict(price_map)
         for type_id, entry in price_map.items():
-            row = depth.get(int(type_id))
-            if row is None or not isinstance(entry, dict):
+            if not isinstance(entry, dict):
                 continue
-            for key in ("vwap_5d", "spot_sell_price"):
-                price = self._as_float(getattr(row, key, None))
-                if price is not None and price > 0:
-                    out[type_id] = {**entry, "unit_price": price, "price_source": f"market_depth:{key}",
-                                    "order_book_unit_price": entry.get("unit_price")}
-                    break
+            book = self._as_float(entry.get("unit_price"))
+            row = depth.get(int(type_id))
+            if row is not None:
+                candidates = [("market_depth:vwap_5d", self._as_float(row.vwap_5d)),
+                              ("market_depth:spot_sell_price", self._as_float(row.spot_sell_price))]
+            else:
+                days = history.get(int(type_id)) or []
+                volume = sum(r.volume for r in days)
+                vwap = sum(r.close * r.volume for r in days) / volume if volume else None
+                candidates = [("market_history:vwap_5d", vwap), ("order_book", book)] if vwap else []
+            candidates = [(source, price) for source, price in candidates if price is not None and price > 0]
+            if not candidates:
+                continue
+            source, price = min(candidates, key=lambda c: c[1])
+            out[type_id] = {**entry, "unit_price": price, "price_source": source, "order_book_unit_price": book}
         return out
 
     @staticmethod

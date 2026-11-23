@@ -278,7 +278,7 @@ def test_the_spot_price_leaves_out_our_own_sell_orders(app_engine, monkeypatch):
 
 
 def test_without_trades_in_the_window_the_vwap_is_the_last_known_trades(app_engine, monkeypatch):
-    """No trade in the last 5 days: the last trades (within 90 days) price it,
+    """No trade in the last 5 days: the last trades (within 30 days) price it,
     not the asking price."""
     _seed_history(app_engine, (12, 100.0, 1), (20, 110.0, 1), (200, 999.0, 1))
     state = _state(app_engine)
@@ -287,3 +287,16 @@ def test_without_trades_in_the_window_the_vwap_is_the_last_known_trades(app_engi
     c = _collector(monkeypatch, state)
     c.run()
     assert _cache_rows(app_engine)[0]["vwap_5d"] == pytest.approx(105.0)
+
+
+def test_without_a_trade_in_30_days_there_is_no_recent_price(app_engine, monkeypatch):
+    """Capital Warp Core Optimizer I, 2026-11-23: one order at 350M, the last
+    trade 10M in August; the asking price is no trade price (vwap None)."""
+    _seed_history(app_engine, (40, 10.0, 1), (108, 12.0, 1))
+    state = _state(app_engine)
+    state.esi_service = SimpleNamespace(get_sell_order_book=lambda type_ids, region_id=None: {TYPE: [
+        {"price": 350.0, "volume_remain": 1, "order_id": 777}]})
+    c = _collector(monkeypatch, state)
+    c.run()
+    row = _cache_rows(app_engine)[0]
+    assert row["vwap_5d"] is None and row["spot_sell_price"] == 350.0
