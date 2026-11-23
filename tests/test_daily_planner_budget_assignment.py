@@ -249,3 +249,12 @@ def test_cut_batch_scales_the_figures():
     assert (action.runs, action.quantity, action.materials) == (10, 10, {MAT: 11})
     assert (action.estimated_cost_isk, action.estimated_build_cost_isk, action.estimated_job_fee_isk) == (100.0, 110.0, 10.0)
     assert action.estimated_profit_isk is None
+
+
+def test_a_blocked_wallet_with_a_parent_that_has_sub_components_does_not_crash():
+    """2026-11-23: a wallet read 68 h ago blocks every build; the parent's
+    reserved subs were released before its one-run price was read: KeyError."""
+    budget = WalletBudget(balance=1e12, reserve_pct=0, blocked_reason="corp wallet is 68 h old")
+    actions = _assign([_parent(runs=1, materials={COMP: 10}), _sub()], [_char(1, mfg_slots=2)], budget)
+    assert not _of(actions, "manufacture")
+    assert budget.spent == 0
