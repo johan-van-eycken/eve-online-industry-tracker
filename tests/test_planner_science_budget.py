@@ -57,3 +57,24 @@ def test_an_unknown_invent_cost_names_the_input_without_a_price():
                             invention_chance_reason="invention cost unknown: invention input 20410 has no price")
     assert charger.charge_science(decision, action) is False
     assert "invention input 20410 has no price" in charger.science_drops[0]["why"]
+
+
+def _copy(cost, fee_reason=None):
+    return AssignedAction(type_id=7, type_name="Thing I", action_type="copy", character_id=2, character_name="K",
+                          quantity=None, runs=1, estimated_cost_isk=None, estimated_profit_isk=None,
+                          estimated_completion=None, notes="", estimated_job_fee_isk=cost,
+                          estimated_job_fee_unknown_reason=fee_reason)
+
+
+def test_the_stock_pass_draws_on_the_science_pot():
+    """Plan 42: the stock pass charged budget.charge (the wallet less the pot),
+    so its copies and inventions ran out on "wallet" with the pot untouched."""
+    budget = WalletBudget(balance=100 * M, reserve_pct=0)
+    budget.set_aside(5 * M)
+    budget.charge(95 * M)                                    # the builds took the rest
+    assigner = CharacterAssigner()
+    assigner._stock_drops = []
+    assert assigner._charge_stock(_copy(3 * M), budget, {}) is True
+    dropped = {}
+    assert assigner._charge_stock(_copy(3 * M), budget, dropped) is False   # 2M of the pot left
+    assert dropped == {2: "wallet"} and assigner._stock_drops[0]["pass"] == "stock"

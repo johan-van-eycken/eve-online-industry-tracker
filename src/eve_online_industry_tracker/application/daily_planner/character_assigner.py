@@ -143,6 +143,7 @@ class CharacterAssigner:
         minimums, for the stock pass (_stock_pass); None skips it."""
         now = _now()
         self.free_slots_after = {}
+        self._stock_drops: list[dict[str, Any]] = []
 
         # Build character capability map
         characters = self._get_characters(characters_service)
@@ -408,7 +409,7 @@ class CharacterAssigner:
             _reword_unused_research_claims(chain_plan.decisions, assigned_actions, fell_back)
         _reword_released_bpcs(chain_plan.decisions, bpc_pool)
         dropped = charger.science_dropped if charger is not None else {}
-        self.science_drops = charger.science_drops[:50] if charger is not None else []
+        self.science_drops = ((charger.science_drops if charger is not None else []) + self._stock_drops)[:50]
         blocked = budget.blocked_reason if budget is not None else None
         mfg_reason = blocked or ("wallet" if charger is not None and charger.wallet_limited else "no eligible job")
         self.free_slots_after = {
@@ -856,21 +857,25 @@ class CharacterAssigner:
             )
         return out
 
-    @staticmethod
-    def _charge_stock(action: AssignedAction, budget: WalletBudget | None, stock_dropped: dict[int, str]) -> bool:
-        """Charge a stock job (science_cost) to what is left of the wallet;
+    def _charge_stock(self, action: AssignedAction, budget: WalletBudget | None, stock_dropped: dict[int, str]) -> bool:
+        """Charge a stock job (science_cost) to the science pot, then the
+        wallet (WalletBudget.charge_science: the pot planner_science_budget_pct
+        keeps is for exactly these jobs; budget.charge left it unused, plan 42);
         False (nothing charged, the pilot's reason set) when its cost is
         unknown or does not fit. No budget: unlimited, but never unknown."""
         cost = science_cost(action)
         cid = int(action.character_id)
         if cost is None:
-            why = f"{action.action_type} cost unknown ({action.estimated_job_fee_unknown_reason or 'fee or inputs unpriced'})"
+            why = f"{action.action_type} cost unknown ({_science_cost_cause(action)})"
             stock_dropped.setdefault(cid, f"no science today: {why}")
-        elif budget is None or budget.charge(cost):
+        elif budget is None or budget.charge_science(cost):
             return True
         else:
             why = stock_dropped[cid] = budget.blocked_reason or "wallet"
         logger.info("CharacterAssigner: no stock %s of type_id=%s today: %s", action.action_type, action.type_id, why)
+        self._stock_drops.append({"type_id": int(action.type_id), "type_name": action.type_name,
+                                  "action": action.action_type, "character_id": action.character_id,
+                                  "why": why, "pass": "stock"})
         return False
 
     def _take_slot(self, char_slots: dict[int, dict], char_id: int, action_type: str) -> None:
@@ -2931,6 +2936,16 @@ def _sub_manufacture_notes(
     return notes
 
 
+def _science_cost_cause(action: AssignedAction) -> str:
+    """Why a science job's cost is unknown: the fee's recorded reason, else an
+    invent action's own cause (an input without a price)."""
+    cause = action.estimated_job_fee_unknown_reason if action.estimated_job_fee_isk is None else None
+    if cause is None and action.action_type == "invent":
+        cause = next((part for part in (action.invention_chance_reason or "").split("; ")
+                      if "cost" in part and "unknown" in part), None)
+    return cause or "fee or inputs unpriced"
+
+
 def science_cost(action: AssignedAction) -> float | None:
     """What a research / copy job takes from the wallet: its fee; an invent
     job its fee plus its inputs (estimated_cost_isk). None when a part is unknown."""
@@ -3307,12 +3322,7 @@ class _BuildCharger:
         if self._budget.charge_science(cost):
             return True
         if cost is None:
-            # The invent action's own cause (an input without a price) when the fee is known.
-            cause = action.estimated_job_fee_unknown_reason if action.estimated_job_fee_isk is None else None
-            if cause is None and action.action_type == "invent":
-                cause = next((part for part in (action.invention_chance_reason or "").split("; ")
-                              if "cost" in part and "unknown" in part), None)
-            why = f"{action.action_type} cost unknown ({cause or 'fee or inputs unpriced'})"
+            why = f"{action.action_type} cost unknown ({_science_cost_cause(action)})"
             self.science_dropped.setdefault(int(action.character_id), f"no science today: {why}")
         else:
             why = "wallet"
