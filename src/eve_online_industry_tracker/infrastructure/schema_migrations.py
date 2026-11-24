@@ -100,16 +100,35 @@ def _ensure_transaction_side_key(db: DatabaseManager, table: str) -> None:
     """Replace a wallet transactions table's UNIQUE(transaction_id) by
     UNIQUE(transaction_id, is_buy): a self-trade is one transaction_id that ESI
     returns as the sell and as the buy, and the old key failed the whole
-    refresh on it (2026-11-20). SQLite cannot drop an inline constraint, so the
-    table is rebuilt from its own DDL in one transaction; rows are kept.
-    Idempotent: a table without the old key is left alone. A failed rebuild
-    raises SchemaMigrationError (the transaction is rolled back)."""
+    refresh on it (2026-11-20)."""
+    _rebuild_unique_key(db, table, "UNIQUE (transaction_id)",
+                        f"CONSTRAINT uq_{table}_transaction_side UNIQUE (transaction_id, is_buy)")
+
+
+def _ensure_journal_owner_key(db: DatabaseManager, table: str, owner_columns: str) -> None:
+    """Replace a wallet journal table's global UNIQUE(wallet_journal_id) by one
+    per owner: EVE gives both sides of a transfer the same journal id, so the
+    receiving pilot's (or division's) entry was refused (audit 2026-11-24)."""
+    key = f"CONSTRAINT uq_{table}_owner_id UNIQUE ({owner_columns}, wallet_journal_id)"
+    if not _rebuild_unique_key(db, table, "UNIQUE (wallet_journal_id)", key):
+        # The inline form of an older _ensure_table DDL.
+        _rebuild_unique_key(db, table, "wallet_journal_id INTEGER NOT NULL UNIQUE", "wallet_journal_id INTEGER NOT NULL",
+                            append=f", {key}")
+
+
+def _rebuild_unique_key(db: DatabaseManager, table: str, old_key: str, new_key: str, *, append: str = "") -> bool:
+    """Rebuild `table` from its own DDL with `old_key` replaced by `new_key`
+    (and `append` added before the closing parenthesis), in one transaction;
+    rows are kept, indexes are recreated by the later _ensure_index calls.
+    SQLite cannot drop an inline constraint. Idempotent: a table without
+    `old_key` is left alone (False). A failed rebuild raises SchemaMigrationError."""
     rows = db.query("SELECT sql FROM sqlite_master WHERE type='table' AND name=:t", {"t": table})
     ddl = str(rows[0][0]) if rows and rows[0][0] else ""
-    old_key = "UNIQUE (transaction_id)"
     if old_key not in ddl:
-        return
-    new_ddl = ddl.replace(old_key, f"CONSTRAINT uq_{table}_transaction_side UNIQUE (transaction_id, is_buy)", 1)
+        return False
+    new_ddl = ddl.replace(old_key, new_key, 1)
+    if append:
+        new_ddl = new_ddl[:new_ddl.rindex(")")] + append + new_ddl[new_ddl.rindex(")"):]
     new_ddl = new_ddl.replace(f"CREATE TABLE {table}", f"CREATE TABLE {table}__rebuild", 1)
     try:
         with db.engine.begin() as conn:
@@ -118,9 +137,10 @@ def _ensure_transaction_side_key(db: DatabaseManager, table: str) -> None:
             conn.execute(text(f"INSERT INTO {table}__rebuild SELECT * FROM {table}"))
             conn.execute(text(f"DROP TABLE {table}"))
             conn.execute(text(f"ALTER TABLE {table}__rebuild RENAME TO {table}"))
-        logging.info("Rebuilt %s with UNIQUE(transaction_id, is_buy)", table)
+        logging.info("Rebuilt %s: %s -> %s", table, old_key, new_key)
+        return True
     except _SCHEMA_ERRORS as e:
-        logging.error("Failed rebuilding %s with UNIQUE(transaction_id, is_buy): %s", table, str(e))
+        logging.error("Failed rebuilding %s (%s): %s", table, new_key, str(e))
         raise SchemaMigrationError(f"could not rebuild {table}", e) from e
 
 
@@ -360,6 +380,8 @@ def ensure_app_schema(db_app: DatabaseManager) -> None:
 
     for table in ("character_wallet_transactions", "corporation_wallet_transactions"):
         _ensure_transaction_side_key(db_app, table)
+    _ensure_journal_owner_key(db_app, "character_wallet_journal", "character_id")
+    _ensure_journal_owner_key(db_app, "corporation_wallet_journal", "corporation_id, division")
 
     # Character assets cost-basis/provenance columns
     for table in ("character_assets", "corporation_assets"):
@@ -533,7 +555,7 @@ def ensure_app_schema(db_app: DatabaseManager) -> None:
             "id INTEGER PRIMARY KEY AUTOINCREMENT,"
             "corporation_id INTEGER NOT NULL,"
             "division INTEGER NULL,"
-            "wallet_journal_id INTEGER NOT NULL UNIQUE,"
+            "wallet_journal_id INTEGER NOT NULL,"
             "amount REAL NOT NULL,"
             "balance REAL NOT NULL,"
             "context_id INTEGER NULL,"
@@ -549,7 +571,8 @@ def ensure_app_schema(db_app: DatabaseManager) -> None:
             "tax REAL NULL,"
             "tax_receiver_id INTEGER NULL,"
             "tax_receiver_name TEXT NULL,"
-            "updated_at DATETIME DEFAULT CURRENT_TIMESTAMP"
+            "updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
+            "CONSTRAINT uq_corporation_wallet_journal_owner_id UNIQUE (corporation_id, division, wallet_journal_id)"
             ")"
         ),
     )

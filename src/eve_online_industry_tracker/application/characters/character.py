@@ -397,29 +397,21 @@ class Character:
     # Save Market Orders
     # -------------------
     def save_market_orders(self, market_orders: List[Dict[str, Any]]) -> None:
-        """Save market orders to the database."""
-        if not market_orders:
-            logging.debug(f"No market orders to save for {self.character_name}.")
-            return
-
+        """Save market orders to the database: the stored orders become this
+        snapshot, also when it is empty (every order filled or cancelled; ESI
+        failures raise before this, a 304 gives the cached list)."""
         try:
-            model_objects = []
-            for order in market_orders:
-                new_order = CharacterMarketOrdersModel(**order)
-                model_objects.append(new_order)
-
+            model_objects = [CharacterMarketOrdersModel(**order) for order in market_orders]
+            self._db_app.session.query(CharacterMarketOrdersModel).filter_by(character_id=self.character_id).delete()
             if model_objects:
-                # Delete existing orders for this character and add new ones
-                self._db_app.session.query(CharacterMarketOrdersModel).filter_by(character_id=self.character_id).delete()
                 self._db_app.session.bulk_save_objects(model_objects)
-                self._db_app.session.commit()
-            else:
-                logging.debug(f"No new market orders to save for {self.character_name}.")
+            self._db_app.session.commit()
 
             self.market_orders = market_orders
 
             logging.debug(f"Market orders saved ({len(model_objects)}) for {self.character_name}.")
         except Exception as e:
+            self._db_app.session.rollback()
             error_message = f"Failed to save market orders for {self.character_name}. Error: {str(e)}"
             logging.error(error_message)
             raise Exception(error_message)
@@ -428,10 +420,8 @@ class Character:
     # Save Assets
     # -------------------
     def save_assets(self, asset_list: List[Dict[str, Any]]) -> None:
-        """Save assets to the database."""
-        if not asset_list:
-            logging.debug(f"No assets to save for {self.character_name}.")
-            return
+        """Save assets to the database: the stored assets become this snapshot,
+        also when it is empty (ESI failures raise before this)."""
 
         max_retries = 3
         for attempt in range(1, max_retries + 1):
@@ -448,19 +438,17 @@ class Character:
                     new_asset = CharacterAssetsModel(**asset)
                     self.assets.append(new_asset)
 
+                sync_asset_history(
+                    app_session=self._db_app.session,
+                    owner_kind="character",
+                    owner_id=int(self.character_id),
+                    asset_rows=enriched_assets,
+                )
+                # Delete existing assets for this character and add new ones
+                self._db_app.session.query(CharacterAssetsModel).filter_by(character_id=self.character_id).delete()
                 if self.assets:
-                    sync_asset_history(
-                        app_session=self._db_app.session,
-                        owner_kind="character",
-                        owner_id=int(self.character_id),
-                        asset_rows=enriched_assets,
-                    )
-                    # Delete existing assets for this character and add new ones
-                    self._db_app.session.query(CharacterAssetsModel).filter_by(character_id=self.character_id).delete()
                     self._db_app.session.bulk_save_objects(self.assets)
-                    self._db_app.session.commit()
-                else:
-                    logging.debug(f"No new assets to save for {self.character_name}.")
+                self._db_app.session.commit()
 
                 logging.debug(f"Assets saved ({len(self.assets)}) for {self.character_name}.")
                 return

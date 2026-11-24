@@ -595,10 +595,12 @@ class Corporation:
             if not corp_wallets or not isinstance(corp_wallets, list):
                 return
 
+            # Per division: a transfer between divisions may carry one journal id on both sides.
             known_ids = {
-                row[0]
-                for row in self._db_app.session.query(CorporationWalletJournalModel.wallet_journal_id)
-                .filter_by(corporation_id=self.corporation_id)
+                (row[0], row[1])
+                for row in self._db_app.session.query(
+                    CorporationWalletJournalModel.division, CorporationWalletJournalModel.wallet_journal_id,
+                ).filter_by(corporation_id=self.corporation_id)
             }
             new_entries: List[Dict[str, Any]] = []
             for wallet in corp_wallets:
@@ -621,7 +623,7 @@ class Corporation:
                     if not isinstance(entry, dict):
                         continue
                     journal_id = entry.get("id")
-                    if journal_id is None or journal_id in known_ids:
+                    if journal_id is None or (division, journal_id) in known_ids:
                         continue
                     entry["division"] = division
                     new_entries.append(entry)
@@ -676,7 +678,13 @@ class Corporation:
                 )
 
             if rows:
-                self._db_app.session.bulk_save_objects([CorporationWalletJournalModel(**row) for row in rows])
+                # A row a concurrent refresh stored meanwhile is skipped, not a failed batch.
+                # 1000 rows x 18 columns stays under SQLite's bound-variable limit.
+                for start in range(0, len(rows), 1000):
+                    self._db_app.session.execute(
+                        sqlite_insert(CorporationWalletJournalModel).values(rows[start:start + 1000])
+                        .on_conflict_do_nothing(index_elements=["corporation_id", "division", "wallet_journal_id"])
+                    )
                 self._db_app.session.commit()
 
             self._backfill_wallet_journal_party_names()
@@ -691,6 +699,8 @@ class Corporation:
                 for entry in corporation_wallet_journal
             ]
         except Exception as e:
+            # The failed flush would leave this thread's session unusable for the next refresh.
+            self._db_app.session.rollback()
             logging.warning(
                 "Skipping corporation wallet journal refresh for %s (%s): %s",
                 self.corporation_name,
