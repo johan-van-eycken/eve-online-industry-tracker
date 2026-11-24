@@ -247,7 +247,13 @@ class CharacterAssigner:
                     break
                 if cost is not None and total + cost <= budget.available:
                     total, taken = total + cost, taken + 1
-            budget.set_aside(total)
+            # At least planner_science_budget_pct of the budget stays for science
+            # (copies, research, invention), so the builds cannot take it all
+            # (plan 41: 2.69B of 2.73B built, 8 science slots idle on "wallet").
+            # None (no settings store): only the candidates' costs, as before.
+            pct = _adm(admin_settings, "planner_science_budget_pct")
+            floor = budget.spendable * float(pct) / 100 if pct is not None else 0.0
+            budget.set_aside(max(total, floor))
 
         def _assign_one(decision: ItemDecision) -> list[AssignedAction]:
             actions = self._assign_decision(
@@ -402,6 +408,7 @@ class CharacterAssigner:
             _reword_unused_research_claims(chain_plan.decisions, assigned_actions, fell_back)
         _reword_released_bpcs(chain_plan.decisions, bpc_pool)
         dropped = charger.science_dropped if charger is not None else {}
+        self.science_drops = charger.science_drops[:50] if charger is not None else []
         blocked = budget.blocked_reason if budget is not None else None
         mfg_reason = blocked or ("wallet" if charger is not None and charger.wallet_limited else "no eligible job")
         self.free_slots_after = {
@@ -3107,6 +3114,8 @@ class _BuildCharger:
         self.scale: dict[int, float] = {}
         #: {pilot: why a science job of theirs was dropped} (free_slots_after's reason).
         self.science_dropped: dict[int, str] = {}
+        #: Every science job dropped today, for the plan summary.
+        self.science_drops: list[dict[str, Any]] = []
         #: A build was dropped or cut for money (free_slots_after's manufacturing reason).
         self.wallet_limited = False
         #: The most one product's jobs (first and extra) may take from the
@@ -3298,13 +3307,21 @@ class _BuildCharger:
         if self._budget.charge_science(cost):
             return True
         if cost is None:
-            why = f"{action.action_type} cost unknown ({action.estimated_job_fee_unknown_reason or 'fee or inputs unpriced'})"
+            # The invent action's own cause (an input without a price) when the fee is known.
+            cause = action.estimated_job_fee_unknown_reason if action.estimated_job_fee_isk is None else None
+            if cause is None and action.action_type == "invent":
+                cause = next((part for part in (action.invention_chance_reason or "").split("; ")
+                              if "cost" in part and "unknown" in part), None)
+            why = f"{action.action_type} cost unknown ({cause or 'fee or inputs unpriced'})"
             self.science_dropped.setdefault(int(action.character_id), f"no science today: {why}")
         else:
             why = "wallet"
             self.science_dropped.setdefault(int(action.character_id), self._budget.blocked_reason or "wallet")
         logger.info("CharacterAssigner: type_id=%s: no %s today: %s", decision.type_id, action.action_type, why)
         _append_reason(decision, f"no science today: {why}")
+        # Persisted in the plan summary (science_dropped_jobs): which job, and why.
+        self.science_drops.append({"type_id": int(decision.type_id), "type_name": getattr(decision, "type_name", None),
+                                   "action": action.action_type, "character_id": action.character_id, "why": why})
         return False
 
     def _unknown_input(self, base: dict[int, int] | None, fee: float | None, action: AssignedAction) -> str:

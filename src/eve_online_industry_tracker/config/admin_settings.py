@@ -473,6 +473,17 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
                 "help": "A batch on an owned BPO is sized to end just before one of the next this many "
                         "daily checks, the latest the market room allows.",
             },
+            "planner_science_budget_pct": {
+                "type": "float",
+                "default": 5.0,
+                "min": 0.0,
+                "max": 50.0,
+                "step": 1.0,
+                "format": "%.0f",
+                "label": "Science budget (%)",
+                "help": "At least this share of the budget is kept for copies, research and invention, "
+                        "so the builds cannot take the whole wallet.",
+            },
             "planner_max_product_capital_pct": {
                 "type": "float",
                 "default": 25.0,
