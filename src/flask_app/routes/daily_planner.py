@@ -36,9 +36,17 @@ def mark_done():
     require_ready(get_state())
     payload = request.get_json(silent=True) or {}
     action_id = payload.get("action_id")
-    if not action_id:
-        return error(message="action_id required", status_code=400)
-    get_state().daily_planner_service.mark_action_done(int(action_id))
+    if isinstance(action_id, str) and action_id.strip().isdigit():
+        action_id = int(action_id)
+    if not isinstance(action_id, int) or isinstance(action_id, bool) or action_id <= 0:
+        return error(message="action_id must be a positive integer", status_code=400)
+    service = get_state().daily_planner_service
+    if service.get_action(action_id) is None:
+        return error(message="Action not found", status_code=404)
+    try:
+        service.mark_action_done(action_id)
+    except ValueError as e:  # feedback already processed, as the PATCH route
+        return error(message=str(e), status_code=409)
     return ok(data={"status": "done"})
 
 

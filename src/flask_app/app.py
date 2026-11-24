@@ -8,6 +8,7 @@ from werkzeug.exceptions import HTTPException
 
 from flask_app.db import close_request_sessions
 from flask_app.http import error
+from flask_app.settings import get_settings
 from flask_app.state import state
 
 from eve_online_industry_tracker.application.characters.character_manager import UnknownCharacterError
@@ -34,6 +35,17 @@ def create_app() -> Flask:
 
     # Ensure DB sessions created during a request are always closed.
     app.teardown_appcontext(close_request_sessions)
+
+    # The names this local API answers to; any other Host is a page that rebound its
+    # own domain to 127.0.0.1 (DNS rebinding) and would otherwise read the GET data.
+    local_hosts = {"127.0.0.1", "localhost", "::1", get_settings().flask_host.lower()}
+
+    @app.before_request
+    def _reject_foreign_hosts():
+        host = (request.host or "").lower()
+        name = host[1:host.index("]")] if host.startswith("[") and "]" in host else host.rsplit(":", 1)[0]
+        if name not in local_hosts:
+            return error(message="Host not allowed", status_code=403)
 
     @app.before_request
     def _reject_cross_site_writes():
