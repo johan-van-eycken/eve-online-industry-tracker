@@ -43,24 +43,33 @@ class StaticDataService:
             raise ServiceError(f"Character ID {character_id} not found", status_code=400)
 
         sde_session = self._sessions.sde_session()
-        language = getattr(getattr(self._state, "db_sde", None), "language", None) or "en"
-        return run_optimize(
-            payload,
-            character=character,
-            esi_service=self._state.esi_service,
-            sde_session=sde_session,
-            language=language,
-            admin_settings=getattr(self._state, "admin_settings", None),
-        )
+        try:
+            language = getattr(getattr(self._state, "db_sde", None), "language", None) or "en"
+            return run_optimize(
+                payload,
+                character=character,
+                esi_service=self._state.esi_service,
+                sde_session=sde_session,
+                language=language,
+                admin_settings=getattr(self._state, "admin_settings", None),
+            )
+        finally:
+            sde_session.close()
 
     def list_materials_cached(self) -> Any:
         if self._state.materials_cache is None:
             session = self._sessions.sde_session()
-            language = getattr(getattr(self._state, "db_sde", None), "language", None) or "en"
-            self._state.materials_cache = build_all_materials(session, language)
+            try:
+                language = getattr(getattr(self._state, "db_sde", None), "language", None) or "en"
+                self._state.materials_cache = build_all_materials(session, language)
+            finally:
+                session.close()
         return self._state.materials_cache
 
     def list_ores(self) -> Any:
         session = self._sessions.sde_session()
-        language = getattr(getattr(self._state, "db_sde", None), "language", None) or "en"
-        return build_all_ores(session, language)
+        try:
+            language = getattr(getattr(self._state, "db_sde", None), "language", None) or "en"
+            return build_all_ores(session, language)
+        finally:
+            session.close()

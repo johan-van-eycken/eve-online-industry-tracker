@@ -139,6 +139,9 @@ class _FailingHistory:
             raise self._stats_error
         return {"has_data": False}
 
+    def get_price_stats_many(self, **kw):
+        return {34: self.get_price_stats(**kw)}
+
     def fetch_and_store_history(self, **kw):
         raise self._fetch_error
 
@@ -153,7 +156,7 @@ def test_unreadable_price_stats_for_trends_are_logged(app_session, caplog):
     rows = [{"type_id": 34, "manufacturing_job": {}}]
     with caplog.at_level(logging.WARNING):
         svc._enrich_product_rows_with_market_trends(rows, market_history_svc=_FailingHistory(stats_error=_db_error()))
-    assert "fake db down" in caplog.text and "type_id=34" in caplog.text
+    assert "fake db down" in caplog.text and "no trends this refresh" in caplog.text
 
 
 def _anomaly_service(monkeypatch, history):

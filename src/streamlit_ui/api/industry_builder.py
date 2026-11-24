@@ -16,44 +16,6 @@ def _profile_id_payload(industry_profile_id: int | None) -> int | None:
     return int(industry_profile_id)
 
 
-@st.cache_data(ttl=300, show_spinner=False)
-def fetch_product_overview(
-    *,
-    maximize_bp_runs: bool = False,
-    group_identical_bpcs: bool = True,
-    build_from_bpc: bool = True,
-    have_blueprint_source_only: bool = True,
-    include_reactions: bool = False,
-    market_hub: str = "jita",
-    material_price_side: str = "sell",
-    product_price_side: str = "sell",
-    industry_profile_id: int | None = None,
-    owned_blueprints_scope: str = "all_characters",
-    character_id: int,
-) -> list[dict[str, Any]]:
-    path = (
-        f"/industry_products/{int(character_id)}"
-        f"?maximize_bp_runs={1 if maximize_bp_runs else 0}"
-        f"&group_identical_bpcs={1 if group_identical_bpcs else 0}"
-        f"&build_from_bpc={1 if build_from_bpc else 0}"
-        f"&have_blueprint_source_only={1 if have_blueprint_source_only else 0}"
-        f"&include_reactions={1 if include_reactions else 0}"
-        f"&market_hub={market_hub}"
-        f"&material_price_side={material_price_side}"
-        f"&product_price_side={product_price_side}"
-        f"&owned_blueprints_scope={owned_blueprints_scope}"
-    )
-    if industry_profile_id is not None and int(industry_profile_id) > 0:
-        path += f"&industry_profile_id={int(industry_profile_id)}"
-
-    response = api_get(path, timeout_seconds=60) or {}
-    if response.get("status") != "success":
-        raise RuntimeError(response.get("message") or "Failed to load industry product overview")
-
-    data = response.get("data") or []
-    return data if isinstance(data, list) else []
-
-
 @st.cache_data(ttl=30, show_spinner=False)
 def fetch_job_manager_status() -> dict[str, Any]:
     response = api_get("/industry_job_manager/status") or {}
@@ -162,6 +124,5 @@ def fetch_type_track_record(type_ids: tuple[int, ...]) -> dict[str, dict]:
 
 
 def clear_industry_builder_caches() -> None:
-    fetch_product_overview.clear()
     fetch_reorder_alerts.clear()
     fetch_type_track_record.clear()

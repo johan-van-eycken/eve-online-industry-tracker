@@ -389,7 +389,7 @@ def test_public_structure_owner_names_that_cannot_be_resolved_are_logged(monkeyp
     monkeypatch.setattr(facilities, "get_cached_public_structures", lambda **kw: (structures, True))
     monkeypatch.setattr(facilities, "get_type_data", lambda session, language, ids: {})
     svc = _service(SimpleNamespace(esi_service=_esi_names_failing(), db_sde=None),
-                   SimpleNamespace(sde_session=lambda: None))
+                   SimpleNamespace(sde_session=lambda: SimpleNamespace(close=lambda: None)))
     with caplog.at_level(logging.WARNING):
         out, meta = svc.public_structures(system_id=SYSTEM)
     assert out[0]["owner_id"] == CORP and out[0]["owner_name"] is None       # keeps its owner ID
@@ -406,7 +406,7 @@ def test_a_programming_error_in_the_public_owner_lookup_propagates(monkeypatch):
                         lambda **kw: ([{"type_id": 35825, "owner_id": CORP}], True))
     monkeypatch.setattr(facilities, "get_type_data", lambda session, language, ids: {})
     svc = _service(SimpleNamespace(esi_service=SimpleNamespace(get_universe_names=_bug), db_sde=None),
-                   SimpleNamespace(sde_session=lambda: None))
+                   SimpleNamespace(sde_session=lambda: SimpleNamespace(close=lambda: None)))
     with pytest.raises(KeyError):
         svc.public_structures(system_id=SYSTEM)
 

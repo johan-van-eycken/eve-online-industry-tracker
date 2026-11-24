@@ -71,9 +71,6 @@ class OverviewJobsMixin:
     def _job_is_active(job: dict[str, Any]) -> bool:
         return str(job.get("status") or "").strip().lower() in {"queued", "running"}
 
-    _overview_refresh_job_is_active = _job_is_active
-
-
     # Finished jobs kept per store: the latest results, not every refresh of the session.
     _FINISHED_JOBS_KEPT = 5
 

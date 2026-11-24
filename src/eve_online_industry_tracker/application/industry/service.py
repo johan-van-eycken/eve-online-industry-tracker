@@ -4482,11 +4482,13 @@ class IndustryService(
         if progress_callback is not None:
             progress_callback(1.0, "Product overview ready", {"stage": "completed", "rows": len(product_rows)})
 
-        self._state._overview_result_cache = {
+        result = {
             "hash": overview_input_hash, "rows": product_rows, "later_batch_plan_version": LATER_BATCH_PLAN_VERSION,
         }
+        self._state._overview_result_cache = result
         # The realized invention estimate uses the same decryptor (realized_invention_inputs).
-        self.publish_decryptor_choices(ctx.decryptor_choice_by_blueprint_type_id)
+        # Into this run's own cache dict: a run finishing meanwhile cannot get these choices.
+        self.publish_decryptor_choices(ctx.decryptor_choice_by_blueprint_type_id, cache=result)
         return product_rows
 
     @staticmethod
@@ -4497,7 +4499,9 @@ class IndustryService(
         invention without a decryptor, so the realized side does too."""
         return {int(bp_type_id): choice.option for bp_type_id, choice in choices.items()}
 
-    def publish_decryptor_choices(self, choices: Mapping[int, DecryptorChoice]) -> dict[int, DecryptorOption]:
+    def publish_decryptor_choices(
+        self, choices: Mapping[int, DecryptorChoice], *, cache: dict[str, Any] | None = None,
+    ) -> dict[int, DecryptorOption]:
         """Publish this overview's decryptor choices for the realized side:
         in memory (the overview cache), persisted in the app DB (read after a
         restart, before the first overview), and, after the first publish of
@@ -4505,7 +4509,7 @@ class IndustryService(
         the stored jobs that had no choice are re-snapshotted.
         A database or ESI failure here is a WARNING: the overview stands."""
         published = self._published_decryptor_choices(choices)
-        cached = getattr(self._state, "_overview_result_cache", None)
+        cached = cache if cache is not None else getattr(self._state, "_overview_result_cache", None)
         if not isinstance(cached, dict):
             cached = {}
             self._state._overview_result_cache = cached
@@ -4556,12 +4560,18 @@ class IndustryService(
         app_session = sde_session = None
         try:
             app_session = self._sessions.app_session()
-            sde_session = self._sessions.sde_session()
-            resnapshot_jobs_without_decryptor_choice(
-                app_session=app_session, sde_session=sde_session, market_price_map=market_price_map,
-                invention_refresh=RealizedInventionRefresh(inputs=self.realized_invention_inputs()),
-            )
-            self._state._realized_invention_resnapshot_blueprints = frozenset(covered or ()) | planned
+            try:
+                sde_session = self._sessions.sde_session()
+                try:
+                    resnapshot_jobs_without_decryptor_choice(
+                        app_session=app_session, sde_session=sde_session, market_price_map=market_price_map,
+                        invention_refresh=RealizedInventionRefresh(inputs=self.realized_invention_inputs()),
+                    )
+                    self._state._realized_invention_resnapshot_blueprints = frozenset(covered or ()) | planned
+                finally:
+                    sde_session.close()
+            finally:
+                app_session.close()
         except (SQLAlchemyError, RuntimeError) as exc:  # RuntimeError: a database is not initialized
             if app_session is not None:
                 app_session.rollback()
@@ -4698,126 +4708,129 @@ class IndustryService(
                 type_ids.add(int(prod_type_id))
 
         sde_session = self._sessions.sde_session()
-        language = getattr(getattr(self._state, "db_sde", None), "language", None) or "en"
-        type_data_map: dict[int, dict] = {}
-        if type_ids:
-            type_data_map = get_type_data(sde_session, language, sorted(type_ids))
+        try:
+            language = getattr(getattr(self._state, "db_sde", None), "language", None) or "en"
+            type_data_map: dict[int, dict] = {}
+            if type_ids:
+                type_data_map = get_type_data(sde_session, language, sorted(type_ids))
 
-        # Resolve character names from both job sets
-        char_ids: set[int] = set()
-        for j in char_jobs:
-            cid = getattr(j, "character_id", None)
-            if cid:
-                char_ids.add(int(cid))
-        for j in corp_jobs:
-            iid = getattr(j, "installer_id", None)
-            if iid:
-                char_ids.add(int(iid))
+            # Resolve character names from both job sets
+            char_ids: set[int] = set()
+            for j in char_jobs:
+                cid = getattr(j, "character_id", None)
+                if cid:
+                    char_ids.add(int(cid))
+            for j in corp_jobs:
+                iid = getattr(j, "installer_id", None)
+                if iid:
+                    char_ids.add(int(iid))
 
-        char_name_map: dict[int, str] = {}
-        if char_ids:
-            char_manager = getattr(self._state, "char_manager", None)
-            if char_manager is not None:
-                try:
-                    characters = char_manager.get_characters() or []
-                    for c in characters:
-                        cid = c.get("character_id")
-                        if cid and int(cid) in char_ids:
-                            char_name_map[int(cid)] = c.get("character_name") or str(cid)
-                except (TypeError, ValueError):
-                    pass  # cosmetic: no characters (ValueError) or an odd ID leaves the job with its ID
-                except CharacterDataError as exc:
-                    logger.warning("Active jobs: the character names cannot be read (%s); the jobs keep their "
-                                   "character IDs", exc)
+            char_name_map: dict[int, str] = {}
+            if char_ids:
+                char_manager = getattr(self._state, "char_manager", None)
+                if char_manager is not None:
+                    try:
+                        characters = char_manager.get_characters() or []
+                        for c in characters:
+                            cid = c.get("character_id")
+                            if cid and int(cid) in char_ids:
+                                char_name_map[int(cid)] = c.get("character_name") or str(cid)
+                    except (TypeError, ValueError):
+                        pass  # cosmetic: no characters (ValueError) or an odd ID leaves the job with its ID
+                    except CharacterDataError as exc:
+                        logger.warning("Active jobs: the character names cannot be read (%s); the jobs keep their "
+                                       "character IDs", exc)
 
-        rows: list[dict[str, Any]] = []
+            rows: list[dict[str, Any]] = []
 
-        # Build rows for character-scope jobs
-        for job in char_jobs:
-            raw = getattr(job, "raw", None) or {}
-            activity_id = raw.get("activity_id") if isinstance(raw, dict) else None
-            activity_name = activity_label(activity_id)
+            # Build rows for character-scope jobs
+            for job in char_jobs:
+                raw = getattr(job, "raw", None) or {}
+                activity_id = raw.get("activity_id") if isinstance(raw, dict) else None
+                activity_name = activity_label(activity_id)
 
-            bp_type_id = int(getattr(job, "blueprint_type_id", 0) or 0)
-            prod_type_id = int(getattr(job, "product_type_id", 0) or 0)
+                bp_type_id = int(getattr(job, "blueprint_type_id", 0) or 0)
+                prod_type_id = int(getattr(job, "product_type_id", 0) or 0)
 
-            bp_name = (type_data_map.get(bp_type_id) or {}).get("type_name", str(bp_type_id)) if bp_type_id else ""
-            prod_name = (type_data_map.get(prod_type_id) or {}).get("type_name", str(prod_type_id)) if prod_type_id else ""
+                bp_name = (type_data_map.get(bp_type_id) or {}).get("type_name", str(bp_type_id)) if bp_type_id else ""
+                prod_name = (type_data_map.get(prod_type_id) or {}).get("type_name", str(prod_type_id)) if prod_type_id else ""
 
-            cid = int(getattr(job, "character_id", 0) or 0)
+                cid = int(getattr(job, "character_id", 0) or 0)
 
-            rows.append({
-                "job_id": int(getattr(job, "job_id", 0) or 0),
-                "character_id": cid,
-                "character_name": char_name_map.get(cid, str(cid)),
-                "activity_id": activity_id,
-                "activity_name": activity_name,
-                "blueprint_type_id": bp_type_id,
-                "blueprint_name": bp_name,
-                "product_type_id": prod_type_id,
-                "product_name": prod_name,
-                "runs": int(getattr(job, "runs", 0) or 0),
-                "output_quantity": int(getattr(job, "output_quantity", 0) or 0),
-                "cost": float(getattr(job, "cost", 0) or 0),
-                "start_date": getattr(job, "start_date", None),
-                "end_date": getattr(job, "end_date", None),
-                "facility_id": int(getattr(job, "facility_id", 0) or 0),
-                "station_id": int(raw.get("station_id", 0) or 0) if isinstance(raw, dict) else 0,
-                "duration_seconds": int(raw.get("duration", 0) or 0) if isinstance(raw, dict) else 0,
-                "location_id": int(getattr(job, "location_id", 0) or 0),
-                "output_location_id": int(getattr(job, "output_location_id", 0) or 0),
-                "is_corp_job": False,
-                **self._active_job_build_cost_fields(job),
-            })
+                rows.append({
+                    "job_id": int(getattr(job, "job_id", 0) or 0),
+                    "character_id": cid,
+                    "character_name": char_name_map.get(cid, str(cid)),
+                    "activity_id": activity_id,
+                    "activity_name": activity_name,
+                    "blueprint_type_id": bp_type_id,
+                    "blueprint_name": bp_name,
+                    "product_type_id": prod_type_id,
+                    "product_name": prod_name,
+                    "runs": int(getattr(job, "runs", 0) or 0),
+                    "output_quantity": int(getattr(job, "output_quantity", 0) or 0),
+                    "cost": float(getattr(job, "cost", 0) or 0),
+                    "start_date": getattr(job, "start_date", None),
+                    "end_date": getattr(job, "end_date", None),
+                    "facility_id": int(getattr(job, "facility_id", 0) or 0),
+                    "station_id": int(raw.get("station_id", 0) or 0) if isinstance(raw, dict) else 0,
+                    "duration_seconds": int(raw.get("duration", 0) or 0) if isinstance(raw, dict) else 0,
+                    "location_id": int(getattr(job, "location_id", 0) or 0),
+                    "output_location_id": int(getattr(job, "output_location_id", 0) or 0),
+                    "is_corp_job": False,
+                    **self._active_job_build_cost_fields(job),
+                })
 
-        # Build rows for corporation-scope jobs — attribute to installer_id
-        # Deduplicate: the character endpoint returns corp-structure jobs too,
-        # so skip any corp job whose job_id is already in the character rows.
-        char_job_ids = {r["job_id"] for r in rows}
-        for job in corp_jobs:
-            raw = getattr(job, "raw", None) or {}
-            activity_id = raw.get("activity_id") if isinstance(raw, dict) else None
-            activity_name = activity_label(activity_id)
+            # Build rows for corporation-scope jobs — attribute to installer_id
+            # Deduplicate: the character endpoint returns corp-structure jobs too,
+            # so skip any corp job whose job_id is already in the character rows.
+            char_job_ids = {r["job_id"] for r in rows}
+            for job in corp_jobs:
+                raw = getattr(job, "raw", None) or {}
+                activity_id = raw.get("activity_id") if isinstance(raw, dict) else None
+                activity_name = activity_label(activity_id)
 
-            bp_type_id = int(getattr(job, "blueprint_type_id", 0) or 0)
-            prod_type_id = int(getattr(job, "product_type_id", 0) or 0)
+                bp_type_id = int(getattr(job, "blueprint_type_id", 0) or 0)
+                prod_type_id = int(getattr(job, "product_type_id", 0) or 0)
 
-            bp_name = (type_data_map.get(bp_type_id) or {}).get("type_name", str(bp_type_id)) if bp_type_id else ""
-            prod_name = (type_data_map.get(prod_type_id) or {}).get("type_name", str(prod_type_id)) if prod_type_id else ""
+                bp_name = (type_data_map.get(bp_type_id) or {}).get("type_name", str(bp_type_id)) if bp_type_id else ""
+                prod_name = (type_data_map.get(prod_type_id) or {}).get("type_name", str(prod_type_id)) if prod_type_id else ""
 
-            # Use installer_id as character_id so slot counting attributes correctly
-            installer_id = int(getattr(job, "installer_id", 0) or 0)
+                # Use installer_id as character_id so slot counting attributes correctly
+                installer_id = int(getattr(job, "installer_id", 0) or 0)
 
-            corp_job_id = int(getattr(job, "job_id", 0) or 0)
-            if corp_job_id in char_job_ids:
-                continue
+                corp_job_id = int(getattr(job, "job_id", 0) or 0)
+                if corp_job_id in char_job_ids:
+                    continue
 
-            rows.append({
-                "job_id": corp_job_id,
-                "character_id": installer_id,
-                "character_name": char_name_map.get(installer_id, str(installer_id)),
-                "activity_id": activity_id,
-                "activity_name": activity_name,
-                "blueprint_type_id": bp_type_id,
-                "blueprint_name": bp_name,
-                "product_type_id": prod_type_id,
-                "product_name": prod_name,
-                "runs": int(getattr(job, "runs", 0) or 0),
-                "output_quantity": int(getattr(job, "output_quantity", 0) or 0),
-                "cost": float(getattr(job, "cost", 0) or 0),
-                "start_date": getattr(job, "start_date", None),
-                "end_date": getattr(job, "end_date", None),
-                "facility_id": int(getattr(job, "facility_id", 0) or 0),
-                "station_id": int(raw.get("station_id", 0) or 0) if isinstance(raw, dict) else 0,
-                "duration_seconds": int(raw.get("duration", 0) or 0) if isinstance(raw, dict) else 0,
-                "location_id": int(getattr(job, "location_id", 0) or 0),
-                "output_location_id": int(getattr(job, "output_location_id", 0) or 0),
-                "is_corp_job": True,
-                **self._active_job_build_cost_fields(job),
-            })
+                rows.append({
+                    "job_id": corp_job_id,
+                    "character_id": installer_id,
+                    "character_name": char_name_map.get(installer_id, str(installer_id)),
+                    "activity_id": activity_id,
+                    "activity_name": activity_name,
+                    "blueprint_type_id": bp_type_id,
+                    "blueprint_name": bp_name,
+                    "product_type_id": prod_type_id,
+                    "product_name": prod_name,
+                    "runs": int(getattr(job, "runs", 0) or 0),
+                    "output_quantity": int(getattr(job, "output_quantity", 0) or 0),
+                    "cost": float(getattr(job, "cost", 0) or 0),
+                    "start_date": getattr(job, "start_date", None),
+                    "end_date": getattr(job, "end_date", None),
+                    "facility_id": int(getattr(job, "facility_id", 0) or 0),
+                    "station_id": int(raw.get("station_id", 0) or 0) if isinstance(raw, dict) else 0,
+                    "duration_seconds": int(raw.get("duration", 0) or 0) if isinstance(raw, dict) else 0,
+                    "location_id": int(getattr(job, "location_id", 0) or 0),
+                    "output_location_id": int(getattr(job, "output_location_id", 0) or 0),
+                    "is_corp_job": True,
+                    **self._active_job_build_cost_fields(job),
+                })
 
-        rows.sort(key=lambda r: r.get("end_date") or "")
-        return {"jobs": rows, "slot_capacities": slot_capacities}
+            rows.sort(key=lambda r: r.get("end_date") or "")
+            return {"jobs": rows, "slot_capacities": slot_capacities}
+        finally:
+            sde_session.close()
 
     def get_industry_reorder_alerts(
         self,
@@ -4859,90 +4872,93 @@ class IndustryService(
         cutoff_str = (today - timedelta(days=lookback_days)).isoformat()
 
         app_session: Any = self._sessions.app_session()
+        try:
 
-        # --- Hangar stock from corporation assets ---
-        asset_rows = (
-            app_session.query(CorporationAssetsModel)
-            .filter(
-                CorporationAssetsModel.corporation_id.in_(corp_ids),
-                CorporationAssetsModel.type_id.in_(type_ids),
-                CorporationAssetsModel.is_blueprint_copy == False,  # noqa: E712
-                CorporationAssetsModel.is_singleton == False,  # noqa: E712
+            # --- Hangar stock from corporation assets ---
+            asset_rows = (
+                app_session.query(CorporationAssetsModel)
+                .filter(
+                    CorporationAssetsModel.corporation_id.in_(corp_ids),
+                    CorporationAssetsModel.type_id.in_(type_ids),
+                    CorporationAssetsModel.is_blueprint_copy == False,  # noqa: E712
+                    CorporationAssetsModel.is_singleton == False,  # noqa: E712
+                )
+                .all()
             )
-            .all()
-        )
-        hangar_qty: dict[int, int] = {}
-        for row in asset_rows:
-            tid = int(row.type_id)
-            hangar_qty[tid] = hangar_qty.get(tid, 0) + int(row.quantity or 0)
+            hangar_qty: dict[int, int] = {}
+            for row in asset_rows:
+                tid = int(row.type_id)
+                hangar_qty[tid] = hangar_qty.get(tid, 0) + int(row.quantity or 0)
 
-        # --- In-progress quantity from active manufacturing jobs ---
-        job_rows = (
-            app_session.query(CorporationIndustryJobsModel)
-            .filter(
-                CorporationIndustryJobsModel.corporation_id.in_(corp_ids),
-                CorporationIndustryJobsModel.status == "active",
-                CorporationIndustryJobsModel.product_type_id.in_(type_ids),
+            # --- In-progress quantity from active manufacturing jobs ---
+            job_rows = (
+                app_session.query(CorporationIndustryJobsModel)
+                .filter(
+                    CorporationIndustryJobsModel.corporation_id.in_(corp_ids),
+                    CorporationIndustryJobsModel.status == "active",
+                    CorporationIndustryJobsModel.product_type_id.in_(type_ids),
+                )
+                .all()
             )
-            .all()
-        )
-        job_qty: dict[int, int] = {}
-        for row in job_rows:
-            tid = int(row.product_type_id)
-            job_qty[tid] = job_qty.get(tid, 0) + int(row.output_quantity or 0)
+            job_qty: dict[int, int] = {}
+            for row in job_rows:
+                tid = int(row.product_type_id)
+                job_qty[tid] = job_qty.get(tid, 0) + int(row.output_quantity or 0)
 
-        # --- Sell velocity from wallet transactions ---
-        tx_rows = (
-            app_session.query(CorporationWalletTransactionsModel)
-            .filter(
-                CorporationWalletTransactionsModel.corporation_id.in_(corp_ids),
-                CorporationWalletTransactionsModel.type_id.in_(type_ids),
-                CorporationWalletTransactionsModel.is_buy == False,  # noqa: E712
-                CorporationWalletTransactionsModel.date >= cutoff_str,
+            # --- Sell velocity from wallet transactions ---
+            tx_rows = (
+                app_session.query(CorporationWalletTransactionsModel)
+                .filter(
+                    CorporationWalletTransactionsModel.corporation_id.in_(corp_ids),
+                    CorporationWalletTransactionsModel.type_id.in_(type_ids),
+                    CorporationWalletTransactionsModel.is_buy == False,  # noqa: E712
+                    CorporationWalletTransactionsModel.date >= cutoff_str,
+                )
+                .all()
             )
-            .all()
-        )
-        sold_qty: dict[int, int] = {}
-        for row in tx_rows:
-            tid = int(row.type_id)
-            sold_qty[tid] = sold_qty.get(tid, 0) + int(row.quantity or 0)
+            sold_qty: dict[int, int] = {}
+            for row in tx_rows:
+                tid = int(row.type_id)
+                sold_qty[tid] = sold_qty.get(tid, 0) + int(row.quantity or 0)
 
-        # --- Compute urgency for each type_id ---
-        output: dict[int, dict] = {}
-        for tid in type_ids:
-            stock_qty = hangar_qty.get(tid, 0) + job_qty.get(tid, 0)
-            total_sold = sold_qty.get(tid, 0)
+            # --- Compute urgency for each type_id ---
+            output: dict[int, dict] = {}
+            for tid in type_ids:
+                stock_qty = hangar_qty.get(tid, 0) + job_qty.get(tid, 0)
+                total_sold = sold_qty.get(tid, 0)
 
-            if total_sold == 0:
+                if total_sold == 0:
+                    output[tid] = {
+                        "reorder_date": None,
+                        "days_until_reorder": None,
+                        "urgency": "no_data",
+                        "stock_qty": stock_qty,
+                        "velocity_per_day": None,
+                    }
+                    continue
+
+                velocity_per_day = total_sold / lookback_days
+                days_of_stock = stock_qty / velocity_per_day
+                reorder_date = (today + timedelta(days=days_of_stock)).isoformat()
+
+                if days_of_stock < 3:
+                    urgency = "urgent"
+                elif days_of_stock < 7:
+                    urgency = "soon"
+                else:
+                    urgency = "ok"
+
                 output[tid] = {
-                    "reorder_date": None,
-                    "days_until_reorder": None,
-                    "urgency": "no_data",
+                    "reorder_date": reorder_date,
+                    "days_until_reorder": days_of_stock,
+                    "urgency": urgency,
                     "stock_qty": stock_qty,
-                    "velocity_per_day": None,
+                    "velocity_per_day": velocity_per_day,
                 }
-                continue
 
-            velocity_per_day = total_sold / lookback_days
-            days_of_stock = stock_qty / velocity_per_day
-            reorder_date = (today + timedelta(days=days_of_stock)).isoformat()
-
-            if days_of_stock < 3:
-                urgency = "urgent"
-            elif days_of_stock < 7:
-                urgency = "soon"
-            else:
-                urgency = "ok"
-
-            output[tid] = {
-                "reorder_date": reorder_date,
-                "days_until_reorder": days_of_stock,
-                "urgency": urgency,
-                "stock_qty": stock_qty,
-                "velocity_per_day": velocity_per_day,
-            }
-
-        return output
+            return output
+        finally:
+            app_session.close()
 
     def get_type_track_record(
         self,
@@ -4983,47 +4999,50 @@ class IndustryService(
         cutoff_str = (datetime.fromisoformat(today_iso) - timedelta(days=lookback_days)).isoformat()[:10]
 
         session: Any = self._sessions.app_session()
+        try:
 
-        rows = (
-            session.query(CorporationRealizedSalesLedgerModel)
-            .filter(
-                CorporationRealizedSalesLedgerModel.corporation_id.in_(corp_ids),
-                CorporationRealizedSalesLedgerModel.type_id.in_(type_ids),
-                CorporationRealizedSalesLedgerModel.date >= cutoff_str,
-                CorporationRealizedSalesLedgerModel.realized_margin_fraction.isnot(None),
+            rows = (
+                session.query(CorporationRealizedSalesLedgerModel)
+                .filter(
+                    CorporationRealizedSalesLedgerModel.corporation_id.in_(corp_ids),
+                    CorporationRealizedSalesLedgerModel.type_id.in_(type_ids),
+                    CorporationRealizedSalesLedgerModel.date >= cutoff_str,
+                    CorporationRealizedSalesLedgerModel.realized_margin_fraction.isnot(None),
+                )
+                .all()
             )
-            .all()
-        )
 
-        # Group by type_id
-        margin_totals: dict[int, float] = {}
-        sale_counts: dict[int, int] = {}
-        for row in rows:
-            tid = int(row.type_id)
-            margin_totals[tid] = margin_totals.get(tid, 0.0) + float(row.realized_margin_fraction)
-            sale_counts[tid] = sale_counts.get(tid, 0) + 1
+            # Group by type_id
+            margin_totals: dict[int, float] = {}
+            sale_counts: dict[int, int] = {}
+            for row in rows:
+                tid = int(row.type_id)
+                margin_totals[tid] = margin_totals.get(tid, 0.0) + float(row.realized_margin_fraction)
+                sale_counts[tid] = sale_counts.get(tid, 0) + 1
 
-        output: dict[int, dict] = {}
-        for tid in type_ids:
-            count = sale_counts.get(tid, 0)
-            if count == 0:
-                output[tid] = {
-                    "status": "untested",
-                    "avg_margin_fraction": None,
-                    "sale_count": 0,
-                }
-            else:
-                avg = margin_totals[tid] / count
-                if avg >= 0.10:
-                    status = "proven"
-                elif avg < 0.0:
-                    status = "unprofitable"
+            output: dict[int, dict] = {}
+            for tid in type_ids:
+                count = sale_counts.get(tid, 0)
+                if count == 0:
+                    output[tid] = {
+                        "status": "untested",
+                        "avg_margin_fraction": None,
+                        "sale_count": 0,
+                    }
                 else:
-                    status = "marginal"
-                output[tid] = {
-                    "status": status,
-                    "avg_margin_fraction": avg,
-                    "sale_count": count,
-                }
+                    avg = margin_totals[tid] / count
+                    if avg >= 0.10:
+                        status = "proven"
+                    elif avg < 0.0:
+                        status = "unprofitable"
+                    else:
+                        status = "marginal"
+                    output[tid] = {
+                        "status": status,
+                        "avg_margin_fraction": avg,
+                        "sale_count": count,
+                    }
 
-        return output
+            return output
+        finally:
+            session.close()

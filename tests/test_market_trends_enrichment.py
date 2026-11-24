@@ -17,6 +17,9 @@ class _History:
     def get_price_stats(self, *, type_id, **kw):
         return self._stats.get(type_id, {"has_data": False})
 
+    def get_price_stats_many(self, *, type_ids, **kw):
+        return {t: self.get_price_stats(type_id=t) for t in type_ids}
+
 
 class _Pricing:
     def __init__(self, **kw):
