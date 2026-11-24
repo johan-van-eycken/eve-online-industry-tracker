@@ -157,13 +157,13 @@ def test_sub_charged_in_whole_runs():
         return [resized["sub"]]
 
     plan = ChainPlan(decisions=[parent, _sub(need=30, per_run=30, run_cost=30 * M)], resize_sub_components=resize)
-    budget = WalletBudget(balance=100 * M, reserve_pct=0)
+    budget = WalletBudget(balance=130 * M, reserve_pct=0)
     actions = _assign(None, [_char(1, mfg_slots=3)], budget, plan=plan)
     (mfg,) = _of(actions, "manufacture")
     sub_row = resized["sub"].overview_row
-    assert mfg.runs == 6  # 7 runs: 70M + 30M + 1 ISK rounding > 100M
+    assert mfg.runs == 9  # 10 runs: 100M + 30M + 1 ISK rounding > 130M (9 of 30: not a sliver)
     assert budget.spent >= sub_row["sub_manufacture_cost"] + sub_row["sub_install_fee"] + mfg.runs * 10 * M
-    assert budget.spent <= 100 * M
+    assert budget.spent <= 130 * M
 
 
 @pytest.mark.parametrize("balance, runs, sub_units", [(1000.0, 10, None), (2403.0, 24, 4)])
@@ -258,3 +258,13 @@ def test_a_blocked_wallet_with_a_parent_that_has_sub_components_does_not_crash()
     actions = _assign([_parent(runs=1, materials={COMP: 10}), _sub()], [_char(1, mfg_slots=2)], budget)
     assert not _of(actions, "manufacture")
     assert budget.spent == 0
+
+
+def test_a_sliver_of_its_batch_is_dropped_but_a_one_run_batch_is_kept():
+    """Under a quarter of its runs fits: no job (plan 40: 1600mm Steel Plates
+    I, 1 of 537 runs). A 1-run BPC getting its 1 run is a whole batch."""
+    sliver = WalletBudget(balance=20 * M + 1, reserve_pct=0)    # 2 of 10 runs at 10M a run
+    actions = _assign([_parent(runs=10)], [_char(1)], sliver)
+    assert not _of(actions, "manufacture") and sliver.spent == 0
+    one_run = WalletBudget(balance=1e12, reserve_pct=0)
+    assert [a.runs for a in _of(_assign([_parent(runs=1)], [_char(1)], one_run), "manufacture")] == [1]

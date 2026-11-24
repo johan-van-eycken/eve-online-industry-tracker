@@ -174,22 +174,31 @@ class CharacterAssigner:
             int(d.type_id): runs for d in top_level
             if (runs := _day_sized_batch(d, with_subs, deadlines)) is not None
         }
-        # Profit per slot-day order: the slots are the limit (plan 37: 20 free
-        # slots, ~240 build rows). The wallet still cuts a batch it cannot pay.
-        # shortcut: a short wallet gets its best batches cut, not a return-on-capital order; upgrade if the wallet binds.
+        # Order by profit per share of the two limits a job uses: its slot-days
+        # of the free slots, and its capital for the days it takes to sell of
+        # budget x max days to sell. Plenty of money: the slots decide (profit
+        # per slot-day); a short wallet: a batch that ties capital up for
+        # weeks drops (plan 40: R-O Trigger, 10% and 42 days, ahead of a
+        # Prototype Cloaking Device I that sells in a day).
         slots = sum(int(c.get("free_mfg", 0)) for c in char_slots.values())
-        top_level.sort(key=lambda d: (
-            -_slot_day_profit(d, self._job_runs(d)), -(d.capital_return_per_day or 0), -d.adjusted_score,
-        ))
+        max_sell_days = float(_adm(admin_settings, "planner_max_days_to_sell") or schema_default(
+            "daily_planner", "planner_max_days_to_sell"))
+        money = None if budget is None else budget.available
+
+        def value(d: ItemDecision) -> float:
+            return _resource_value(d, self._job_runs(d), slots, money, max_sell_days)
+        self._job_value = value
+        top_level.sort(key=lambda d: (-value(d), -(d.capital_return_per_day or 0), -d.adjusted_score))
         need = sum(_job_capital(d, self._job_runs(d)) for d in top_level[:slots])
         # Persisted in the plan summary: why the slots went where they went.
         self.slot_order = {
-            "order": "profit per slot-day",
+            "order": "profit per share of slots and capital",
             "free_slots": slots, "need_for_best": round(need),
             "available": None if budget is None else round(budget.available),
             "rows": [
                 {"type_id": int(d.type_id), "type_name": getattr(d, "type_name", None), "runs": self._job_runs(d),
                  "slot_day_profit": round(_slot_day_profit(d, self._job_runs(d))),
+                 "value": round(value(d)),
                  "capital": round(_job_capital(d, self._job_runs(d))),
                  "day_sized": int(d.type_id) in self._day_runs,
                  "not_day_sized": None if int(d.type_id) in self._day_runs else _day_size_skip(d, with_subs)}
@@ -336,7 +345,7 @@ class CharacterAssigner:
                         sorted(fell_back), sorted(scale), sorted(no_build),
                     )
                 pass_decisions = sub_components
-            for decision, extra in (_with_extras(top_level, slots, self._job_runs) if pass_decisions is top_level
+            for decision, extra in (_with_extras(top_level, slots, self._job_runs, self._job_value) if pass_decisions is top_level
                                     else ((d, False) for d in pass_decisions)):
                 if extra:
                     if callable(claim_parallel):
@@ -2927,8 +2936,8 @@ def science_cost(action: AssignedAction) -> float | None:
 _BPO_SOURCE = "owned_blueprint_original"
 
 
-def _with_extras(top_level: list[ItemDecision], slots: int, job_runs: Any):
-    """(decision, extra) in profit per slot-day order: every first job, and
+def _with_extras(top_level: list[ItemDecision], slots: int, job_runs: Any, job_value: Any):
+    """(decision, extra) in job_value order (_resource_value): every first job, and
     each product's possible extra jobs (market_room_runs / its runs - 1, at
     most the free slots) at the same value, after the first jobs of that
     value. An extra job beats a weaker product's first job; whether it gets
@@ -2936,7 +2945,7 @@ def _with_extras(top_level: list[ItemDecision], slots: int, job_runs: Any):
     entries: list[tuple[float, int, int, ItemDecision, bool]] = []
     for index, decision in enumerate(top_level):
         runs = job_runs(decision)
-        value = _slot_day_profit(decision, runs)
+        value = job_value(decision)
         entries.append((-value, 0, index, decision, False))
         room = getattr(decision, "market_room_runs", None)
         if runs and room is not None and value > 0:
@@ -3013,6 +3022,38 @@ def _slot_day_profit(decision: ItemDecision, runs: int | None) -> float:
         return 0.0
     days = max(1, math.ceil(seconds * fraction / DAY_SECONDS))
     return (getattr(decision, "absolute_profit_per_batch", None) or 0.0) * fraction / days
+
+
+def _sell_days(decision: ItemDecision, runs: int | None) -> float:
+    """Days until a job of `runs` is sold: the decision's expected days for its
+    market-capped batch, plus the extra units over the sell rate; at least 1."""
+    days = float(getattr(decision, "expected_days_to_sell", None) or 0.0)
+    velocity = float(getattr(decision, "effective_velocity", None) or 0.0)
+    batch = orow.get_manufacturing_job(decision.overview_row).get("runs")
+    cap = getattr(decision, "market_cap_runs", None) or batch
+    quantity = orow.get_product_quantity(decision.overview_row)
+    if runs and isinstance(batch, int) and batch > 0 and cap and velocity > 0 and quantity > 0:
+        days += (runs - cap) * (quantity / batch) / velocity
+    return max(1.0, days)
+
+
+def _resource_value(
+    decision: ItemDecision, runs: int | None, slots: int, budget: float | None, max_sell_days: float,
+) -> float:
+    """The job's profit per share of the two limits it uses: its slot-days of
+    the free slots, plus its capital x days to sell of budget x max days to
+    sell (0 without a budget: then only the slots count, profit per
+    slot-day). 0 when unknown."""
+    fraction = _batch_fraction(decision, runs)
+    seconds = orow.get_elapsed_time_seconds(decision.overview_row)
+    if fraction is None or not seconds or seconds <= 0:
+        return 0.0
+    profit = (getattr(decision, "absolute_profit_per_batch", None) or 0.0) * fraction
+    slot_share = max(1, math.ceil(seconds * fraction / DAY_SECONDS)) / max(1, slots)
+    capital_share = 0.0
+    if budget and budget > 0 and max_sell_days > 0:
+        capital_share = _job_capital(decision, runs) * _sell_days(decision, runs) / (budget * max_sell_days)
+    return profit / (slot_share + capital_share)
 
 
 def cut_batch(action: AssignedAction, runs: int, batch_runs: int) -> None:
@@ -3196,20 +3237,36 @@ class _BuildCharger:
 
         budget = self._budget
         target = min(batch_runs, decision.market_cap_runs or batch_runs)
-        limit = budget.available
-        capped = False
+        # The cap counts the whole batch's build cost (stock materials too, not
+        # only what is bought): Squall, plan 40, took 1.08B of a 683M cap.
+        build_per_run = (action.estimated_build_cost_isk / batch_runs
+                         if action.estimated_build_cost_isk and batch_runs else None)
+        capped, runs_cap = False, target
         if self.product_cap is not None:
             cap_left = max(self.product_cap - self.product_spent.get(parent_type_id, 0.0), 0.0)
+            if build_per_run:
+                runs_cap = min(target, math.floor(cap_left / build_per_run))
+                capped = runs_cap < target
+        limit = budget.available
+        if self.product_cap is not None and not build_per_run:   # build cost unknown: cap the charge
             capped = cap_left < limit
             limit = min(limit, cap_left)
-        runs = 0 if budget.blocked_reason else max_affordable_runs(cost_of, target, limit)
-        if runs == 0:
+        runs = 0 if budget.blocked_reason or runs_cap <= 0 else max_affordable_runs(cost_of, runs_cap, limit)
+        # A sliver of its batch (under a quarter of its runs) holds a slot for
+        # little: dropped. A 1-run batch (a 1-run BPC) is never a sliver.
+        sliver = 0 < runs and runs * 4 < target
+        if runs == 0 or sliver:
             # Priced before the release: cost_of reads the reservations it frees (KeyError otherwise).
             one_run = cost_of(1)
             self._release(fresh)
             if budget.blocked_reason:
                 why = budget.blocked_reason
-            elif capped and one_run is not None and one_run <= budget.available:
+            elif sliver:
+                why = (f"only {runs} of {target} runs fit ({'product capital cap' if capped else 'wallet'}): "
+                       f"under a quarter of the batch, not worth a slot")
+                if not capped:
+                    self.wallet_limited = True
+            elif capped and (runs_cap <= 0 or (one_run is not None and one_run <= budget.available)):
                 why = f"product capital cap ({self.product_cap:,.0f} ISK a product)"
             elif one_run is None:
                 why = f"wallet charge unknown ({self._unknown_input(base, fee, action)})"
@@ -3229,7 +3286,8 @@ class _BuildCharger:
                 self.scale[parent_type_id] = runs / batch_runs
             action.notes = f"{action.notes}; cut from {batch_runs} to {_count(runs, 'run', 'runs')} (wallet / market)"
         budget.charge(cost)
-        self.product_spent[parent_type_id] = self.product_spent.get(parent_type_id, 0.0) + (cost or 0.0)
+        self.product_spent[parent_type_id] = self.product_spent.get(parent_type_id, 0.0) + (
+            build_per_run * runs if build_per_run else (cost or 0.0))
         return True
 
     def charge_science(self, decision: ItemDecision, action: AssignedAction) -> bool:

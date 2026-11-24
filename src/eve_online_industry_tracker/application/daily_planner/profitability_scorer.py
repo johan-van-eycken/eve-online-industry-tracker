@@ -170,7 +170,9 @@ class ProfitabilityScorer:
 def _compute_absolute_profit(
     row: PlannerInputRow, market_depth: Any | None
 ) -> tuple[float, str | None]:
-    """(sell price − material cost per unit) × units per batch.
+    """The batch's profit at the sell price (_sell_price): its proceeds net of
+    sales tax and broker fee less its whole cost, when the row carries them;
+    else (sell price − material cost per unit) × units per batch.
 
     `row.quantity` is already the batch's unit total (units per run × runs,
     see PlannerInputRow), and material_cost_per_unit is the batch material
@@ -186,6 +188,15 @@ def _compute_absolute_profit(
     were unprofitable.
     """
     sell_price = _sell_price(market_depth)
+    raw = row.raw if isinstance(row.raw, dict) else {}
+    gross = orow._as_optional_float(raw.get("gross_sale_value"))
+    net = orow._as_optional_float(raw.get("net_proceeds"))
+    total_cost = orow.get_total_cost(raw)
+    if sell_price is not None and gross and gross > 0 and net and net > 0 and total_cost is not None:
+        # Net of sales tax and broker fee (the row's own net share), less the
+        # whole batch cost (materials and job fees): sell price minus material
+        # cost alone made R-O Trigger Neurolink Conduit 3.5M a unit, ~2.2M net (plan 40).
+        return sell_price * row.quantity * net / gross - total_cost, None
     if sell_price is not None and row.material_cost_per_unit is not None:
         return (sell_price - row.material_cost_per_unit) * row.quantity, None
     if row.profit_amount is not None:

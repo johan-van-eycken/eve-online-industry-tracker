@@ -171,7 +171,7 @@ def test_the_assigner_records_why_the_slots_went_where_they_went():
     assigner.assign(plan, [], _Chars([_char(1, 2)]), _AdminStub(), {MAT: {"vwap_5d": 1.0 * M}},
                     blueprint_data=NO_SKILL_REQUIREMENTS, budget=WalletBudget(balance=1000 * M, reserve_pct=0))
     order = assigner.slot_order
-    assert order["order"] == "profit per slot-day" and order["free_slots"] == 2
+    assert order["order"] == "profit per share of slots and capital" and order["free_slots"] == 2
     rows = {r["type_id"]: r for r in order["rows"]}
     assert rows[100]["day_sized"] is True and rows[100]["runs"] == 69
     assert rows[200]["not_day_sized"] == "source owned_blueprint_copy"
