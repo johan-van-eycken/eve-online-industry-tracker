@@ -396,16 +396,29 @@ def test_an_owned_bpc_covering_batch_one_sizes_from_the_later_batch_plan():
     assert _buy(weak) == {DATACORE_A: 10, DATACORE_B: 10, DECRYPTOR: 5}
 
 
-def test_the_later_batch_plans_unknown_cost_has_a_reason_a_warning_and_an_over_buy_flag(caplog):
-    """No top-level invention fee, so the cost is
-    unknown, not guessed, and the action says so; one full batch is sized
-    although an owned BPC (the planner may not see) can cover part of it."""
+def test_the_later_batch_plan_is_priced_from_its_fee_and_inputs_per_attempt():
+    """Plan 43: every stock invention of a T2 that already has a BPC was
+    dropped on "the later-batch plan carries no fee". The plan carries a fee
+    and inputs per attempt: x the pilot's expected attempts. One full batch
+    is still sized although an owned BPC can cover part of it."""
+    row = _row(plan="bpc_plan")
+    row["manufacturing_job"]["invention_bpc_plan"]["per_attempt_materials"] = {
+        str(DATACORE_A): {"type_id": DATACORE_A, "quantity": 2, "unit_price": 100.0, "line_total": 200.0}}
+    weak = _invent(row, [_best_inventor(), _weaker_pilot()], jobs=[_busy(BEST_ID)])
+    expected = weak.invention_expected_attempts
+    assert weak.estimated_cost_isk == pytest.approx((200.0 + 4.0) * expected)   # inputs and the fee
+    assert weak.estimated_job_fee_isk == pytest.approx(4.0 * weak.runs)   # the whole attempts it launches
+    assert "sized for a full batch; an owned BPC may cover part of it" in weak.notes
+
+
+def test_the_later_batch_plans_unknown_cost_has_a_reason_and_a_warning(caplog):
+    """Without a fee rate the cost stays unknown, not guessed, and says so."""
+    row = _row(plan="bpc_plan")
+    del row["manufacturing_job"]["invention_bpc_plan"]["job_cost_per_attempt"]
     with caplog.at_level(logging.WARNING):
-        weak = _invent(_row(plan="bpc_plan"), [_best_inventor(), _weaker_pilot()], jobs=[_busy(BEST_ID)])
+        weak = _invent(row, [_best_inventor(), _weaker_pilot()], jobs=[_busy(BEST_ID)])
     assert weak.estimated_cost_isk is None
     assert weak.invention_chance_reason == "invention cost unknown: the later-batch plan carries no fee"
-    assert "sized for a full batch; an owned BPC may cover part of it" in weak.notes
-    assert "invention cost unknown: the later-batch plan carries no fee" in weak.notes
     assert any(r.levelno == logging.WARNING and "the later-batch plan carries no fee" in r.getMessage()
                for r in caplog.records)
 
