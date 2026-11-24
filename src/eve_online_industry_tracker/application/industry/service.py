@@ -3411,6 +3411,8 @@ class IndustryService(
                     # the planner's invent / copy actions when batch 1 does
                     # not invent (activity_breakdown.invention is then absent).
                     "job_cost_per_attempt": inv_costs.get("job_cost_per_attempt"),
+                    # One attempt's duration: the planner sizes invention jobs to its daily check.
+                    "job_duration_seconds": inv_costs.get("job_duration_seconds"),
                     "job_cost_per_attempt_unknown_reason": inv_costs.get("job_cost_per_attempt_unknown_reason"),
                     "source_copy_job_cost_per_run": inv_costs.get("source_copy_job_cost_per_run"),
                     "source_copy_job_cost_per_run_unknown_reason": inv_costs.get("source_copy_job_cost_per_run_unknown_reason"),

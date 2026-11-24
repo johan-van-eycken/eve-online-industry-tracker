@@ -384,6 +384,14 @@ def _invention_fee_rate(row: dict[str, Any], key: str) -> float | None:
     return None
 
 
+def get_invention_attempt_seconds(row: dict[str, Any]) -> float | None:
+    """How long one invention attempt runs (job_duration_seconds), from the
+    row's own invention plan, else its later-batch plan; None when absent
+    (an overview from before it: a refresh adds it)."""
+    value = _invention_fee_rate(row, "job_duration_seconds")
+    return value if value else None
+
+
 def get_invention_fee_per_attempt(row: dict[str, Any]) -> float | None:
     """The install fee of one invention attempt (job_cost_per_attempt), or None."""
     return _invention_fee_rate(row, "job_cost_per_attempt")

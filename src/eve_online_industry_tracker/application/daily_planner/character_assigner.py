@@ -171,6 +171,7 @@ class CharacterAssigner:
         check_hour = int(_adm(admin_settings, "planner_daily_check_hour") or schema_default(
             "daily_planner", "planner_daily_check_hour"))
         deadlines = check_deadlines(now, check_hour, max_job_days)
+        self._deadlines = deadlines
         self._day_runs = {
             int(d.type_id): runs for d in top_level
             if (runs := _day_sized_batch(d, with_subs, deadlines)) is not None
@@ -437,6 +438,13 @@ class CharacterAssigner:
             return None
         return min(batch, getattr(decision, "market_cap_runs", None) or batch)
 
+    def _invention_pack(self, row: dict[str, Any]) -> tuple[float, list[float]] | None:
+        """(seconds of one attempt, the next daily checks' gaps) for packing a
+        row's invention lanes, or None (attempt time or checks unknown)."""
+        seconds = orow.get_invention_attempt_seconds(row)
+        deadlines = getattr(self, "_deadlines", None)
+        return (seconds, deadlines) if seconds and deadlines else None
+
     def _parallel_step(
         self, lanes: dict[int, Any], decision: ItemDecision, emitted: dict[int, list[AssignedAction]],
         claim_parallel: Any, char_slots: dict[int, dict[str, Any]], characters: list[dict[str, Any]],
@@ -599,7 +607,7 @@ class CharacterAssigner:
         )
         decryptor = orow.get_invention_decryptor(row)
         planned = []
-        for char_id, invention, bpc in _lanes_on_bpcs(results, bpcs, owner_by_item):
+        for char_id, invention, bpc in _lanes_on_bpcs(results, bpcs, owner_by_item, pack=self._invention_pack(row)):
             action = self._invent_action(
                 row, decision.type_id, decision.type_name, char_id,
                 str(char_slots[char_id].get("character_name") or ""), invention, decryptor,
@@ -836,14 +844,18 @@ class CharacterAssigner:
                 qualified=qualified,
             )
             remaining = gap.want - gap.have
-            for char_id, invention, bpc in _lanes_on_bpcs(results, entries, owners):
+            best_p = max((inv.probability or 0.0 for _c, inv in results), default=0.0)
+            needed = math.ceil(remaining / best_p - 1e-9) if best_p > 0 else None
+            for char_id, invention, bpc in _lanes_on_bpcs(results, entries, owners,
+                                                          pack=self._invention_pack(row), needed=needed):
                 p = invention.probability
                 if remaining <= 0:
                     break
                 if p is None or p <= 0 or invention.whole_attempts is None:
                     out.extend(_skip(gap, invention.reason or "invention attempts unknown"))
                     continue
-                invention = _cap_lane(invention, math.ceil(remaining / p - 1e-9), f"the {remaining:g} BPC(s) the stock lacks")
+                if self._invention_pack(row) is None:
+                    invention = _cap_lane(invention, math.ceil(remaining / p - 1e-9), f"the {remaining:g} BPC(s) the stock lacks")
                 action = self._invent_action(
                     row, decision.type_id, decision.type_name, char_id,
                     str(char_slots[char_id].get("character_name") or ""), invention, orow.get_invention_decryptor(row),
@@ -1090,7 +1102,7 @@ class CharacterAssigner:
                 )
                 lanes: list[tuple[int, Any, tuple[Any, int | None, int] | None]] = (
                     [(cid, inv, None) for cid, inv in results] if bpcs is None
-                    else _lanes_on_bpcs(results, bpcs, owner_by_item)
+                    else _lanes_on_bpcs(results, bpcs, owner_by_item, pack=self._invention_pack(row))
                 )
                 if bpcs is not None:
                     # The lanes kept after the cap, not the free ones.
@@ -2673,6 +2685,74 @@ def _cap_lane(invention: Any, cap: int, wording: str) -> Any:
 
 
 def _lanes_on_bpcs(
+    results: list[tuple[int, Any]], bpcs: list[tuple[Any, int | None, int]],
+    owner_by_item: dict[int, int] | None = None, *,
+    pack: tuple[float | None, list[float]] | None = None, needed: int | None = None,
+) -> list[tuple[int, Any, tuple[Any, int | None, int]]]:
+    """See _spread_lanes; `pack` (seconds an attempt, the next daily checks'
+    gaps): the lanes are then packed into as few jobs as end just before a
+    daily check (_pack_invention_lanes), `needed` attempts (default: the
+    lanes' own total)."""
+    lanes = _spread_lanes(results, bpcs, owner_by_item)
+    if pack is None:
+        return lanes
+    if needed is None:
+        needed = sum(inv.whole_attempts or 0 for _c, inv, _b in lanes) or None
+    return _pack_invention_lanes(lanes, needed, *pack)
+
+
+def _pack_invention_lanes(
+    lanes: list[tuple[int, Any, tuple[Any, int | None, int]]], needed: int | None,
+    attempt_seconds: float | None, deadlines: list[float],
+) -> list[tuple[int, Any, tuple[Any, int | None, int]]]:
+    """As few invention jobs as reach `needed` attempts, each sized to end
+    just before a daily check: the first check it reaches the need by, else
+    the last (planner_max_job_days), filled up to that check; never more than
+    its BPC's runs (the largest BPC first). The industry jobs are managed
+    once a day: four 1-attempt jobs took four slots for a day each where one
+    job of 20 attempts fits before the next check (2026-11-24). Unknown
+    attempt time or need: the lanes as they are."""
+    if not lanes or not needed or needed <= 0 or not attempt_seconds or attempt_seconds <= 0 or not deadlines:
+        return lanes
+    fits = [math.floor(gap / attempt_seconds) for gap in deadlines]
+    out: list[tuple[int, Any, tuple[Any, int | None, int]]] = []
+    left = needed
+    for char_id, invention, bpc in sorted(lanes, key=lambda lane: -(lane[2][2] if lane[2] else 0)):
+        if left <= 0:
+            break
+        if invention.whole_attempts is None:
+            out.append((char_id, invention, bpc))
+            continue
+        attempts = next((f for f in fits if f >= left), fits[-1])
+        if attempts < 1:   # one attempt outlasts every check: just what is needed
+            attempts = left
+        if bpc is not None:
+            attempts = min(attempts, int(bpc[2]))
+        hours = attempts * attempt_seconds / 3600
+        out.append((char_id, _resize_lane(invention, attempts, f"{attempts} attempt(s), {hours:.0f}h: ends before a daily check"), bpc))
+        left -= attempts
+    return [
+        (cid, dataclasses.replace(inv, note=_LANE_WORDING.sub(f"lane {index} of {len(out)}", inv.note)) if inv.note else inv, bpc)
+        for index, (cid, inv, bpc) in enumerate(out, start=1)
+    ]
+
+
+def _resize_lane(invention: Any, attempts: int, wording: str) -> Any:
+    """One invent lane at `attempts` whole attempts (up or down), its
+    expected attempts and cost in proportion."""
+    whole = invention.whole_attempts
+    if not whole or whole == attempts:
+        return dataclasses.replace(invention, note="; ".join(n for n in (invention.note, wording) if n))
+    share = attempts / whole
+    return dataclasses.replace(
+        invention, whole_attempts=attempts,
+        expected_attempts=None if invention.expected_attempts is None else invention.expected_attempts * share,
+        cost_isk=None if invention.cost_isk is None else invention.cost_isk * share,
+        note="; ".join(n for n in (invention.note, wording) if n),
+    )
+
+
+def _spread_lanes(
     results: list[tuple[int, Any]], bpcs: list[tuple[Any, int | None, int]],
     owner_by_item: dict[int, int] | None = None,
 ) -> list[tuple[int, Any, tuple[Any, int | None, int]]]:
