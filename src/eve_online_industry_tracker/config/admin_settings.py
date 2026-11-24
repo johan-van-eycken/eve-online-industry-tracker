@@ -473,6 +473,17 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
                 "help": "A batch on an owned BPO is sized to end just before one of the next this many "
                         "daily checks, the latest the market room allows.",
             },
+            "planner_max_product_capital_pct": {
+                "type": "float",
+                "default": 25.0,
+                "min": 1.0,
+                "max": 100.0,
+                "step": 5.0,
+                "format": "%.0f",
+                "label": "Maximum capital per product (%)",
+                "help": "The most one product's jobs (first and parallel) may take of the budget, so one "
+                        "product cannot take the whole wallet.",
+            },
             "planner_research_payback_days": {
                 "type": "int",
                 "default": 30,

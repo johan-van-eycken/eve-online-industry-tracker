@@ -102,11 +102,13 @@ def test_a_clean_book_logs_nothing(caplog):
 
 
 def test_unreadable_history_volumes_are_skipped_in_the_daily_volume(caplog):
+    from datetime import date, timedelta
+    day = lambda n: (date.today() - timedelta(days=n)).isoformat()   # within the last 7 calendar days
     history = {34: [
-        {"date": "2026-10-16", "volume": 100, "order_count": 10},
-        {"date": "2026-10-17", "volume": None, "order_count": 10},
-        {"date": "2026-10-18", "volume": 300, "order_count": 30},
-        {"date": "2026-10-19", "volume": "n/a", "order_count": None},
+        {"date": day(4), "volume": 100, "order_count": 10},
+        {"date": day(3), "volume": None, "order_count": 10},
+        {"date": day(2), "volume": 300, "order_count": 30},
+        {"date": day(1), "volume": "n/a", "order_count": None},
     ]}
     MarketPricingService._region_volume_cache.clear()
     state = SimpleNamespace(admin_settings=None, cfg_manager=None,
@@ -115,8 +117,9 @@ def test_unreadable_history_volumes_are_skipped_in_the_daily_volume(caplog):
         out = MarketPricingService(state=state).get_region_daily_volume_map(type_ids=[34])
     MarketPricingService._region_volume_cache.clear()
     assert out[34]["daily_volume"] == 300                     # the latest readable day, not 0
-    assert out[34]["daily_volume_date"] == "2026-10-18"
-    assert out[34]["daily_volume_7d_avg"] == 200.0
+    assert out[34]["daily_volume_date"] == day(2)
+    # Over 7 calendar days: a day without a (readable) trade counts as 0.
+    assert out[34]["daily_volume_7d_avg"] == 400 / 7
     assert out[34]["daily_volume_7d_sample_size"] == 2
     assert len(_warnings(caplog, "2 unreadable history row(s)")) == 1
 
@@ -567,3 +570,15 @@ def test_the_pricing_confidence_names_unknown_liquidity():
     assert not any("No sell-side hub liquidity" in r for r in reasons)
 
 
+def test_the_daily_volume_counts_calendar_days_not_the_last_seven_trading_days():
+    """A thin market's last 7 rows can span months: capital rigs read 1-3 a day while ~0.5 traded."""
+    from datetime import date, timedelta
+    day = lambda n: (date.today() - timedelta(days=n)).isoformat()
+    history = {34: [{"date": day(90 + n), "volume": 3, "order_count": 1} for n in range(6)]
+               + [{"date": day(2), "volume": 1, "order_count": 1}]}
+    MarketPricingService._region_volume_cache.clear()
+    state = SimpleNamespace(admin_settings=None, cfg_manager=None,
+                            esi_service=SimpleNamespace(get_market_history=lambda ids, region_id: history))
+    out = MarketPricingService(state=state).get_region_daily_volume_map(type_ids=[34])
+    MarketPricingService._region_volume_cache.clear()
+    assert out[34]["daily_volume_7d_avg"] == 1 / 7

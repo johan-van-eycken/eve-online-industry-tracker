@@ -59,6 +59,10 @@ class ProfitabilityScorer:
         else:
             isk_per_hour = row.isk_per_hour
 
+        # A depth row without a recent trade (the collector's vwap_5d is None
+        # after 30 days without one): a stale price, never built on.
+        if market_depth is not None and _depth_price(market_depth, "vwap_5d") is None:
+            unscoreable_reasons.append("no trades at the hub in the last 30 days (price unknown)")
         margin_fraction = _margin_at_sale_price(row, _sell_price(market_depth))
         margin_pct = (margin_fraction if margin_fraction is not None else 0.0) * 100.0
 
@@ -190,8 +194,9 @@ def _compute_absolute_profit(
 
 
 def _margin_at_sale_price(row: PlannerInputRow, sell_price: float | None) -> float | None:
-    """The row's margin with its proceeds re-priced at `sell_price` (the 5-day
-    average trade price, see _sell_price), costs and fee share unchanged.
+    """The row's margin with its proceeds re-priced at `sell_price` (the
+    lower of the recent trades and the cheapest order, see _sell_price),
+    costs and fee share unchanged.
 
     The overview prices the product at the cheapest sell order, which a thin
     market can put far above what the item trades at. The row's own margin
@@ -207,20 +212,22 @@ def _margin_at_sale_price(row: PlannerInputRow, sell_price: float | None) -> flo
     return (net_at_sale - total_cost) / net_at_sale
 
 
-def _sell_price(market_depth: Any | None) -> float | None:
+def _depth_price(market_depth: Any | None, key: str) -> float | None:
     if market_depth is None:
         return None
-    get = market_depth.get if isinstance(market_depth, dict) else (
-        lambda key, default=None: getattr(market_depth, key, default)
-    )
-    for key in ("vwap_5d", "spot_sell_price"):
-        raw = get(key)
-        if raw is None:
-            continue
-        try:
-            value = float(raw)
-        except (TypeError, ValueError):
-            continue
-        if value > 0:
-            return value
-    return None
+    raw = market_depth.get(key) if isinstance(market_depth, dict) else getattr(market_depth, key, None)
+    try:
+        value = float(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        return None
+    return value if value is not None and value > 0 else None
+
+
+def _sell_price(market_depth: Any | None) -> float | None:
+    """What a batch sells at: the lower of the recent trade price (vwap_5d)
+    and the cheapest sell order without our own (spot_sell_price), either
+    when the other is unknown. The trade average alone missed a market
+    undercut below our cost (Mobile Large Warp Disruptor I, 2026-11-23)."""
+    prices = [p for p in (_depth_price(market_depth, "vwap_5d"), _depth_price(market_depth, "spot_sell_price"))
+              if p is not None]
+    return min(prices) if prices else None

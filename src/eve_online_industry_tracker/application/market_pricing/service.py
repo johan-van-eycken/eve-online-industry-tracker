@@ -4,6 +4,7 @@ import logging
 import statistics
 import time
 import threading
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 from sqlalchemy.exc import SQLAlchemyError
@@ -632,13 +633,13 @@ class MarketPricingService:
                     skipped_rows += 1
                     skipped_type_ids.add(int(type_id))
             latest_row = history_rows[-1] if history_rows else {}
-            trailing_rows = history_rows[-7:] if history_rows else []
+            # The last 7 calendar days, a day without a trade counting as 0: the
+            # last 7 rows of a thin market can span months (capital rigs read
+            # 1-3 a day while ~0.5 traded).
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).date().isoformat()
+            trailing_rows = [row for row in history_rows if str(row.get("date") or "") > cutoff]
             trailing_volumes = [int(readable_int(row.get("volume")) or 0) for row in trailing_rows]
-            trailing_average_volume = (
-                float(sum(trailing_volumes)) / float(len(trailing_volumes))
-                if trailing_volumes
-                else 0.0
-            )
+            trailing_average_volume = float(sum(trailing_volumes)) / 7.0
             fetched_results[int(type_id)] = {
                 "hub": normalized_hub,
                 "hub_label": str(hub_context.get("label") or normalized_hub.title()),

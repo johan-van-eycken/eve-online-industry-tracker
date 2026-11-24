@@ -14,7 +14,8 @@ from eve_online_industry_tracker.infrastructure.models import MarketHistoryModel
 from eve_online_industry_tracker.infrastructure.session_provider import StateSessionProvider
 
 #: How far back the VWAP looks for a thin market's last trades.
-_LAST_TRADES_MAX_AGE_DAYS = 90
+# Without a trade in this many days there is no recent price (vwap_5d None): the planner does not build.
+_LAST_TRADES_MAX_AGE_DAYS = 30
 
 #: A malformed value in one type's data: that type is skipped (kept stale),
 #: the others are still refreshed.
@@ -134,9 +135,9 @@ class MarketDepthCollector:
     def _compute_vwap_5d(self, type_id: int, region_id: int, days: int | None = None) -> float | None:
         """The VWAP over the last planner_vwap_days trading days (5 by
         default; the cache column keeps its vwap_5d name) from
-        MarketHistoryModel, within the last 90 days: a thin market's last
-        trades, not an asking price, price it. None (the caller falls back
-        to spot) without a trade in those 90 days."""
+        MarketHistoryModel, within the last 30 days: a thin market's last
+        trades, not an asking price, price it. None without a trade in
+        those 30 days."""
         days = self._vwap_days() if days is None else int(days)   # run() reads it once per cycle
         app_session = self._sessions.app_session()
         try:
@@ -380,9 +381,9 @@ class MarketDepthCollector:
         spot_sell_price: float | None = min(competitor_prices) if competitor_prices else None
 
         # VWAP
+        # None without a recent trade: an asking price is no trade price
+        # (Capital Warp Core Optimizer I: one order at 350M, last trade 10M months ago).
         vwap_5d = self._compute_vwap_5d(type_id, region_id, days=vwap_days)
-        if vwap_5d is None:
-            vwap_5d = spot_sell_price  # fallback
 
         # effective_velocity for competition_index
         ev = self._get_effective_velocity(type_id, corp_ids, character_ids)
