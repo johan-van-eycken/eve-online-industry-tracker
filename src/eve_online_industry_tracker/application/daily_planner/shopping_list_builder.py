@@ -75,7 +75,8 @@ class ShoppingListBuilder:
         # several parents is subtracted once in total.
         sub_built: dict[int, int] = {}
         for action in current_job_actions:
-            if action.action_type == "sub_manufacture":
+            # A build for the parent's next batch covers nothing today.
+            if action.action_type == "sub_manufacture" and not getattr(action, "for_next_batch", False):
                 qty = _positive_int(action.quantity)
                 if qty is not None:
                     sub_built[int(action.type_id)] = sub_built.get(int(action.type_id), 0) + qty

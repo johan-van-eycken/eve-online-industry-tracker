@@ -46,8 +46,10 @@ from eve_online_industry_tracker.application.daily_planner.admin_setting import 
 )
 from eve_online_industry_tracker.application.daily_planner.item_decision_engine import (
     DAY_SECONDS,
+    batch_fraction as _batch_fraction,
     check_deadlines,
     day_sized_runs,
+    slot_day_profit as _slot_day_profit,
 )
 from eve_online_industry_tracker.application.daily_planner.models import AssignedAction, ItemDecision
 from eve_online_industry_tracker.application.daily_planner.shopping_list_builder import (
@@ -382,6 +384,18 @@ class CharacterAssigner:
                 )) is not None:
                     assigned_actions.append(job)
 
+        # A parent whose components are sub-built today waits for them: it
+        # starts at the next daily check (ChainPlanner counted that wait).
+        _note_waiting_parents(chain_plan.decisions, assigned_actions)
+        # Ahead pass: manufacturing slots still free build the components of
+        # the next batch of today's parents, so that batch need not wait.
+        ahead = getattr(chain_plan, "plan_ahead_sub_builds", None)
+        if callable(ahead) and any(int(s.get("free_mfg", 0)) > 0 for s in char_slots.values()):
+            built = {int(a.type_id) for a in assigned_actions if a.action_type == "manufacture"}
+            busy = {int(a.type_id) for a in assigned_actions if a.action_type == "sub_manufacture"}
+            for sub in ahead(built, busy) if built else []:
+                assigned_actions.extend(self._ahead_sub_build(sub, char_slots, characters, skill_gate, budget))
+
         # Fill pass: research slots still free go to the candidates with no
         # science job yet, in rank order.
         for decision, kind, _cost in _candidates():
@@ -676,6 +690,55 @@ class CharacterAssigner:
         used_bpos.update(reserved_bpos)
         bpc_pool.setdefault("copy_used", {}).setdefault(int(decision.type_id), []).extend(reserved_bpos)
         return copies
+
+    def _ahead_sub_build(
+        self, sub: ItemDecision, char_slots: dict[int, dict[str, Any]], characters: list[dict[str, Any]],
+        skill_gate: "_SkillGate", budget: WalletBudget | None,
+    ) -> list[AssignedAction]:
+        """The jobs of a component built ahead (ChainPlan.plan_ahead_sub_builds):
+        one per free BPO (no queued jobs), each cut to end before the next
+        daily check and charged to the wallet; none when its build time is
+        unknown, no pilot has a slot or the skills, or the wallet is short."""
+        row, type_id = sub.overview_row, int(sub.type_id)
+        seconds = row.get("sub_seconds_per_run")
+        qualified, blocked = skill_gate.check(orow.get_blueprint_type_id(row), "manufacturing")
+        deadlines = getattr(self, "_deadlines", None) or []
+        why = ("build time unknown (no overview row of its own)" if not seconds
+               else blocked or (None if deadlines else "no daily check ahead"))
+        if why is not None:
+            logger.info("CharacterAssigner: type_id=%s not built ahead: %s", type_id, why)
+            return []
+        fit = math.floor(deadlines[0] / seconds)
+        out: list[AssignedAction] = []
+        for job in _sub_jobs(type_id, row):
+            if job.get("after_job") is not None or fit < 1:
+                continue
+            char_id, char_name = self._best_mfg_char(char_slots, characters, qualified=qualified)
+            if char_id is None:
+                break
+            runs = min(int(job["runs"]), fit)
+            share = runs / int(job["runs"])
+            per_run = job["output"] / job["runs"]
+            fee = job.get("fee")
+            cost = job["cost"] * share if job.get("cost") is not None else None
+            if cost is None or fee is None or (budget is not None and not budget.charge(cost + fee * share)):
+                logger.info("CharacterAssigner: type_id=%s not built ahead: %s", type_id,
+                            "cost unknown" if cost is None or fee is None else budget.blocked_reason or "wallet")
+                break
+            self._take_slot(char_slots, char_id, "sub_manufacture")
+            out.append(AssignedAction(
+                type_id=type_id, type_name=sub.type_name, action_type="sub_manufacture",
+                character_id=char_id, character_name=char_name,
+                quantity=min(int(job["quantity"]), math.floor(runs * per_run)), runs=runs,
+                estimated_cost_isk=cost, estimated_profit_isk=None, estimated_completion=None,
+                notes=(f"{sub.decision_reason}; cheaper to build than buy (market: "
+                       f"{(row.get('market_buy_cost') or 0) / 1e6:.1f}M ISK); ends before the next daily check"
+                       + (f"; cut from {job['runs']} to {runs} runs" if runs < int(job["runs"]) else "")),
+                materials={t: math.ceil(q * share) for t, q in job["materials"].items()},
+                for_next_batch=True,
+                **_job_fee(fee * share, None, "sub_manufacture", type_id),
+            ))
+        return out
 
     def _stock_pass(
         self, chain_plan: Any, industry_jobs: list[Any], stock: dict[str, Any], planned: list[AssignedAction],
@@ -3004,6 +3067,24 @@ def _sub_jobs(type_id: int, row: dict[str, Any]) -> list[dict[str, Any]]:
     return jobs
 
 
+def _note_waiting_parents(decisions: list[ItemDecision], actions: list[AssignedAction]) -> None:
+    """Each manufacture action whose components a sub-build of today makes
+    says it starts at the next daily check, after that sub-build."""
+    by_type: dict[int, list[str]] = {}
+    for action in actions:
+        if action.action_type == "sub_manufacture" and not action.for_next_batch:
+            by_type.setdefault(int(action.type_id), []).append(f"{action.type_name} ({action.character_name})")
+    waits: dict[int, list[str]] = {}
+    for decision in decisions:
+        if decision.is_sub_component and int(decision.type_id) in by_type:
+            for parent in decision.overview_row.get("requested_by_type_ids") or []:
+                waits.setdefault(int(parent), []).extend(by_type[int(decision.type_id)])
+    for action in actions:
+        if action.action_type == "manufacture" and int(action.type_id) in waits:
+            subs = ", ".join(dict.fromkeys(waits[int(action.type_id)]))
+            action.notes = f"{action.notes}; starts at the next daily check, after the sub-build of {subs}"
+
+
 def _sub_manufacture_notes(
     row: dict[str, Any], job: dict[str, Any], index: int, job_count: int
 ) -> str:
@@ -3111,28 +3192,10 @@ def _day_sized_batch(decision: ItemDecision, with_subs: set[int], deadlines: lis
         room_runs=int(decision.market_room_runs), deadlines=deadlines)
 
 
-def _batch_fraction(decision: ItemDecision, runs: int | None) -> float | None:
-    batch = orow.get_manufacturing_job(decision.overview_row).get("runs")
-    if runs is None or not isinstance(batch, int) or isinstance(batch, bool) or batch <= 0:
-        return None
-    return runs / batch
-
-
 def _job_capital(decision: ItemDecision, runs: int | None) -> float:
     """What the row's job ties up (its batch cost at `runs`); 0 when unknown."""
     fraction, cost = _batch_fraction(decision, runs), orow.get_total_cost(decision.overview_row)
     return 0.0 if fraction is None or cost is None else cost * fraction
-
-
-def _slot_day_profit(decision: ItemDecision, runs: int | None) -> float:
-    """The job's profit per day it holds a slot: jobs are checked once a day,
-    so a job holds its slot for whole days, at least one. 0 when unknown."""
-    fraction = _batch_fraction(decision, runs)
-    seconds = orow.get_elapsed_time_seconds(decision.overview_row)
-    if fraction is None or not seconds or seconds <= 0:
-        return 0.0
-    days = max(1, math.ceil(seconds * fraction / DAY_SECONDS))
-    return (getattr(decision, "absolute_profit_per_batch", None) or 0.0) * fraction / days
 
 
 def _sell_days(decision: ItemDecision, runs: int | None) -> float:

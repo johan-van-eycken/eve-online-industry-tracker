@@ -74,6 +74,24 @@ def day_sized_runs(*, seconds_per_run: float, room_runs: int, deadlines: list[fl
     return None
 
 
+def batch_fraction(decision: ItemDecision, runs: int | None) -> float | None:
+    batch = orow.get_manufacturing_job(decision.overview_row).get("runs")
+    if runs is None or not isinstance(batch, int) or isinstance(batch, bool) or batch <= 0:
+        return None
+    return runs / batch
+
+
+def slot_day_profit(decision: ItemDecision, runs: int | None) -> float:
+    """The job's profit per day it holds a slot: jobs are checked once a day,
+    so a job holds its slot for whole days, at least one. 0 when unknown."""
+    fraction = batch_fraction(decision, runs)
+    seconds = orow.get_elapsed_time_seconds(decision.overview_row)
+    if fraction is None or not seconds or seconds <= 0:
+        return 0.0
+    days = max(1, math.ceil(seconds * fraction / DAY_SECONDS))
+    return (getattr(decision, "absolute_profit_per_batch", None) or 0.0) * fraction / days
+
+
 class ItemDecisionEngine:
     """Phase 4: assign a decision to each scored item."""
 
