@@ -625,7 +625,7 @@ def test_plan_items_persist_the_resolved_meta_group_id(app_session, session_prov
     from eve_online_industry_tracker.infrastructure.models import BuildPlanItemModel
 
     service = _service(session_provider)
-    service._persist_plan_items(plan_id=1, decisions=[_decision(meta_group_id=2)])
+    _persist_plan_items(service, plan_id=1, decisions=[_decision(meta_group_id=2)])
 
     item = app_session.query(BuildPlanItemModel).one()
     assert item.meta_group_id == 2
@@ -659,7 +659,7 @@ def test_persisted_plan_item_snapshot_price_matches_the_market_depth_entry(
     )
     assert built[0].snapshot_sell_price == 123456.78
 
-    service._persist_plan_items(
+    _persist_plan_items(service, 
         plan_id=1, decisions=[_decision()], market_depth_cache=market_depth_cache
     )
 
@@ -678,7 +678,7 @@ def test_persisted_plan_item_snapshot_price_is_none_when_type_id_has_no_market_d
     from eve_online_industry_tracker.infrastructure.models import BuildPlanItemModel
 
     service = _service(session_provider)
-    service._persist_plan_items(
+    _persist_plan_items(service, 
         plan_id=1,
         decisions=[_decision()],
         market_depth_cache={999: {"spot_sell_price": 42.0}},  # unrelated type_id
@@ -706,7 +706,7 @@ def test_an_unknown_velocity_persists_as_null_not_the_floor(app_session, session
     from eve_online_industry_tracker.infrastructure.models import BuildPlanItemModel
 
     service = _service(session_provider)
-    service._persist_plan_items(
+    _persist_plan_items(service, 
         plan_id=1, decisions=[_unknown_velocity_decision()], market_depth_cache={}
     )
     assert app_session.query(BuildPlanItemModel).one().effective_velocity is None
@@ -716,7 +716,7 @@ def test_a_measured_velocity_still_persists_as_is(app_session, session_provider)
     from eve_online_industry_tracker.infrastructure.models import BuildPlanItemModel
 
     service = _service(session_provider)
-    service._persist_plan_items(plan_id=1, decisions=[_decision()], market_depth_cache={})
+    _persist_plan_items(service, plan_id=1, decisions=[_decision()], market_depth_cache={})
     assert app_session.query(BuildPlanItemModel).one().effective_velocity == 10.0
 
 
@@ -738,7 +738,7 @@ def test_readers_do_not_treat_a_null_velocity_as_measured(app_session, session_p
     now = datetime(2026, 1, 1)
     app_session.add(BuildPlanModel(id=1, created_at=now, updated_at=now, status="active"))
     app_session.commit()
-    _service(session_provider)._persist_plan_items(
+    _persist_plan_items(_service(session_provider), 
         plan_id=1, decisions=[_unknown_velocity_decision()], market_depth_cache={}
     )
     item = app_session.query(BuildPlanItemModel).one()
@@ -759,7 +759,7 @@ def test_a_bpo_analysis_skip_reason_is_persisted(app_session, session_provider):
 
     decision = _decision()
     decision.bpo_analysis_skip_reason = "no BPO market price for bp_type_id=999"
-    _service(session_provider)._persist_plan_items(
+    _persist_plan_items(_service(session_provider), 
         plan_id=1, decisions=[decision], market_depth_cache={}
     )
     item = app_session.query(BuildPlanItemModel).one()
@@ -796,7 +796,7 @@ def test_a_decision_without_a_skip_reason_stores_null(app_session, session_provi
 
     decision = _decision()
     assert decision.bpo_analysis_skip_reason is None
-    _service(session_provider)._persist_plan_items(
+    _persist_plan_items(_service(session_provider), 
         plan_id=1, decisions=[decision], market_depth_cache={}
     )
     assert app_session.query(BuildPlanItemModel).one().bpo_analysis_skip_reason is None
@@ -1034,3 +1034,44 @@ def test_a_job_with_a_null_status_holds_its_slot_and_blueprint(session_provider)
     service._characters = SimpleNamespace(list_characters=lambda: [{"character_id": 7, "corporation_id": 1}])
     jobs = service._get_industry_jobs()
     assert sorted(int(j.blueprint_item_id) for j in jobs) == [601]
+
+
+def _persist_plan_items(service, plan_id, decisions, market_depth_cache=None):
+    """Phase 9's item build plus the repo insert, as the removed service helper did."""
+    items = service._build_plan_items(plan_id, decisions, market_depth_cache)
+    service._repo.insert_plan_items(items)
+    return items
+
+
+def test_record_feedback_writes_nothing_for_an_action_set_back_to_pending() -> None:
+    """Audit 13: the user undid "done" while the compute ran."""
+    repo, _ = _make_repo()
+    now = _now()
+    plan_id = repo.insert_plan(BuildPlanModel(created_at=now, updated_at=now, status="active"))
+    repo.insert_actions([DailyActionLogModel(
+        plan_id=plan_id, generated_at=now, action_type="manufacture", type_id=590,
+        type_name="Rifter", quantity=5, status="pending", processed_for_feedback=False,
+    )])
+    action_id = repo.get_actions(plan_id)[0].id
+    assert repo.record_feedback(action_id, *_feedback_rows(now)) is False
+    assert repo.get_outcomes(590) == []
+    assert repo.get_weights([590]) == {}
+    assert repo.get_actions(plan_id)[0].processed_for_feedback is False
+
+
+def test_publish_plan_keeps_the_old_plan_active_when_a_write_fails() -> None:
+    """Audit 5: archive, plan, items and actions are one transaction."""
+    repo, _ = _make_repo()
+    now = _now()
+    old_id = repo.insert_plan(BuildPlanModel(created_at=now, updated_at=now, status="active"))
+    bad_action = DailyActionLogModel(generated_at=now, action_type=None, type_id=None)  # NOT NULL columns
+    with pytest.raises(Exception):
+        repo.publish_plan(BuildPlanModel(created_at=now, updated_at=now, status="active"), [], [bad_action])
+    assert repo.get_active_plan().id == old_id
+
+    new_id = repo.publish_plan(BuildPlanModel(created_at=now, updated_at=now, status="active"), [], [
+        DailyActionLogModel(generated_at=now, action_type="manufacture", type_id=590, type_name="Rifter",
+                            quantity=1, status="pending", processed_for_feedback=False),
+    ])
+    assert repo.get_active_plan().id == new_id
+    assert [a.plan_id for a in repo.get_actions(new_id)] == [new_id]

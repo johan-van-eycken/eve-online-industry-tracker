@@ -81,6 +81,9 @@ class ItemDecision:
     # unknown, orow.get_profit_upper_bound_reason); persisted so feedback
     # does not learn accuracy from them.
     profit_is_upper_bound: bool = False
+    # Realized / predicted ISK/h learned from past plans (FeedbackProcessor),
+    # clamped; weighs the profit in the slot order. 1.0 = no history.
+    accuracy_ema: float = 1.0
     # Phase 4 build rules (set on a build; on a skip/watch only what was computed
     # before the rule fired): days to sell the capped batch plus the pipeline,
     # its profit/cost per day, and how many runs the market absorbs.

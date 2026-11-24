@@ -74,10 +74,12 @@ def test_batch_runs_unknown_not_built():
     assert (d.decision, d.decision_reason) == ("skip", "not built: batch runs unknown")
 
 
-def test_skip_keeps_declining_market_suffix():
-    pipeline = _make_pipeline(price_trend_7d=-10.0)
-    d = _decide(dataclasses.replace(_make_scored(), margin_pct=6.0), pipeline)
-    assert d.decision_reason == "margin 6.0% below 10%; declining market (no active jobs)"
+def test_a_declining_market_without_active_jobs_is_watched_not_built():
+    """Review D (2026-11-24): a first batch no longer goes into a market the
+    planner would pause a running product in."""
+    d = _decide(_make_scored(), _make_pipeline(price_trend_7d=-10.0))
+    assert d.decision == "watch"
+    assert d.decision_reason == "Watch: declining market (price trend -10.0% < -8%)"
 
 
 def test_market_cap_runs():

@@ -785,7 +785,7 @@ def test_a_sub_component_has_no_own_sell_velocity_and_persists_it_as_null(
         repo=DailyPlannerRepository(session_provider=session_provider),
         admin_settings=None, session_provider=session_provider,
     )
-    service._persist_plan_items(plan_id=1, decisions=[sub], market_depth_cache={})
+    _persist_plan_items(service, plan_id=1, decisions=[sub], market_depth_cache={})
     item = app_session.query(BuildPlanItemModel).one()
     assert item.type_id == 54321
     assert item.effective_velocity is None
@@ -1902,3 +1902,10 @@ def test_a_sizings_unknown_fee_buy_reason_does_not_survive_a_re_size(monkeypatch
     assert top.overview_row["component_buy_reasons"] == {54321: "component Widget bought: fake unknown fee"}
     plan.resize_sub_components(set())
     assert top.overview_row["component_buy_reasons"] == {}
+
+
+def _persist_plan_items(service, plan_id, decisions, market_depth_cache=None):
+    """Phase 9's item build plus the repo insert, as the removed service helper did."""
+    items = service._build_plan_items(plan_id, decisions, market_depth_cache)
+    service._repo.insert_plan_items(items)
+    return items

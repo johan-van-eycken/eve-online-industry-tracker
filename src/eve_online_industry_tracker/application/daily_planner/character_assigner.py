@@ -145,6 +145,8 @@ class CharacterAssigner:
         minimums, for the stock pass (_stock_pass); None skips it."""
         now = _now()
         self.free_slots_after = {}
+        self.slot_order = None
+        self.science_drops = []
         self._stock_drops: list[dict[str, Any]] = []
 
         # Build character capability map
@@ -244,10 +246,11 @@ class CharacterAssigner:
             # Science first: what the candidates for the free research slots
             # cost is set aside before any build takes the wallet.
             # Greedy in rank order: a job the wallet cannot pay reserves nothing.
-            slots = sum(int(s.get("free_research", 0)) for s in char_slots.values())
+            # Its own name: `slots` (manufacturing) is read by value() and _with_extras.
+            science_slots = sum(int(s.get("free_research", 0)) for s in char_slots.values())
             total, taken = 0.0, 0
             for _d, _kind, cost in _candidates():
-                if taken >= slots:
+                if taken >= science_slots:
                     break
                 if cost is not None and total + cost <= budget.available:
                     total, taken = total + cost, taken + 1
@@ -440,6 +443,28 @@ class CharacterAssigner:
             for cid, slot in char_slots.items()
         }
         return assigned_actions
+
+    def plan_order_key(
+        self, *, characters_service: Any, industry_jobs: list[Any], budget: WalletBudget | None, admin_settings: Any,
+    ) -> Any:
+        """The slot order's value (_resource_value) for ChainPlanner to book
+        blueprints in, so the plan reserves them in the order assign() fills
+        slots; None without characters. The runs are the batch at the market
+        cap (assign() also sizes BPO batches to whole days, a small difference)."""
+        characters = self._get_characters(characters_service)
+        if not characters:
+            return None
+        char_slots = self._compute_available_slots(characters, industry_jobs, _now())
+        slots = sum(int(c.get("free_mfg", 0)) for c in char_slots.values())
+        max_sell_days = float(_adm(admin_settings, "planner_max_days_to_sell") or schema_default(
+            "daily_planner", "planner_max_days_to_sell"))
+        money = None if budget is None else budget.available
+
+        def key(decision: ItemDecision) -> float:
+            batch = orow.get_manufacturing_job(decision.overview_row).get("runs")
+            runs = min(batch, getattr(decision, "market_cap_runs", None) or batch) if isinstance(batch, int) else None
+            return _resource_value(decision, runs, slots, money, max_sell_days)
+        return key
 
     def _job_runs(self, decision: ItemDecision) -> int | None:
         """The runs the row's job will get: its whole-day BPO size, else its
@@ -3214,15 +3239,17 @@ def _sell_days(decision: ItemDecision, runs: int | None) -> float:
 def _resource_value(
     decision: ItemDecision, runs: int | None, slots: int, budget: float | None, max_sell_days: float,
 ) -> float:
-    """The job's profit per share of the two limits it uses: its slot-days of
-    the free slots, plus its capital x days to sell of budget x max days to
-    sell (0 without a budget: then only the slots count, profit per
-    slot-day). 0 when unknown."""
+    """The job's profit (weighed by its learned accuracy) per share of the two
+    limits it uses: its slot-days of the free slots, plus its capital x days
+    to sell of budget x max days to sell (0 without a budget: then only the
+    slots count, profit per slot-day). 0 when unknown."""
     fraction = _batch_fraction(decision, runs)
     seconds = orow.get_elapsed_time_seconds(decision.overview_row)
     if fraction is None or not seconds or seconds <= 0:
         return 0.0
-    profit = (getattr(decision, "absolute_profit_per_batch", None) or 0.0) * fraction
+    # What past plans of this product realized against their prediction.
+    learned = float(getattr(decision, "accuracy_ema", 1.0) or 1.0)
+    profit = (getattr(decision, "absolute_profit_per_batch", None) or 0.0) * fraction * learned
     slot_share = max(1, math.ceil(seconds * fraction / DAY_SECONDS)) / max(1, slots)
     capital_share = 0.0
     if budget and budget > 0 and max_sell_days > 0:

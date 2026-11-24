@@ -42,8 +42,9 @@ def test_the_saturation_settings(key, default, low, high):
 
 
 def test_the_new_threshold_defaults():
-    assert SETTINGS["planner_min_isk_per_hour"]["default"] == 2_000_000
-    assert SETTINGS["planner_min_profit_per_batch"]["default"] == 10_000_000
+    # Never read by the planner; removed 2026-11-24 (a stored value is ignored on load).
+    assert "planner_min_isk_per_hour" not in SETTINGS
+    assert "planner_min_profit_per_batch" not in SETTINGS
 
 
 @pytest.mark.parametrize(("days", "expected"), [

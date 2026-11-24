@@ -293,41 +293,24 @@ def test_manufacturing_runs_come_from_the_nested_job(input_rows):
 # ── Phases 2-3: pipeline and scoring ────────────────────────────────────────
 
 
-@pytest.mark.parametrize(
-    "pipeline_days_supply, expected_days",
-    [
-        pytest.param(4.0, 4.0, id="producer-days"),
-        # (50 in jobs + 30 on market) / 5.0 units/day
-        pytest.param(None, 16.0, id="fallback-units-over-velocity"),
-    ],
-)
-def test_pipeline_supply_on_a_real_row_yields_non_zero_pipeline_days(
-    overview_rows, meta, pipeline_days_supply, expected_days
-):
-    """A real row with this test's own pipeline supply must show pipeline days.
-
-    The capture's market state is whatever it was that day. Today every row
-    has 0 units in jobs and on market. So the test writes its own supply onto
-    one real row, under the keys the producer fills
-    (_enrich_product_rows_with_market_trends). PipelineAnalyzer reads days
-    only through these keys: industry_jobs just set
-    has_active_manufacturing_jobs, and corp orders are not one of its inputs.
-    With pipeline_days_supply set, the producer's value is used. With None
-    (no 7d volume), units / velocity is used. If the reads went back to the
-    phantom keys, both cases would give 0.
-    """
+def test_pipeline_supply_on_a_real_row_yields_non_zero_pipeline_days(overview_rows, meta):
+    """A real row with this test's own pipeline supply must show pipeline days:
+    the units in jobs and on market over the effective sell rate (our own,
+    capped at the market share of the region's volume; the producer's
+    pipeline_days_supply is no longer read). If the reads went back to the
+    phantom keys, this would give 0."""
     raw = dict(overview_rows[0])
     raw["pipeline_units_in_jobs"] = 50
     raw["pipeline_units_on_market"] = 30
-    raw["pipeline_days_supply"] = pipeline_days_supply
     row = PlannerInputRow.from_overview(raw, meta_groups=meta)
 
-    states = PipelineAnalyzer().analyze(
+    (state,) = PipelineAnalyzer().analyze(
         input_rows=[row], industry_jobs=[], corp_assets=[],
         market_depth_cache={}, weights={},
         sell_velocities={row.type_id: 5.0}, meta_resolver=meta,
     )
-    assert states[0].total_pipeline_days == expected_days
+    assert 0 < state.effective_velocity <= 5.0
+    assert state.total_pipeline_days == pytest.approx(80 / state.effective_velocity)
 
 
 def _first_scoreable_costed_row(input_rows):
@@ -362,24 +345,21 @@ def _score_at_price(row, meta, price):
     )
 
 
-def test_selling_at_material_cost_scores_zero_batch_profit(input_rows, meta):
-    """If cost were not subtracted, this would be price x units, which is never 0."""
+def test_each_unit_of_sale_price_adds_the_batch_units_net_of_sales_fees(input_rows, meta):
+    """Profit is net (sales tax and broker fee off the revenue, the batch cost
+    subtracted), so it is linear in the price with slope quantity x net share,
+    not quantity x runs (the old double count; runs > 1 here)."""
     row = _first_scoreable_costed_row(input_rows)
-    scored = _score_at_price(row, meta, row.material_cost_per_unit)
-    assert scored.unscoreable_reason is None
-    assert scored.absolute_profit_per_batch == pytest.approx(0.0, abs=1e-6)
-
-
-def test_selling_at_twice_material_cost_earns_cost_times_batch_units(input_rows, meta):
-    """(2c - c) x quantity, where quantity is already units per run x runs.
-    The old double count multiplied by runs again, and runs > 1 here."""
-    row = _first_scoreable_costed_row(input_rows)
-    scored = _score_at_price(row, meta, row.material_cost_per_unit * 2.0)
-    assert scored.unscoreable_reason is None
-    assert scored.absolute_profit_per_batch == pytest.approx(row.material_cost_per_unit * row.quantity)
-    assert scored.absolute_profit_per_batch != pytest.approx(
-        row.material_cost_per_unit * row.quantity * row.runs
-    )
+    c = row.material_cost_per_unit
+    p1, p2, p3 = (_score_at_price(row, meta, c * k) for k in (1.0, 2.0, 3.0))
+    assert all(s.unscoreable_reason is None for s in (p1, p2, p3))
+    step = p2.absolute_profit_per_batch - p1.absolute_profit_per_batch
+    assert p3.absolute_profit_per_batch - p2.absolute_profit_per_batch == pytest.approx(step)
+    # The row's own net share of its gross sale value (scrambled in the fixture).
+    share = row.raw["net_proceeds"] / row.raw["gross_sale_value"]
+    assert step == pytest.approx(c * row.quantity * share)
+    # At the material cost the fees and job costs make it a loss.
+    assert p1.absolute_profit_per_batch < 0
 
 
 def test_manufacturing_jobs_are_indexed_from_the_activity_id_column(

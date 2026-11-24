@@ -134,8 +134,12 @@ class ChainPlanner:
         self,
         top_level_decisions: list[ItemDecision],
         phase1_data: dict[str, Any],
+        order_key: Any = None,
     ) -> ChainPlan:
         """Resolve sub-components for all 'build' items.
+
+        `order_key`: decision -> value, the order blueprints are booked in
+        (CharacterAssigner.plan_order_key, the slot order); None: adjusted_score.
 
         phase1_data must contain:
           - corp_assets: list of corp asset objects
@@ -222,8 +226,10 @@ class ChainPlanner:
         # the plan uses is booked once, in plan order (see blueprint_ledger).
         ledger = BlueprintLedger(free_bpo_assets_by_type_id, free_bpc_assets_by_type_id)
         build_decisions = [d for d in top_level_decisions if d.decision == "build"]
-        # Plan order is score order (CharacterAssigner's), ties as given.
-        ordered = sorted(build_decisions, key=lambda d: -float(d.adjusted_score or 0.0))
+        # Plan order is the slot order (order_key), so a shared blueprint goes to the
+        # product assign() ranks first; ties by score, then as given.
+        ordered = sorted(build_decisions, key=lambda d: (
+            -float(order_key(d)) if order_key is not None else 0.0, -float(d.adjusted_score or 0.0)))
         top_level_build_types = {int(d.type_id) for d in build_decisions}
         state: dict[int, dict[str, Any]] = {}
 

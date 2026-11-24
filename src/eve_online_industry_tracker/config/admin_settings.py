@@ -517,14 +517,6 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
                 "help": "The hour (this machine's time zone) you deliver and start jobs each day; "
                         "BPO batches are sized to end before it.",
             },
-            "planner_min_isk_per_hour": {
-                "type": "int",
-                "default": 2_000_000,
-                "min": 100_000,
-                "max": 100_000_000,
-                "label": "Minimum ISK/hour for build decision",
-                "help": "No longer used by the daily planner.",
-            },
             "planner_price_drift_threshold_pct": {
                 "type": "float",
                 "default": 5.0,
@@ -687,14 +679,6 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
                 "max": 168,
                 "label": "Max plan age before expired mode (hours)",
                 "help": "Plan age above which the UI switches to expired mode and hides Tab 1 actions.",
-            },
-            "planner_min_profit_per_batch": {
-                "type": "int",
-                "default": 10_000_000,
-                "min": 1_000_000,
-                "max": 500_000_000,
-                "label": "Minimum profit per batch (ISK)",
-                "help": "No longer used by the daily planner.",
             },
             "planner_price_outlier_sigma": {
                 "type": "float",

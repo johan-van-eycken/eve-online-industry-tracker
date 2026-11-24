@@ -16,8 +16,6 @@ def _make_admin(
 ):
     admin = MagicMock()
     settings = {
-        "planner_min_isk_per_hour": min_isk,
-        "planner_min_profit_per_batch": min_profit,
         "planner_momentum_pause_threshold": momentum_pause,
         "planner_min_margin_pct": min_margin,
         "planner_max_days_to_sell": max_days,

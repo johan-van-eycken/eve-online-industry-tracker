@@ -373,7 +373,7 @@ def test_a_the_decision_and_the_plan_item_carry_the_upper_bound_flag(app_session
     )
     assert decision.profit_is_upper_bound is True
     service = rp._service(session_provider)
-    service._persist_plan_items(plan_id=1, decisions=[decision, rp._decision()], market_depth_cache={})
+    rp._persist_plan_items(service, plan_id=1, decisions=[decision, rp._decision()], market_depth_cache={})
     flags = sorted(bool(i.isk_per_hour_is_upper_bound) for i in app_session.query(BuildPlanItemModel).all())
     assert flags == [False, True]
 

@@ -108,6 +108,7 @@ class ItemDecisionEngine:
         fees unknown) its reason says so. The scores
         stay on that bound, labelled."""
         decision = self._decide(scored, pipeline, overview_row, admin_settings, meta_group_id, margin_known)
+        decision.accuracy_ema = float(getattr(scored, "accuracy_ema", 1.0) or 1.0)
         upper_bound = orow.get_profit_upper_bound_reason(overview_row)
         if upper_bound is not None:
             decision.profit_is_upper_bound = True
@@ -204,8 +205,6 @@ class ItemDecisionEngine:
         computed: dict[str, Any] = {}
 
         def _result(decision: str, reason: str) -> ItemDecision:
-            if decision == "skip" and declining:
-                reason += "; declining market (no active jobs)"
             return ItemDecision(
                 type_id=type_id,
                 type_name=type_name,
@@ -226,6 +225,12 @@ class ItemDecisionEngine:
                 **computed,
             )
 
+        if declining:
+            # No active jobs (those pause above): no first batch into a falling market either.
+            parts = ([f"price trend {price_trend_7d:.1f}% < -8%"] if price_trend_7d < -8.0 else []) + (
+                [f"momentum signal {momentum_signal:.1f} < {momentum_pause_threshold:.1f}"]
+                if momentum_signal < momentum_pause_threshold else [])
+            return _result("watch", "Watch: declining market (" + ", ".join(parts) + ")")
         if pipeline.velocity_unknown_reason is not None:
             return _result("skip", f"not built: sell velocity unknown ({pipeline.velocity_unknown_reason})")
         if not margin_known:
