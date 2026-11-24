@@ -1131,6 +1131,7 @@ class DailyPlannerService:
                 for slot in self._character_assigner.free_slots_after.values()
             }
             summary["slot_order"] = getattr(self._character_assigner, "slot_order", None)
+            summary["science_dropped_jobs"] = getattr(self._character_assigner, "science_drops", None)
         plan = BuildPlanModel(
             created_at=now,
             updated_at=now,
@@ -1530,8 +1531,9 @@ class DailyPlannerService:
         - the SDE manufacturing materials of every blueprint in
           blueprint_data (the overview blueprints and the owned BPOs, so
           sub_manufacture is covered);
-        - the SDE invention materials there, and each row's chosen decryptor
-          (manufacturing_job.invention_decryptor);
+        - the SDE invention materials there, each row's chosen decryptor
+          (manufacturing_job.invention_decryptor) and every row's expected
+          invention inputs (manufacturing_job.expected_invention_materials);
         - each overview row's producer batch materials (the manufacture
           action's materials).
 
@@ -1551,6 +1553,12 @@ class DailyPlannerService:
             decryptor = orow.get_invention_decryptor(row)
             if decryptor is not None:
                 type_ids.add(decryptor[0])
+            # Every invention input the row's invent action buys (datacores,
+            # decryptor): the market depth table holds none of them, and a
+            # source blueprint whose BPO is not owned is not in blueprint_data.
+            for line in orow.get_own_expected_invention_inputs(row):
+                if int(line.get("type_id") or 0) > 0:
+                    type_ids.add(int(line["type_id"]))
             type_ids.update((orow.get_batch_materials(row) or {}).keys())
         missing = sorted(t for t in type_ids if not _has_depth_price(market_depth.get(t)))
         if not missing:
