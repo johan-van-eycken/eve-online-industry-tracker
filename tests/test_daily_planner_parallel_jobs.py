@@ -105,8 +105,8 @@ def test_a_product_with_components_gets_extra_jobs_that_buy_them():
     blueprints = _Blueprints({"item_id": 2, "owner_character_id": None})
     jobs = _jobs(_assign([_missiles(room_runs=100)], [_char(1, 5)], blueprints, sub_parents={100}))
     assert len(jobs) == 2
-    assert "its components are bought" in jobs[1].notes
-    assert "components are bought" not in jobs[0].notes
+    assert "its components are sub-built with the first job's when a slot is free, else bought" in jobs[1].notes
+    assert "components are sub-built" not in jobs[0].notes
 
 
 def test_an_extra_job_beats_a_weaker_products_first_job():
@@ -196,3 +196,25 @@ def test_the_chain_planner_books_free_bpcs_of_the_batchs_me_and_runs_once_each()
     first = plan.claim_parallel_blueprint(decision, 10, 10)
     assert first == {"item_id": 502, "owner_character_id": None, "kind": "bpc"}
     assert plan.claim_parallel_blueprint(decision, 10, 10) is None
+
+
+def test_an_extra_job_grows_the_parents_components_for_the_sub_pass():
+    """2026-11-24: the second Mobile Large Warp Disruptor II job bought its 14
+    Mobile Large Warp Disruptor I while the first job's were sub-built. The
+    re-size now gets the first job plus the extra job: scale 2.0."""
+    seen = {}
+
+    def resize(fallen, dropped=frozenset(), scale=None):
+        seen["scale"] = dict(scale or {})
+        return []
+
+    blueprints = _Blueprints({"item_id": 2, "owner_character_id": None})
+    decision = _missiles(room_runs=20)
+    decision.overview_row["manufacturing_job"]["time_seconds"] = 3600.0   # ranked: an extra job before the sub pass
+    plan = ChainPlan(decisions=[decision], claim_parallel_blueprint=blueprints,
+                     sub_request_parent_type_ids=frozenset({100}), resize_sub_components=resize)
+    CharacterAssigner().assign(
+        plan, [], _Chars([_char(1, 5)]), _AdminStub(), {MAT: {"vwap_5d": 1.0 * M}},
+        blueprint_data=NO_SKILL_REQUIREMENTS, budget=WalletBudget(balance=1e12, reserve_pct=0),
+    )
+    assert seen["scale"] == {100: 2.0}
