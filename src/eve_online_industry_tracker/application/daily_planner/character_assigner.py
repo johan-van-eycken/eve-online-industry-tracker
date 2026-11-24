@@ -479,7 +479,7 @@ class CharacterAssigner:
         if item_id is not None:
             notes += f" (blueprint item {item_id})"
         if lane["with_subs"]:
-            notes += "; its components are bought (the planner builds them for the first job)"
+            notes += "; its components are sub-built with the first job's when a slot is free, else bought"
         action = dataclasses.replace(
             first, character_id=char_id, character_name=char_name,
             materials=dict(first.materials) if first.materials is not None else None,
@@ -494,6 +494,15 @@ class CharacterAssigner:
         if item_id is not None:
             bpc_pool.setdefault("bpos" if blueprint.get("kind") == "bpo" else "bpcs", set()).add(int(item_id))
         lane["room"] -= int(action.runs or runs)
+        if lane["with_subs"] and charger is not None:
+            # The parent's components are re-sized for all its jobs (scale over
+            # 1), so the sub pass builds this job's too where a slot is free.
+            # Its charge already paid them at the market, which a sub-build
+            # (chosen only when cheaper) never exceeds.
+            batch = orow.get_manufacturing_job(decision.overview_row).get("runs")
+            if isinstance(batch, int) and batch > 0:
+                parent = int(decision.type_id)
+                charger.scale[parent] = charger.scale.get(parent, 1.0) + int(action.runs or 0) / batch
         if int(action.runs or 0) < runs:
             lanes[key] = None   # cut to the wallet: nothing left for another
         return action

@@ -622,12 +622,13 @@ class ChainPlanner:
         ) -> list[ItemDecision]:
             # `dropped`: parents CharacterAssigner
             # gives no manufacture (e.g. owner binding): no sub-builds for them.
-            # `scale`: {parent type_id: fraction in (0, 1]} of a parent's batch
-            # that is still built; its requests shrink to match (rounded up).
+            # `scale`: {parent type_id: fraction > 0} of a parent's batch that is
+            # built: under 1 a batch cut to the wallet, over 1 the first job plus
+            # its parallel jobs; its requests follow (rounded up).
             scale = scale or {}
             for parent, fraction in scale.items():
-                if not 0 < fraction <= 1:
-                    raise ValueError(f"sub-component scale for parent {parent} must be in (0, 1], got {fraction}")
+                if not fraction > 0:
+                    raise ValueError(f"sub-component scale for parent {parent} must be > 0, got {fraction}")
             for decision in build_decisions:
                 if id(decision) in phase_d_buy_reasons and (
                     phase_d_buy_reasons[id(decision)] or "component_buy_reasons" in decision.overview_row
