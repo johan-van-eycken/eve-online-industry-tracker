@@ -125,7 +125,8 @@ class _Sizing:
     best_expected: float
     best_whole: int
     fee: float | None
-    #: Sized from invention_bpc_plan (I1 case A): one full batch, no fee.
+    #: Sized from invention_bpc_plan (I1 case A): one full batch, its fee
+    #: the plan's fee per attempt x the expected attempts.
     later_batch: bool = False
     #: The expected attempts the row's fee and expected input lines are
     #: priced at: the producer's lanes' when they run in parallel,
@@ -169,17 +170,28 @@ def _sizing(row: dict[str, Any], best_probability: float | None) -> tuple[_Sizin
         if batch_runs is not None and runs_per_bpc is not None:
             expected, whole = invention_attempts(batch_runs, runs_per_bpc, best_probability)
             if whole > 0:
-                return _Sizing(batch_runs, runs_per_bpc, expected, whole, None, later_batch=True), ""
+                # The later-batch plan carries a fee per attempt, not a total:
+                # priced at the best inventor's expected attempts, like a row's
+                # own fee. None (unknown) when the producer published no rate.
+                # Without it every stock invention of a T2 that already has a
+                # BPC was dropped on "the later-batch plan carries no fee" (plan 43).
+                per_attempt = orow.get_invention_fee_per_attempt(row)
+                fee = per_attempt * expected if per_attempt is not None else None
+                return _Sizing(batch_runs, runs_per_bpc, expected, whole, fee, later_batch=True), ""
     return None, orow.get_invention_datacore_need_unknown(row) or NO_INVENTION_PLAN_REASON
 
 
 def _input_cost(
-    row: dict[str, Any], ratio: float, price_map: Mapping[int, Any],
+    row: dict[str, Any], ratio: float, price_map: Mapping[int, Any], *, attempts: float | None = None,
 ) -> tuple[float | None, str | None]:
     """(ISK of the row's own expected inputs for `ratio` x the best
     inventor's expected attempts, None) or (None, why it is unknown): no
-    lines, a line without a quantity, or a line with no price at all."""
+    lines, a line without a quantity, or a line with no price at all. A row
+    with only the later-batch plan (an owned T2 BPC covers batch 1) prices
+    that plan's inputs per attempt x `attempts`."""
     lines = orow.get_own_expected_invention_inputs(row)
+    if not lines and attempts is not None:
+        return _per_attempt_input_cost(row, attempts, price_map)
     if not lines:
         return None, "the row carries no expected invention inputs"
     total = 0.0
@@ -203,6 +215,34 @@ def _input_cost(
                 return None, f"invention input {type_id} has no market price"
             line_total += extra_units * extra_price
         total += line_total
+    return total, None
+
+
+def _per_attempt_input_cost(
+    row: dict[str, Any], attempts: float, price_map: Mapping[int, Any],
+) -> tuple[float | None, str | None]:
+    """ISK of the later-batch plan's inputs per attempt (datacores, decryptor)
+    x `attempts`, or (None, why): no plan lines, or a line without a price."""
+    plan = orow.get_invention_bpc_plan(row) or {}
+    entries = plan.get("per_attempt_materials")
+    lines = [e for e in (entries.values() if isinstance(entries, dict) else entries or []) if isinstance(e, dict)]
+    if not lines:
+        return None, "the row carries no expected invention inputs"
+    total = 0.0
+    for line in lines:
+        type_id = int(line.get("type_id") or 0)
+        quantity = _positive_float(line.get("quantity"))
+        if quantity is None:
+            return None, f"invention input {type_id} has no quantity"
+        per_attempt = _positive_float(line.get("line_total"))
+        if per_attempt is None:
+            price = _positive_float(line.get("unit_price"))
+            if price is None:
+                price, _ = price_map_unit_price(price_map.get(type_id))
+            if price is None:
+                return None, f"invention input {type_id} has no price"
+            per_attempt = price * quantity
+        total += per_attempt * attempts
     return total, None
 
 
@@ -309,7 +349,7 @@ class _Sized:
         if sizing.fee is None:
             return None, LATER_BATCH_NO_FEE
         ratio = expected / sizing.basis
-        inputs, why = _input_cost(self.row, ratio, self.price_map)
+        inputs, why = _input_cost(self.row, ratio, self.price_map, attempts=expected if sizing.later_batch else None)
         return (None, why) if inputs is None else (sizing.fee * ratio + inputs, None)
 
     def finish(
