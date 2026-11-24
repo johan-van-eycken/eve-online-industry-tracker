@@ -25,6 +25,7 @@ from eve_online_industry_tracker.application.daily_planner.blueprint_ledger impo
 )
 from eve_online_industry_tracker.application.industry import overview_row as orow
 from eve_online_industry_tracker.application.daily_planner import facility_bonus
+from eve_online_industry_tracker.application.daily_planner.item_decision_engine import slot_day_profit
 from eve_online_industry_tracker.application.daily_planner.models import (
     AssignedAction,
     ChainPlan,
@@ -133,8 +134,12 @@ class ChainPlanner:
         self,
         top_level_decisions: list[ItemDecision],
         phase1_data: dict[str, Any],
+        order_key: Any = None,
     ) -> ChainPlan:
         """Resolve sub-components for all 'build' items.
+
+        `order_key`: decision -> value, the order blueprints are booked in
+        (CharacterAssigner.plan_order_key, the slot order); None: adjusted_score.
 
         phase1_data must contain:
           - corp_assets: list of corp asset objects
@@ -221,8 +226,10 @@ class ChainPlanner:
         # the plan uses is booked once, in plan order (see blueprint_ledger).
         ledger = BlueprintLedger(free_bpo_assets_by_type_id, free_bpc_assets_by_type_id)
         build_decisions = [d for d in top_level_decisions if d.decision == "build"]
-        # Plan order is score order (CharacterAssigner's), ties as given.
-        ordered = sorted(build_decisions, key=lambda d: -float(d.adjusted_score or 0.0))
+        # Plan order is the slot order (order_key), so a shared blueprint goes to the
+        # product assign() ranks first; ties by score, then as given.
+        ordered = sorted(build_decisions, key=lambda d: (
+            -float(order_key(d)) if order_key is not None else 0.0, -float(d.adjusted_score or 0.0)))
         top_level_build_types = {int(d.type_id) for d in build_decisions}
         state: dict[int, dict[str, Any]] = {}
 
@@ -643,10 +650,19 @@ class ChainPlanner:
                 if parent not in dropped
             ]
             buy_reasons: dict[int, dict[int, str]] = {}
-            subs = self._resolve_sub_requests(
-                self._merge_sub_requests(per_parent), market_depth_cache, phase1_data,
-                buy_reasons=buy_reasons,
-            )
+            merged = self._merge_sub_requests(per_parent)
+            # A component is needed when its parent starts today; a sub-build
+            # makes the parent wait for the next daily check, which costs the
+            # parent's slot-day profit (all its jobs when scaled over 1).
+            wait = {
+                int(d.type_id): _wait_cost(d, scale.get(int(d.type_id), 1.0))
+                for d in build_decisions if int(d.type_id) not in dropped
+            }
+            for request in merged.values():
+                request["parent_wait_cost"] = sum(wait.get(int(p), 0.0) for p in request["requested_by_type_ids"])
+            today_need.clear()
+            today_need.update({t: int(r["quantity"]) for t, r in merged.items()})
+            subs = self._resolve_sub_requests(merged, market_depth_cache, phase1_data, buy_reasons=buy_reasons)
             # A component bought for an unknown fee
             # says why on every parent that requested it, each in its own words.
             parents = {int(d.type_id): d for d in build_decisions}
@@ -661,6 +677,29 @@ class ChainPlanner:
 
         def _rebuild(subs: list[ItemDecision]) -> list[ItemDecision]:
             return _one_decision_per_type(top_level_decisions, subs)
+
+        #: {component type_id: units today's parents take}, from the last sizing.
+        today_need: dict[int, int] = {}
+
+        def _ahead(built: set[int], busy: set[int]) -> list[ItemDecision]:
+            # Components for the next batch of each parent built today: one
+            # batch's need, net of the stock today's jobs leave. No wait cost:
+            # it is ready before that batch starts. A type sub-built today
+            # already uses its BPO.
+            merged = self._merge_sub_requests([
+                (parent, requests) for parent, requests in requests_by_parent if parent in built and requests
+            ])
+            merged = {t: r for t, r in merged.items() if t not in busy}
+            stock = phase1_data.get("corp_material_stock") or {}
+            left = {t: max(0, int(stock.get(t, 0)) - today_need.get(t, 0)) for t in merged}
+            subs = self._resolve_sub_requests(merged, market_depth_cache, {**phase1_data, "corp_material_stock": left})
+            for sub in subs:
+                parents = ", ".join(sorted({
+                    d.type_name for d in build_decisions if int(d.type_id) in sub.overview_row["requested_by_type_ids"]
+                }))
+                sub.decision_reason = f"Sub-manufacture ahead: components for the next batch of {parents}"
+                sub.overview_row["sub_seconds_per_run"] = self._component_seconds_per_run(int(sub.type_id), phase1_data)
+            return subs
 
         all_decisions = _rebuild(_sub_decisions(set()))
 
@@ -707,6 +746,7 @@ class ChainPlanner:
             replan_released=_replan,
             undo_replan=_undo_replan,
             claim_parallel_blueprint=_claim_parallel,
+            plan_ahead_sub_builds=_ahead,
         )
 
     @staticmethod
@@ -1954,6 +1994,20 @@ class ChainPlanner:
             return None
         if sub_cost + install_fee >= market_cost:
             return None
+        wait = float(request.get("parent_wait_cost") or 0.0)
+        if sub_cost + install_fee + wait >= market_cost:
+            saving = market_cost - sub_cost - install_fee
+            logger.info(
+                "ChainPlanner: type_id=%s bought: building saves %.0f ISK, less than the %.0f ISK a day "
+                "its parent job(s) would wait for the sub-build", mat_type_id, saving, wait,
+            )
+            if buy_reasons is not None:
+                buy_reasons[mat_type_id] = {
+                    int(p): (f"component {request['type_name']} bought: building saves {saving / 1e6:.1f}M, "
+                             f"less than the {wait / 1e6:.1f}M a day the job would wait for the sub-build")
+                    for p in request["requested_by_type_ids"]
+                }
+            return None
         # Linear pricing, so the per-job costs sum to sub_cost exactly.
         # One job per unclaimed BPO runs today; the rest wait on the same
         # BPOs, one after the other: job i follows job i - bpos.
@@ -2014,6 +2068,17 @@ class ChainPlanner:
                 "market_buy_cost": market_cost,
             },
         )
+
+    @staticmethod
+    def _component_seconds_per_run(type_id: int, phase1_data: dict[str, Any]) -> float | None:
+        """The component's own overview row's build time of one run, or None."""
+        for row in phase1_data.get("overview_rows") or []:
+            if isinstance(row, dict) and int(row.get("type_id") or 0) == int(type_id):
+                runs = orow.get_manufacturing_job(row).get("runs")
+                seconds = orow.get_elapsed_time_seconds(row)
+                if isinstance(runs, int) and runs > 0 and seconds and seconds > 0:
+                    return seconds / runs
+        return None
 
     @staticmethod
     def _component_fee_unknown_reason(type_id: int, phase1_data: dict[str, Any]) -> str | None:
@@ -2750,6 +2815,15 @@ def _blueprint_efficiency(asset: Any, kind: str) -> int | None:
         except (TypeError, ValueError):
             return None
     return None
+
+
+def _wait_cost(decision: ItemDecision, scale: float) -> float:
+    """What a day's wait costs the parent's jobs: one slot-day profit of its
+    first job (cut to `scale` under 1), times the jobs when `scale` is over 1."""
+    batch = orow.get_manufacturing_job(decision.overview_row).get("runs")
+    if not isinstance(batch, int) or batch <= 0:
+        return 0.0
+    return slot_day_profit(decision, max(1, math.ceil(batch * min(scale, 1.0)))) * max(scale, 1.0)
 
 
 def _unknown_fee_buy_reasons(request: dict[str, Any], own_row_reason: str | None) -> dict[int, str]:

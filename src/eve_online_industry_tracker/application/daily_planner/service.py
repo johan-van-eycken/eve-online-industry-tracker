@@ -1009,9 +1009,14 @@ class DailyPlannerService:
         phase1: dict[str, Any],
     ) -> Any:
         logger.info("DailyPlannerService: Phase 5 — chain planning (Pass 2)")
+        order_key = self._character_assigner.plan_order_key(
+            characters_service=self._characters, industry_jobs=phase1["industry_jobs"],
+            budget=phase1["wallet_budget"], admin_settings=self._admin,
+        )
         return self._chain_planner.plan_chain(
             top_level_decisions=top_level_decisions,
             phase1_data=phase1,
+            order_key=order_key,
         )
 
     def _phase_6_assign(
@@ -1094,9 +1099,6 @@ class DailyPlannerService:
     ) -> None:
         logger.info("DailyPlannerService: Phase 9 — persistence")
 
-        # Archive current active plan
-        self._repo.archive_active_plan()
-
         # Compute market snapshot hash
         market_depth_cache = phase1_data["market_depth_cache"]
         overview_rows = phase1_data["overview_rows"]
@@ -1138,38 +1140,22 @@ class DailyPlannerService:
             status="active",
             corp_wallet_snapshot=corp_wallet,
             market_snapshot_hash=snapshot_hash,
-            freshness_score=1.0,
             # The scoring inputs whose read failed, NULL when none did.
             plan_summary_json=json.dumps(summary, sort_keys=True) if summary else None,
         )
-        plan_id = self._repo.insert_plan(plan)
-
-        # Build plan items (each stamped with the snapshot price it was
-        # planned against, taken from the same market_depth_cache used for
-        # the hash above) *before* persisting them. Freshness must be
-        # computed from these in-memory objects, not from the list
-        # insert_plan_items() returns afterwards -- SQLAlchemy expires ORM
-        # attributes on commit, and insert_plan_items() closes its session,
-        # so reading .snapshot_sell_price / .type_id post-insert raises
-        # DetachedInstanceError.
-        plan_items = self._build_plan_items(plan_id, chain_plan.decisions, market_depth_cache)
-
+        # Plan items (each stamped with the snapshot price it was planned
+        # against, from the same market_depth_cache as the hash above), built
+        # before the write: freshness is computed from these in-memory
+        # objects, as a committed and closed ORM object is detached.
+        plan_items = self._build_plan_items(0, chain_plan.decisions, market_depth_cache)
         drift_threshold_pct = float(_adm(self._admin, "planner_price_drift_threshold_pct"))
-        freshness = compute_freshness_score(plan_items, market_depth_cache, drift_threshold_pct)
+        # The only place freshness_score is written: a plain GET of the
+        # active plan (get_active_plan) must never have a write side effect.
+        plan.freshness_score = compute_freshness_score(plan_items, market_depth_cache, drift_threshold_pct)
 
-        if plan_items:
-            self._repo.insert_plan_items(plan_items)
-
-        # This is the only place freshness_score is written -- a plain GET
-        # of the active plan (get_active_plan) must never have a write
-        # side effect.
-        self._repo.update_freshness_score(plan_id, freshness)
-
-        # Fix plan_id on action rows (was 0 in Phase 8)
-        for row in action_log_rows:
-            row.plan_id = plan_id
-        if action_log_rows:
-            self._repo.insert_actions(action_log_rows)
+        # One transaction: the old plan is archived only together with the new
+        # plan, its items and its actions; a failed write keeps the old plan active.
+        self._repo.publish_plan(plan, plan_items, action_log_rows)
 
         # Cleanup old action log rows
         cutoff_days = int(_adm(self._admin, "planner_history_days"))
@@ -1646,28 +1632,6 @@ class DailyPlannerService:
             ))
         return items
 
-    def _persist_plan_items(
-        self,
-        plan_id: int,
-        decisions: list[Any],
-        market_depth_cache: dict[int, Any] | None = None,
-    ) -> list[BuildPlanItemModel]:
-        """Build BuildPlanItemModel rows from decisions and write them via the repo.
-
-        Split out so the plan-item write (including the resolved
-        meta_group_id -- see ItemDecisionEngine.decide()) is independently
-        testable without running the whole compute pipeline.
-
-        Returns the items after they have been inserted and their owning
-        session closed -- callers must not read attributes off them (that
-        raises DetachedInstanceError); use the return value only for its
-        length/identity. `_phase_9_persist` computes freshness from a
-        separate, not-yet-persisted build instead, for exactly this reason.
-        """
-        plan_items = self._build_plan_items(plan_id, decisions, market_depth_cache)
-        if plan_items:
-            self._repo.insert_plan_items(plan_items)
-        return plan_items
 
     def _compute_freshness_score(
         self, plan: Any, plan_items: list[Any] | None = None

@@ -81,6 +81,9 @@ class ItemDecision:
     # unknown, orow.get_profit_upper_bound_reason); persisted so feedback
     # does not learn accuracy from them.
     profit_is_upper_bound: bool = False
+    # Realized / predicted ISK/h learned from past plans (FeedbackProcessor),
+    # clamped; weighs the profit in the slot order. 1.0 = no history.
+    accuracy_ema: float = 1.0
     # Phase 4 build rules (set on a build; on a skip/watch only what was computed
     # before the rule fired): days to sell the capped batch plus the pipeline,
     # its profit/cost per day, and how many runs the market absorbs.
@@ -147,6 +150,9 @@ class AssignedAction:
     # te_research only: queued behind the ME research
     # on the same BPO (one job per blueprint), so it cannot start today.
     queued_after_me: bool = False
+    # sub_manufacture only: built ahead for the parent's next batch, so the
+    # shopping list does not subtract it from today's parent purchase.
+    for_next_batch: bool = False
     # invent only: the T1 BPC this invention job runs on (one job
     # per BPC, at most its runs); None when the row does not name it.
     blueprint_item_id: int | None = None
@@ -194,3 +200,7 @@ class ChainPlan:
     #: of a blueprint of the row's type with that ME and at least those runs,
     #: or None. None for a hand-built plan: no parallel jobs.
     claim_parallel_blueprint: Any = field(default=None, repr=False, compare=False)
+    #: (parents built today, component types sub-built today) -> sub-component
+    #: decisions for the parents' next batch, net of the stock today leaves.
+    #: None for a hand-built plan: nothing is built ahead.
+    plan_ahead_sub_builds: Any = field(default=None, repr=False, compare=False)

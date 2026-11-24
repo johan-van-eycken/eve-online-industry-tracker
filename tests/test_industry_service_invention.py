@@ -336,12 +336,16 @@ def test_unpriced_invention_input_lowers_confidence_and_is_named(monkeypatch, ca
 
     assert mj["expected_invention_materials"]["204"]["unit_price"] is None
     assert mj["invention_material_cost"] is None
-    assert mj["material_cost"] == pytest.approx(50.0)
+    # A partial cost is not a cost (audit 2026-11-24): the priced 50 ISK of
+    # Tritanium alone no longer passes for the build cost.
+    assert mj["material_cost"] is None and mj["total_cost"] is None
+    assert "an input has no price: " in mj["material_cost_unknown_reason"]
     assert mj["material_type_count"] == 2 and mj["priced_material_count"] == 1
     assert priced["material_pricing_confidence"] == "High"
+    assert priced["total_cost"] is not None
     assert mj["material_pricing_confidence"] != "High"
     assert any("Datacore" in reason for reason in mj["pricing_confidence_reasons"])
-    assert any("invention input 204" in r.getMessage() for r in caplog.records if r.levelname == "WARNING")
+    assert any("without a price" in r.getMessage() for r in caplog.records if r.levelname == "WARNING")
 
 
 def test_invention_input_without_a_plan_price_falls_back_to_the_market_map(monkeypatch) -> None:

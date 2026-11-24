@@ -92,41 +92,44 @@ class MarketEnrichmentMixin:
             sales_tax_fraction = market_fees.sales_tax_fraction(fee_settings, accounting_level=accounting_level)
 
             sde_session: Any = self._sessions.sde_session()
-            station = (
-                sde_session.query(NpcStations)
-                .filter(NpcStations.id == int(hub_context.get("station_id") or 0))
-                .first()
-            )
-            if station is not None:
-                try:
-                    owner_corp_id = int(station.ownerID)
-                except (TypeError, ValueError):
-                    owner_corp_id = None
-            if owner_corp_id is not None:
-                corporation = (
-                    sde_session.query(NpcCorporations)
-                    .filter(NpcCorporations.id == int(owner_corp_id))
+            try:
+                station = (
+                    sde_session.query(NpcStations)
+                    .filter(NpcStations.id == int(hub_context.get("station_id") or 0))
                     .first()
                 )
-                if corporation is not None and getattr(corporation, "factionID", None) is not None:
+                if station is not None:
                     try:
-                        owner_faction_id = int(corporation.factionID)
+                        owner_corp_id = int(station.ownerID)
                     except (TypeError, ValueError):
-                        owner_faction_id = None
+                        owner_corp_id = None
+                if owner_corp_id is not None:
+                    corporation = (
+                        sde_session.query(NpcCorporations)
+                        .filter(NpcCorporations.id == int(owner_corp_id))
+                        .first()
+                    )
+                    if corporation is not None and getattr(corporation, "factionID", None) is not None:
+                        try:
+                            owner_faction_id = int(corporation.factionID)
+                        except (TypeError, ValueError):
+                            owner_faction_id = None
 
-            faction_standing = self._get_character_standing(
-                character_id=int(character_id),
-                from_type="faction",
-                from_id=owner_faction_id,
-            )
-            corp_standing = self._get_character_standing(
-                character_id=int(character_id),
-                from_type="npc_corp",
-                from_id=owner_corp_id,
-            )
-            broker_fee_fraction = market_fees.broker_fee_fraction(
-                fee_settings, broker_relations_level=broker_relations_level,
-                faction_standing=faction_standing, corp_standing=corp_standing)
+                faction_standing = self._get_character_standing(
+                    character_id=int(character_id),
+                    from_type="faction",
+                    from_id=owner_faction_id,
+                )
+                corp_standing = self._get_character_standing(
+                    character_id=int(character_id),
+                    from_type="npc_corp",
+                    from_id=owner_corp_id,
+                )
+                broker_fee_fraction = market_fees.broker_fee_fraction(
+                    fee_settings, broker_relations_level=broker_relations_level,
+                    faction_standing=faction_standing, corp_standing=corp_standing)
+            finally:
+                sde_session.close()
 
         return {
             "market_hub": hub_context.get("hub"),
@@ -523,209 +526,212 @@ class MarketEnrichmentMixin:
         region_id: int = 10000002,
     ) -> None:
         app_session = self._sessions.app_session()
+        try:
 
-        # Batch fetch price stats for all product type_ids + their materials
-        product_type_ids = [r["type_id"] for r in rows if r.get("type_id")]
+            # Batch fetch price stats for all product type_ids + their materials
+            product_type_ids = [r["type_id"] for r in rows if r.get("type_id")]
 
-        # Collect all material type_ids (top 5 by value per product)
-        material_type_ids: set[int] = set()
-        for row in rows:
-            mfg_job = row.get("manufacturing_job", {})
-            mats = mfg_job.get("procurement_materials", {})
-            sorted_mats = sorted(
-                mats.values(),
-                key=lambda m: float(m.get("total_quantity") or m.get("quantity") or 0),
-                reverse=True,
-            )[:5]
-            for m in sorted_mats:
-                tid = m.get("type_id")
-                if tid:
-                    material_type_ids.add(int(tid))
+            # Collect all material type_ids (top 5 by value per product)
+            material_type_ids: set[int] = set()
+            for row in rows:
+                mfg_job = row.get("manufacturing_job", {})
+                mats = mfg_job.get("procurement_materials", {})
+                sorted_mats = sorted(
+                    mats.values(),
+                    key=lambda m: float(m.get("total_quantity") or m.get("quantity") or 0),
+                    reverse=True,
+                )[:5]
+                for m in sorted_mats:
+                    tid = m.get("type_id")
+                    if tid:
+                        material_type_ids.add(int(tid))
 
-        all_type_ids = set(product_type_ids) | material_type_ids
+            all_type_ids = set(product_type_ids) | material_type_ids
 
-        # Fetch price stats from DB (no ESI fetch — use cached data only)
-        price_stats_map: dict[int, dict] = {}
-        for tid in all_type_ids:
+            # Fetch price stats from DB (no ESI fetch — use cached data only)
+            price_stats_map: dict[int, dict] = {}
             try:
-                stats = market_history_svc.get_price_stats(type_id=tid, region_id=region_id)
-                if stats.get("has_data"):
-                    price_stats_map[tid] = stats
+                price_stats_map = {
+                    tid: stats for tid, stats in market_history_svc.get_price_stats_many(
+                        type_ids=all_type_ids, region_id=region_id).items()
+                    if stats.get("has_data")
+                }
             except SQLAlchemyError as exc:
-                logger.warning("Market trends: the price stats of type_id=%s cannot be read (%s); no trend for it",
-                               tid, exc)
+                logger.warning("Market trends: the price stats cannot be read (%s); no trends this refresh", exc)
 
-        # Pipeline and realized margins: one grouped query per table for all product type_ids.
-        pipeline_jobs: dict[int, int] = defaultdict(int)
-        pipeline_orders: dict[int, int] = defaultdict(int)
-        historical_margins: dict[int, float | None] = {}
-        unique_type_ids = sorted({int(t) for t in product_type_ids})
+            # Pipeline and realized margins: one grouped query per table for all product type_ids.
+            pipeline_jobs: dict[int, int] = defaultdict(int)
+            pipeline_orders: dict[int, int] = defaultdict(int)
+            historical_margins: dict[int, float | None] = {}
+            unique_type_ids = sorted({int(t) for t in product_type_ids})
 
-        if unique_type_ids:
-            for Model in (CharacterIndustryJobsModel, CorporationIndustryJobsModel):
-                for tid, units in (
-                    app_session.query(Model.product_type_id, func.sum(Model.output_quantity))
-                    .filter(Model.product_type_id.in_(unique_type_ids), Model.status.in_(["active", "ready"]))
-                    .group_by(Model.product_type_id)
-                ):
-                    pipeline_jobs[int(tid)] += int(units or 0)
-            for Model in (CharacterMarketOrdersModel, CorporationMarketOrdersModel):
-                for tid, units in (
-                    app_session.query(Model.type_id, func.sum(Model.volume_remain))
-                    .filter(Model.type_id.in_(unique_type_ids), Model.is_buy_order == False)  # noqa: E712
-                    .group_by(Model.type_id)
-                ):
-                    pipeline_orders[int(tid)] += int(units or 0)
+            if unique_type_ids:
+                for Model in (CharacterIndustryJobsModel, CorporationIndustryJobsModel):
+                    for tid, units in (
+                        app_session.query(Model.product_type_id, func.sum(Model.output_quantity))
+                        .filter(Model.product_type_id.in_(unique_type_ids), Model.status.in_(["active", "ready"]))
+                        .group_by(Model.product_type_id)
+                    ):
+                        pipeline_jobs[int(tid)] += int(units or 0)
+                for Model in (CharacterMarketOrdersModel, CorporationMarketOrdersModel):
+                    for tid, units in (
+                        app_session.query(Model.type_id, func.sum(Model.volume_remain))
+                        .filter(Model.type_id.in_(unique_type_ids), Model.is_buy_order == False)  # noqa: E712
+                        .group_by(Model.type_id)
+                    ):
+                        pipeline_orders[int(tid)] += int(units or 0)
 
-            # Historical realized margins — last 180 days, the mean over both ledgers
-            cutoff = (datetime.utcnow() - timedelta(days=180)).strftime("%Y-%m-%d")
-            margin_sum: dict[int, float] = defaultdict(float)
-            margin_count: dict[int, int] = defaultdict(int)
-            for Model in (CharacterRealizedSalesLedgerModel, CorporationRealizedSalesLedgerModel):
-                for tid, total, count in (
-                    app_session.query(Model.type_id, func.sum(Model.realized_margin_fraction),
-                                      func.count(Model.realized_margin_fraction))
-                    .filter(
-                        Model.type_id.in_(unique_type_ids),
-                        Model.date >= cutoff,
-                        Model.confidence != "Low",
-                        Model.realized_margin_fraction.isnot(None),
-                    )
-                    .group_by(Model.type_id)
-                ):
-                    margin_sum[int(tid)] += float(total or 0)
-                    margin_count[int(tid)] += int(count or 0)
-            for tid in unique_type_ids:
-                count = margin_count.get(tid, 0)
-                historical_margins[tid] = margin_sum[tid] / count * 100 if count >= 2 else None
+                # Historical realized margins — last 180 days, the mean over both ledgers
+                cutoff = (datetime.utcnow() - timedelta(days=180)).strftime("%Y-%m-%d")
+                margin_sum: dict[int, float] = defaultdict(float)
+                margin_count: dict[int, int] = defaultdict(int)
+                for Model in (CharacterRealizedSalesLedgerModel, CorporationRealizedSalesLedgerModel):
+                    for tid, total, count in (
+                        app_session.query(Model.type_id, func.sum(Model.realized_margin_fraction),
+                                          func.count(Model.realized_margin_fraction))
+                        .filter(
+                            Model.type_id.in_(unique_type_ids),
+                            Model.date >= cutoff,
+                            Model.confidence != "Low",
+                            Model.realized_margin_fraction.isnot(None),
+                        )
+                        .group_by(Model.type_id)
+                    ):
+                        margin_sum[int(tid)] += float(total or 0)
+                        margin_count[int(tid)] += int(count or 0)
+                for tid in unique_type_ids:
+                    count = margin_count.get(tid, 0)
+                    historical_margins[tid] = margin_sum[tid] / count * 100 if count >= 2 else None
 
-        ORDER_DURATION_DAYS = 90.0
+            ORDER_DURATION_DAYS = 90.0
 
-        for row in rows:
-            tid = row.get("type_id")
-            mfg_job = row.get("manufacturing_job", {})
-            stats = price_stats_map.get(tid, {})
+            for row in rows:
+                tid = row.get("type_id")
+                mfg_job = row.get("manufacturing_job", {})
+                stats = price_stats_map.get(tid, {})
 
-            # Price trend signals
-            # Week over week: a price that settled lower months ago is not "declining" now.
-            row["price_trend_7d_pct"] = stats.get("trend_7d_wow_pct")
-            row["price_trend_30d_pct"] = stats.get("trend_30d_pct")
-            row["price_avg_7d"] = stats.get("avg_7d")
-            row["price_avg_42w"] = stats.get("avg_42w")
-            row["price_volatility_pct"] = stats.get("volatility_pct")
+                # Price trend signals
+                # Week over week: a price that settled lower months ago is not "declining" now.
+                row["price_trend_7d_pct"] = stats.get("trend_7d_wow_pct")
+                row["price_trend_30d_pct"] = stats.get("trend_30d_pct")
+                row["price_avg_7d"] = stats.get("avg_7d")
+                row["price_avg_42w"] = stats.get("avg_42w")
+                row["price_volatility_pct"] = stats.get("volatility_pct")
 
-            # Margin buffer
-            market_price = self._as_float(row.get("market_unit_price"))
-            total_cost = self._as_float(mfg_job.get("total_cost"))
-            runs = int(mfg_job.get("runs") or 1)
-            qty_per_run = int(mfg_job.get("product_quantity_per_run") or 1)
-            total_units = runs * qty_per_run
-            unit_build_cost = (total_cost / total_units) if (total_cost and total_units > 0) else None
+                # Margin buffer
+                market_price = self._as_float(row.get("market_unit_price"))
+                total_cost = self._as_float(mfg_job.get("total_cost"))
+                runs = int(mfg_job.get("runs") or 1)
+                qty_per_run = int(mfg_job.get("product_quantity_per_run") or 1)
+                total_units = runs * qty_per_run
+                unit_build_cost = (total_cost / total_units) if (total_cost and total_units > 0) else None
 
-            if market_price and unit_build_cost and unit_build_cost > 0:
-                row["margin_buffer_pct"] = (market_price - unit_build_cost) / unit_build_cost * 100
-            else:
-                row["margin_buffer_pct"] = None
-
-            # Projected price at delivery
-            trend_30d_pct = stats.get("trend_30d_pct")
-            mfg_seconds = self._as_float(mfg_job.get("manufacturing_time_seconds")) or 0
-            mfg_days = mfg_seconds / 86400.0
-
-            if market_price and trend_30d_pct is not None:
-                # 7d vs 30d average: their midpoints (day 3.5 and day 15) are 11.5 days apart.
-                daily_trend = trend_30d_pct / 100.0 / 11.5
-                projected_price = market_price * (1.0 + daily_trend * mfg_days)
-                row["projected_price_at_delivery"] = projected_price
-                if unit_build_cost and unit_build_cost > 0 and projected_price > 0:
-                    row["projected_margin_pct"] = (projected_price - unit_build_cost) / projected_price * 100
+                if market_price and unit_build_cost and unit_build_cost > 0:
+                    row["margin_buffer_pct"] = (market_price - unit_build_cost) / unit_build_cost * 100
                 else:
+                    row["margin_buffer_pct"] = None
+
+                # Projected price at delivery
+                trend_30d_pct = stats.get("trend_30d_pct")
+                mfg_seconds = self._as_float(mfg_job.get("manufacturing_time_seconds")) or 0
+                mfg_days = mfg_seconds / 86400.0
+
+                if market_price and trend_30d_pct is not None:
+                    # 7d vs 30d average: their midpoints (day 3.5 and day 15) are 11.5 days apart.
+                    daily_trend = trend_30d_pct / 100.0 / 11.5
+                    projected_price = market_price * (1.0 + daily_trend * mfg_days)
+                    row["projected_price_at_delivery"] = projected_price
+                    if unit_build_cost and unit_build_cost > 0 and projected_price > 0:
+                        row["projected_margin_pct"] = (projected_price - unit_build_cost) / projected_price * 100
+                    else:
+                        row["projected_margin_pct"] = None
+                else:
+                    row["projected_price_at_delivery"] = None
                     row["projected_margin_pct"] = None
-            else:
-                row["projected_price_at_delivery"] = None
-                row["projected_margin_pct"] = None
 
-            # Material cost trend (weighted avg of top 5 materials)
-            mats = mfg_job.get("procurement_materials", {})
-            sorted_mats = sorted(
-                mats.values(),
-                key=lambda m: float(m.get("total_quantity") or m.get("quantity") or 0),
-                reverse=True,
-            )[:5]
-            mat_trends: list[float] = []
-            mat_weights: list[float] = []
-            for m in sorted_mats:
-                mat_tid = m.get("type_id")
-                mat_qty = float(m.get("total_quantity") or m.get("quantity") or 0)
-                if mat_tid and mat_qty > 0:
-                    mat_stats = price_stats_map.get(int(mat_tid), {})
-                    t = mat_stats.get("trend_pct")
-                    if t is not None:
-                        mat_trends.append(t)
-                        mat_weights.append(mat_qty)
-            if mat_trends:
-                total_w = sum(mat_weights)
-                row["material_cost_trend_pct"] = (
-                    sum(t * w for t, w in zip(mat_trends, mat_weights)) / total_w
-                    if total_w > 0
-                    else None
-                )
-            else:
-                row["material_cost_trend_pct"] = None
-
-            # Pipeline
-            units_jobs = pipeline_jobs.get(tid, 0)
-            units_orders = pipeline_orders.get(tid, 0)
-            pipeline_total = units_jobs + units_orders
-            row["pipeline_units_in_jobs"] = units_jobs
-            row["pipeline_units_on_market"] = units_orders
-            row["pipeline_total_units"] = pipeline_total
-            vol_7d = self._as_float(row.get("region_daily_volume_7d_avg")) or 0
-            row["pipeline_days_supply"] = (pipeline_total / vol_7d) if vol_7d > 0 else None
-
-            # Historical realized margin
-            hist_margin = historical_margins.get(tid)
-            row["historical_realized_margin_pct"] = hist_margin
-            proj_margin = self._as_float(row.get("profit_margin_fraction"))
-            if hist_margin is not None and proj_margin is not None:
-                row["historical_vs_projected_delta_pct"] = hist_margin - (proj_margin * 100)
-            else:
-                row["historical_vs_projected_delta_pct"] = None
-
-            # Relist cost modeling
-            vol_7d_avg = self._as_float(row.get("region_daily_volume_7d_avg")) or 0
-            if total_units > 0 and vol_7d_avg > 0:
-                selling_days: float | None = total_units / vol_7d_avg
-            else:
-                selling_days = None
-            row["selling_time_days"] = selling_days
-
-            # Extra relist broker fee if selling_days > ORDER_DURATION_DAYS
-            broker_fee_frac, broker_fee_assumed = self._relist_broker_fee_fraction(row)
-            row["relist_broker_fee_assumed"] = broker_fee_assumed
-            if selling_days and selling_days > ORDER_DURATION_DAYS and market_price:
-                extra_listings = int(selling_days / ORDER_DURATION_DAYS)
-                relist_cost_per_unit = market_price * broker_fee_frac * extra_listings
-            else:
-                relist_cost_per_unit = 0.0
-            row["relist_cost_per_unit"] = relist_cost_per_unit
-
-            # Effective profit after relist costs
-            profit_per_unit = self._as_float(row.get("profit_amount"))
-            if profit_per_unit is not None and total_units > 0:
-                profit_per_unit_val = profit_per_unit / total_units
-                effective_profit_per_unit = profit_per_unit_val - relist_cost_per_unit
-                row["effective_profit_with_relist"] = effective_profit_per_unit * total_units
-                net_rev = self._as_float(row.get("net_proceeds"))
-                if net_rev and net_rev > 0:
-                    row["effective_margin_with_relist_pct"] = (
-                        effective_profit_per_unit * total_units / net_rev
-                    ) * 100
+                # Material cost trend (weighted avg of top 5 materials)
+                mats = mfg_job.get("procurement_materials", {})
+                sorted_mats = sorted(
+                    mats.values(),
+                    key=lambda m: float(m.get("total_quantity") or m.get("quantity") or 0),
+                    reverse=True,
+                )[:5]
+                mat_trends: list[float] = []
+                mat_weights: list[float] = []
+                for m in sorted_mats:
+                    mat_tid = m.get("type_id")
+                    mat_qty = float(m.get("total_quantity") or m.get("quantity") or 0)
+                    if mat_tid and mat_qty > 0:
+                        mat_stats = price_stats_map.get(int(mat_tid), {})
+                        t = mat_stats.get("trend_pct")
+                        if t is not None:
+                            mat_trends.append(t)
+                            mat_weights.append(mat_qty)
+                if mat_trends:
+                    total_w = sum(mat_weights)
+                    row["material_cost_trend_pct"] = (
+                        sum(t * w for t, w in zip(mat_trends, mat_weights)) / total_w
+                        if total_w > 0
+                        else None
+                    )
                 else:
+                    row["material_cost_trend_pct"] = None
+
+                # Pipeline
+                units_jobs = pipeline_jobs.get(tid, 0)
+                units_orders = pipeline_orders.get(tid, 0)
+                pipeline_total = units_jobs + units_orders
+                row["pipeline_units_in_jobs"] = units_jobs
+                row["pipeline_units_on_market"] = units_orders
+                row["pipeline_total_units"] = pipeline_total
+                vol_7d = self._as_float(row.get("region_daily_volume_7d_avg")) or 0
+                row["pipeline_days_supply"] = (pipeline_total / vol_7d) if vol_7d > 0 else None
+
+                # Historical realized margin
+                hist_margin = historical_margins.get(tid)
+                row["historical_realized_margin_pct"] = hist_margin
+                proj_margin = self._as_float(row.get("profit_margin_fraction"))
+                if hist_margin is not None and proj_margin is not None:
+                    row["historical_vs_projected_delta_pct"] = hist_margin - (proj_margin * 100)
+                else:
+                    row["historical_vs_projected_delta_pct"] = None
+
+                # Relist cost modeling
+                vol_7d_avg = self._as_float(row.get("region_daily_volume_7d_avg")) or 0
+                if total_units > 0 and vol_7d_avg > 0:
+                    selling_days: float | None = total_units / vol_7d_avg
+                else:
+                    selling_days = None
+                row["selling_time_days"] = selling_days
+
+                # Extra relist broker fee if selling_days > ORDER_DURATION_DAYS
+                broker_fee_frac, broker_fee_assumed = self._relist_broker_fee_fraction(row)
+                row["relist_broker_fee_assumed"] = broker_fee_assumed
+                if selling_days and selling_days > ORDER_DURATION_DAYS and market_price:
+                    extra_listings = int(selling_days / ORDER_DURATION_DAYS)
+                    relist_cost_per_unit = market_price * broker_fee_frac * extra_listings
+                else:
+                    relist_cost_per_unit = 0.0
+                row["relist_cost_per_unit"] = relist_cost_per_unit
+
+                # Effective profit after relist costs
+                profit_per_unit = self._as_float(row.get("profit_amount"))
+                if profit_per_unit is not None and total_units > 0:
+                    profit_per_unit_val = profit_per_unit / total_units
+                    effective_profit_per_unit = profit_per_unit_val - relist_cost_per_unit
+                    row["effective_profit_with_relist"] = effective_profit_per_unit * total_units
+                    net_rev = self._as_float(row.get("net_proceeds"))
+                    if net_rev and net_rev > 0:
+                        row["effective_margin_with_relist_pct"] = (
+                            effective_profit_per_unit * total_units / net_rev
+                        ) * 100
+                    else:
+                        row["effective_margin_with_relist_pct"] = None
+                else:
+                    row["effective_profit_with_relist"] = None
                     row["effective_margin_with_relist_pct"] = None
-            else:
-                row["effective_profit_with_relist"] = None
-                row["effective_margin_with_relist_pct"] = None
+        finally:
+            app_session.close()
 
     _ASSUMES_OWNED_T2_BPO_REASON = "costed as if a T2 BPO is owned (build_from_bpc off)"
 
@@ -1661,6 +1667,7 @@ class MarketEnrichmentMixin:
             certain_material_cost = 0.0
             estimated_material_cost = 0.0
             priced_material_count = 0
+            unpriced: list[str] = []
             for material in procurement_materials.values():
                 if not isinstance(material, dict):
                     continue
@@ -1694,6 +1701,8 @@ class MarketEnrichmentMixin:
                         certain_material_cost += float(line_total)
                     else:
                         estimated_material_cost += float(line_total)
+                if line_total is None:
+                    unpriced.append(str(material.get("type_name") or type_id))
                 material["line_total"] = line_total
             # Invented T2: the expected invention inputs (fractional, amortized
             # per run; see _expected_invention_inputs) are part of the cost and
@@ -1725,15 +1734,20 @@ class MarketEnrichmentMixin:
                         else:
                             estimated_material_cost += line_total
                     else:
-                        logger.warning(
-                            "Product overview %s: invention input %s (%s) has no price; "
-                            "it is left out of material_cost",
-                            row.get("type_id"), type_id, material.get("type_name"),
-                        )
+                        unpriced.append(str(material.get("type_name") or type_id))
                     material["line_total"] = line_total
                 manufacturing_job["invention_material_cost"] = invention_material_cost if invention_priced_count > 0 else None
                 material_cost += invention_material_cost
-            any_priced = (priced_material_count + invention_priced_count) > 0
+            # A partial cost is not a cost (_row_total_cost_estimate's rule): an
+            # unpriced input makes the material and total cost unknown, with why.
+            if unpriced:
+                logger.warning(
+                    "Product overview %s: input(s) without a price: %s; its cost is unknown",
+                    row.get("type_id"), ", ".join(dict.fromkeys(unpriced)),
+                )
+                manufacturing_job["material_cost_unknown_reason"] = (
+                    f"an input has no price: {', '.join(dict.fromkeys(unpriced))}")
+            any_priced = (priced_material_count + invention_priced_count) > 0 and not unpriced
             manufacturing_job["material_cost"] = material_cost if any_priced else None
             manufacturing_job["certain_material_cost"] = certain_material_cost if any_priced else None
             manufacturing_job["estimated_material_cost"] = estimated_material_cost if any_priced else None
@@ -1746,7 +1760,7 @@ class MarketEnrichmentMixin:
             manufacturing_job["total_cost_excludes_unknown_job_fees"] = bool(
                 manufacturing_job.get("job_fee_unknown_reasons")
             )
-            if total_job_cost is not None or any_priced:
+            if not unpriced and (total_job_cost is not None or any_priced):
                 manufacturing_job["total_cost"] = float(total_job_cost or 0.0) + float(material_cost or 0.0)
                 manufacturing_job["certain_cost"] = float(total_job_cost or 0.0) + float(certain_material_cost or 0.0)
                 manufacturing_job["estimated_cost"] = float(estimated_material_cost or 0.0)

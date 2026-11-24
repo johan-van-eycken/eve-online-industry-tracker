@@ -119,94 +119,111 @@ class MarketHistoryService:
         days: int = 42 * 7,  # 42 weeks
     ) -> dict[str, Any]:
         """Get historical price statistics (42-week avg, 7d avg, etc)."""
+        return self.get_price_stats_many(type_ids=[type_id], region_id=region_id, days=days)[int(type_id)]
+
+    def get_price_stats_many(
+        self,
+        *,
+        type_ids: Any,
+        region_id: int = 10000002,
+        days: int = 42 * 7,
+    ) -> dict[int, dict[str, Any]]:
+        """{type_id: get_price_stats} for every type, read in one query per
+        500 types (SQLite's bound-variable limit) instead of one per type."""
+        wanted = sorted({int(t) for t in type_ids})
+        cutoff_str = (datetime.utcnow() - timedelta(days=days)).date().isoformat()
+        by_type: dict[int, list[Any]] = {t: [] for t in wanted}
         app_session = self._sessions.app_session()
         try:
-            cutoff_date = datetime.utcnow() - timedelta(days=days)
-            cutoff_str = cutoff_date.date().isoformat()
-
-            records = app_session.query(MarketHistoryModel).filter(
-                and_(
-                    MarketHistoryModel.type_id == type_id,
-                    MarketHistoryModel.region_id == region_id,
-                    MarketHistoryModel.date >= cutoff_str,
-                )
-            ).order_by(MarketHistoryModel.date).all()
-
-            if not records:
-                return {
-                    "has_data": False,
-                    "avg_42w": None,
-                    "avg_7d": None,
-                    "avg_30d": None,
-                    "avg_1d": None,
-                    "volatility": None,
-                    "price_range": None,
-                    "trend": None,
-                    "trend_30d_pct": None,
-                }
-
-            prices = [float(r.close) for r in records if r.close and r.close > 0]
-            if not prices:
-                return {
-                    "has_data": False,
-                    "avg_42w": None,
-                    "avg_7d": None,
-                    "avg_30d": None,
-                    "avg_1d": None,
-                    "volatility": None,
-                    "price_range": None,
-                    "trend": None,
-                    "trend_30d_pct": None,
-                }
-
-            # 42-week average
-            avg_42w = float(statistics.mean(prices))
-
-            # 7-day average (last 7 records)
-            prices_7d = prices[-7:] if len(prices) >= 7 else prices
-            avg_7d = float(statistics.mean(prices_7d))
-
-            # 30-day average (last 30 records)
-            avg_30d = float(statistics.mean(prices[-30:])) if len(prices) >= 30 else None
-
-            # 1-day (last price)
-            avg_1d = prices[-1] if prices else None
-
-            # Volatility (std dev)
-            volatility = float(statistics.stdev(prices)) if len(prices) > 1 else 0.0
-
-            # Price trend (7d vs 42w)
-            trend_pct = ((avg_7d - avg_42w) / avg_42w * 100) if avg_42w > 0 else 0
-
-            # Price trend (7d vs 30d)
-            trend_30d_pct = ((avg_7d - avg_30d) / avg_30d * 100) if (avg_30d is not None and avg_30d > 0) else None
-
-            # The last 7 days against the 7 before them; None under 14 days of history.
-            prior_7d = float(statistics.mean(prices[-14:-7])) if len(prices) >= 14 else None
-            trend_7d_wow_pct = ((avg_7d - prior_7d) / prior_7d * 100) if prior_7d else None
-
-            return {
-                "has_data": True,
-                "avg_42w": avg_42w,
-                "avg_7d": avg_7d,
-                "avg_30d": avg_30d,
-                "avg_1d": avg_1d,
-                "volatility": volatility,
-                "volatility_pct": (volatility / avg_42w * 100) if avg_42w > 0 else 0,
-                "price_range": {
-                    "min": float(min(prices)),
-                    "max": float(max(prices)),
-                },
-                "trend_pct": trend_pct,  # positive = trending up (7d vs 42w)
-                "trend_7d_wow_pct": trend_7d_wow_pct,
-                "trend_30d_pct": trend_30d_pct,
-                "record_count": len(records),
-            }
+            for start in range(0, len(wanted), 500):
+                for record in app_session.query(MarketHistoryModel).filter(
+                    and_(
+                        MarketHistoryModel.type_id.in_(wanted[start:start + 500]),
+                        MarketHistoryModel.region_id == region_id,
+                        MarketHistoryModel.date >= cutoff_str,
+                    )
+                ).order_by(MarketHistoryModel.type_id, MarketHistoryModel.date):
+                    by_type[int(record.type_id)].append(record)
         finally:
             try:
                 app_session.close()
             except SQLAlchemyError:
                 pass
+        return {t: self._price_stats_of(records) for t, records in by_type.items()}
+
+    @staticmethod
+    def _price_stats_of(records: list[Any]) -> dict[str, Any]:
+        """The price statistics of one type's history records, oldest first."""
+        if not records:
+            return {
+                "has_data": False,
+                "avg_42w": None,
+                "avg_7d": None,
+                "avg_30d": None,
+                "avg_1d": None,
+                "volatility": None,
+                "price_range": None,
+                "trend": None,
+                "trend_30d_pct": None,
+            }
+
+        prices = [float(r.close) for r in records if r.close and r.close > 0]
+        if not prices:
+            return {
+                "has_data": False,
+                "avg_42w": None,
+                "avg_7d": None,
+                "avg_30d": None,
+                "avg_1d": None,
+                "volatility": None,
+                "price_range": None,
+                "trend": None,
+                "trend_30d_pct": None,
+            }
+
+        # 42-week average
+        avg_42w = float(statistics.mean(prices))
+
+        # 7-day average (last 7 records)
+        prices_7d = prices[-7:] if len(prices) >= 7 else prices
+        avg_7d = float(statistics.mean(prices_7d))
+
+        # 30-day average (last 30 records)
+        avg_30d = float(statistics.mean(prices[-30:])) if len(prices) >= 30 else None
+
+        # 1-day (last price)
+        avg_1d = prices[-1] if prices else None
+
+        # Volatility (std dev)
+        volatility = float(statistics.stdev(prices)) if len(prices) > 1 else 0.0
+
+        # Price trend (7d vs 42w)
+        trend_pct = ((avg_7d - avg_42w) / avg_42w * 100) if avg_42w > 0 else 0
+
+        # Price trend (7d vs 30d)
+        trend_30d_pct = ((avg_7d - avg_30d) / avg_30d * 100) if (avg_30d is not None and avg_30d > 0) else None
+
+        # The last 7 days against the 7 before them; None under 14 days of history.
+        prior_7d = float(statistics.mean(prices[-14:-7])) if len(prices) >= 14 else None
+        trend_7d_wow_pct = ((avg_7d - prior_7d) / prior_7d * 100) if prior_7d else None
+
+        return {
+            "has_data": True,
+            "avg_42w": avg_42w,
+            "avg_7d": avg_7d,
+            "avg_30d": avg_30d,
+            "avg_1d": avg_1d,
+            "volatility": volatility,
+            "volatility_pct": (volatility / avg_42w * 100) if avg_42w > 0 else 0,
+            "price_range": {
+                "min": float(min(prices)),
+                "max": float(max(prices)),
+            },
+            "trend_pct": trend_pct,  # positive = trending up (7d vs 42w)
+            "trend_7d_wow_pct": trend_7d_wow_pct,
+            "trend_30d_pct": trend_30d_pct,
+            "record_count": len(records),
+        }
 
     def get_volume_stats(
         self,

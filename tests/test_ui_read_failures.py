@@ -682,13 +682,6 @@ def test_well_formed_type_ids_still_reach_the_service(industry_client, monkeypat
     assert industry_client.get("/industry/track_record?type_ids=").get_json()["data"] == {}
 
 
-@pytest.mark.parametrize("value", ["0", "-3", "abc", "2.5"])
-def test_a_non_positive_or_malformed_industry_profile_id_query_is_a_400(industry_client, value):
-    resp = industry_client.get(f"/industry_products/1?industry_profile_id={value}")
-    assert resp.status_code == 400
-    assert "industry_profile_id" in resp.get_json()["message"]
-
-
 @pytest.mark.parametrize("path", ["/industry_products/1/refresh"])
 @pytest.mark.parametrize("value", [0, -1, True, "x", 2.5])
 def test_a_non_positive_or_malformed_industry_profile_id_payload_is_a_400(industry_client, path, value):

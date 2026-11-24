@@ -37,7 +37,6 @@ def calls(monkeypatch):
 
 
 @pytest.mark.parametrize("method, path", [
-    ("get", "/industry_products/1"),
     ("post", "/industry_products/1/refresh"),
 ])
 def test_false_strings_are_false_on_every_route(calls, method, path):
@@ -51,7 +50,6 @@ def test_false_strings_are_false_on_every_route(calls, method, path):
 
 
 @pytest.mark.parametrize("method, path", [
-    ("get", "/industry_products/1"),
     ("post", "/industry_products/1/refresh"),
 ])
 def test_absent_values_keep_the_defaults(calls, method, path):

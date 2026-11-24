@@ -74,6 +74,24 @@ def day_sized_runs(*, seconds_per_run: float, room_runs: int, deadlines: list[fl
     return None
 
 
+def batch_fraction(decision: ItemDecision, runs: int | None) -> float | None:
+    batch = orow.get_manufacturing_job(decision.overview_row).get("runs")
+    if runs is None or not isinstance(batch, int) or isinstance(batch, bool) or batch <= 0:
+        return None
+    return runs / batch
+
+
+def slot_day_profit(decision: ItemDecision, runs: int | None) -> float:
+    """The job's profit per day it holds a slot: jobs are checked once a day,
+    so a job holds its slot for whole days, at least one. 0 when unknown."""
+    fraction = batch_fraction(decision, runs)
+    seconds = orow.get_elapsed_time_seconds(decision.overview_row)
+    if fraction is None or not seconds or seconds <= 0:
+        return 0.0
+    days = max(1, math.ceil(seconds * fraction / DAY_SECONDS))
+    return (getattr(decision, "absolute_profit_per_batch", None) or 0.0) * fraction / days
+
+
 class ItemDecisionEngine:
     """Phase 4: assign a decision to each scored item."""
 
@@ -90,6 +108,7 @@ class ItemDecisionEngine:
         fees unknown) its reason says so. The scores
         stay on that bound, labelled."""
         decision = self._decide(scored, pipeline, overview_row, admin_settings, meta_group_id, margin_known)
+        decision.accuracy_ema = float(getattr(scored, "accuracy_ema", 1.0) or 1.0)
         upper_bound = orow.get_profit_upper_bound_reason(overview_row)
         if upper_bound is not None:
             decision.profit_is_upper_bound = True
@@ -186,8 +205,6 @@ class ItemDecisionEngine:
         computed: dict[str, Any] = {}
 
         def _result(decision: str, reason: str) -> ItemDecision:
-            if decision == "skip" and declining:
-                reason += "; declining market (no active jobs)"
             return ItemDecision(
                 type_id=type_id,
                 type_name=type_name,
@@ -208,6 +225,12 @@ class ItemDecisionEngine:
                 **computed,
             )
 
+        if declining:
+            # No active jobs (those pause above): no first batch into a falling market either.
+            parts = ([f"price trend {price_trend_7d:.1f}% < -8%"] if price_trend_7d < -8.0 else []) + (
+                [f"momentum signal {momentum_signal:.1f} < {momentum_pause_threshold:.1f}"]
+                if momentum_signal < momentum_pause_threshold else [])
+            return _result("watch", "Watch: declining market (" + ", ".join(parts) + ")")
         if pipeline.velocity_unknown_reason is not None:
             return _result("skip", f"not built: sell velocity unknown ({pipeline.velocity_unknown_reason})")
         if not margin_known:

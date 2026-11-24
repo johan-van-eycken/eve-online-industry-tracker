@@ -109,90 +109,93 @@ class PilotModifiersMixin:
             return []
 
         session: Any = self._sessions.sde_session()
-        language = getattr(getattr(self._state, "db_sde", None), "language", None) or "en"
-        type_map = get_type_data(session, language, implant_type_ids)
+        try:
+            language = getattr(getattr(self._state, "db_sde", None), "language", None) or "en"
+            type_map = get_type_data(session, language, implant_type_ids)
 
-        dogma_rows = session.execute(
-            text("SELECT id, dogmaAttributes FROM typeDogma WHERE id IN :ids").bindparams(bindparam("ids", expanding=True)),
-            {"ids": implant_type_ids},
-        ).fetchall()
-
-        attr_map_by_type_id: dict[int, dict[int, float]] = {}
-        attribute_ids: set[int] = set()
-        for type_id, attributes_raw in dogma_rows:
-            attr_map: dict[int, float] = {}
-            try:
-                attributes = json.loads(attributes_raw) if isinstance(attributes_raw, str) else (attributes_raw or [])
-            except (TypeError, ValueError) as exc:
-                logger.warning("Implants: the dogma attributes of type %s cannot be parsed (%s); its industry bonuses "
-                               "are left out", type_id, exc)
-                attributes = []
-            for attribute in attributes or []:
-                if not isinstance(attribute, dict):
-                    continue
-                attribute_id = attribute.get("attributeID")
-                raw_value = attribute.get("value")
-                if attribute_id is None or raw_value is None:
-                    continue
-                try:
-                    parsed_attribute_id = int(attribute_id)
-                    parsed_value = float(raw_value)
-                except (TypeError, ValueError):
-                    continue
-                attr_map[parsed_attribute_id] = parsed_value
-                attribute_ids.add(parsed_attribute_id)
-            attr_map_by_type_id[int(type_id)] = attr_map
-
-        attribute_name_by_id: dict[int, str] = {}
-        if attribute_ids:
-            attribute_rows = session.execute(
-                text("SELECT id, name FROM dogmaAttributes WHERE id IN :ids").bindparams(bindparam("ids", expanding=True)),
-                {"ids": sorted(attribute_ids)},
+            dogma_rows = session.execute(
+                text("SELECT id, dogmaAttributes FROM typeDogma WHERE id IN :ids").bindparams(bindparam("ids", expanding=True)),
+                {"ids": implant_type_ids},
             ).fetchall()
-            attribute_name_by_id = {int(row[0]): str(row[1] or "") for row in attribute_rows}
 
-        implants_out: list[dict[str, Any]] = []
-        for implant_type_id in implant_type_ids:
-            type_payload = type_map.get(int(implant_type_id)) or {}
-            modifier_entries: list[dict[str, Any]] = []
-            for attribute_id, raw_value in (attr_map_by_type_id.get(int(implant_type_id)) or {}).items():
-                attribute_name = attribute_name_by_id.get(int(attribute_id)) or ""
-                if not self._is_industry_modifier_attribute(attribute_name):
+            attr_map_by_type_id: dict[int, dict[int, float]] = {}
+            attribute_ids: set[int] = set()
+            for type_id, attributes_raw in dogma_rows:
+                attr_map: dict[int, float] = {}
+                try:
+                    attributes = json.loads(attributes_raw) if isinstance(attributes_raw, str) else (attributes_raw or [])
+                except (TypeError, ValueError) as exc:
+                    logger.warning("Implants: the dogma attributes of type %s cannot be parsed (%s); its industry bonuses "
+                                   "are left out", type_id, exc)
+                    attributes = []
+                for attribute in attributes or []:
+                    if not isinstance(attribute, dict):
+                        continue
+                    attribute_id = attribute.get("attributeID")
+                    raw_value = attribute.get("value")
+                    if attribute_id is None or raw_value is None:
+                        continue
+                    try:
+                        parsed_attribute_id = int(attribute_id)
+                        parsed_value = float(raw_value)
+                    except (TypeError, ValueError):
+                        continue
+                    attr_map[parsed_attribute_id] = parsed_value
+                    attribute_ids.add(parsed_attribute_id)
+                attr_map_by_type_id[int(type_id)] = attr_map
+
+            attribute_name_by_id: dict[int, str] = {}
+            if attribute_ids:
+                attribute_rows = session.execute(
+                    text("SELECT id, name FROM dogmaAttributes WHERE id IN :ids").bindparams(bindparam("ids", expanding=True)),
+                    {"ids": sorted(attribute_ids)},
+                ).fetchall()
+                attribute_name_by_id = {int(row[0]): str(row[1] or "") for row in attribute_rows}
+
+            implants_out: list[dict[str, Any]] = []
+            for implant_type_id in implant_type_ids:
+                type_payload = type_map.get(int(implant_type_id)) or {}
+                modifier_entries: list[dict[str, Any]] = []
+                for attribute_id, raw_value in (attr_map_by_type_id.get(int(implant_type_id)) or {}).items():
+                    attribute_name = attribute_name_by_id.get(int(attribute_id)) or ""
+                    if not self._is_industry_modifier_attribute(attribute_name):
+                        continue
+                    activity, metric = self._classify_industry_modifier_attribute(attribute_name)
+                    if activity is None:
+                        continue
+                    if metric not in {"material", "time", "cost"}:
+                        continue
+                    modifier_entries.append(
+                        {
+                            "attribute_id": int(attribute_id),
+                            "attribute_name": attribute_name,
+                            "activity": activity,
+                            "metric": metric,
+                            "value": float(raw_value),
+                        }
+                    )
+
+                if not modifier_entries:
                     continue
-                activity, metric = self._classify_industry_modifier_attribute(attribute_name)
-                if activity is None:
-                    continue
-                if metric not in {"material", "time", "cost"}:
-                    continue
-                modifier_entries.append(
+
+                implants_out.append(
                     {
-                        "attribute_id": int(attribute_id),
-                        "attribute_name": attribute_name,
-                        "activity": activity,
-                        "metric": metric,
-                        "value": float(raw_value),
+                        "type_id": int(implant_type_id),
+                        "type_name": type_payload.get("type_name") or str(implant_type_id),
+                        "modifiers": sorted(
+                            modifier_entries,
+                            key=lambda entry: (
+                                str(entry.get("activity") or ""),
+                                str(entry.get("metric") or ""),
+                                str(entry.get("attribute_name") or ""),
+                            ),
+                        ),
                     }
                 )
 
-            if not modifier_entries:
-                continue
-
-            implants_out.append(
-                {
-                    "type_id": int(implant_type_id),
-                    "type_name": type_payload.get("type_name") or str(implant_type_id),
-                    "modifiers": sorted(
-                        modifier_entries,
-                        key=lambda entry: (
-                            str(entry.get("activity") or ""),
-                            str(entry.get("metric") or ""),
-                            str(entry.get("attribute_name") or ""),
-                        ),
-                    ),
-                }
-            )
-
-        return implants_out
+            return implants_out
+        finally:
+            session.close()
 
     def _get_character_industry_modifier_payload(self, *, character_id: int | None) -> dict[str, Any] | None:
         if character_id is None:

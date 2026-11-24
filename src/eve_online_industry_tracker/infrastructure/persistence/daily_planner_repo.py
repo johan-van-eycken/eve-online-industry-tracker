@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import Any
 
@@ -17,6 +18,8 @@ from eve_online_industry_tracker.infrastructure.models import (
     PlanLearningWeightsModel,
 )
 from eve_online_industry_tracker.infrastructure.session_provider import SessionProvider
+
+logger = logging.getLogger(__name__)
 
 
 class DailyPlannerRepository:
@@ -51,6 +54,31 @@ class DailyPlannerRepository:
                 synchronize_session="fetch",
             )
             session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    def publish_plan(
+        self, plan: BuildPlanModel, items: list[BuildPlanItemModel], actions: list[DailyActionLogModel],
+    ) -> int:
+        """Archive the active plan and insert `plan` (active) with its items and
+        actions, in one transaction: on any error nothing changes and the old
+        plan stays active. Returns the new plan's id."""
+        session = self._session_provider.app_session()
+        try:
+            session.query(BuildPlanModel).filter(BuildPlanModel.status == "active").update(
+                {"status": "archived", "updated_at": _now()}, synchronize_session="fetch",
+            )
+            session.add(plan)
+            session.flush()
+            plan_id = int(plan.id)
+            for row in (*items, *actions):
+                row.plan_id = plan_id
+            session.add_all([*items, *actions])
+            session.commit()
+            return plan_id
         except Exception:
             session.rollback()
             raise
@@ -263,19 +291,28 @@ class DailyPlannerRepository:
         action_id: int,
         outcome: PlanItemOutcomeModel | None,
         weights: PlanLearningWeightsModel | None,
-    ) -> None:
+    ) -> bool:
         """Write an action's outcome and weights and mark it processed in one
-        commit, so a failed step never leaves it half counted."""
+        commit, so a failed step never leaves it half counted. False (nothing
+        written) when the action is no longer done and unprocessed: the user
+        set it back to pending while the compute ran."""
         session = self._session_provider.app_session()
         try:
+            marked = session.query(DailyActionLogModel).filter(
+                DailyActionLogModel.id == action_id,
+                DailyActionLogModel.status == "done",
+                DailyActionLogModel.processed_for_feedback.is_(False),
+            ).update({"processed_for_feedback": True}, synchronize_session="fetch")
+            if not marked:
+                session.rollback()
+                logger.info("DailyPlannerRepo: action_id=%s is no longer done; no feedback recorded", action_id)
+                return False
             if outcome is not None:
                 session.add(outcome)
             if weights is not None:
                 session.execute(_weights_upsert(weights))
-            session.query(DailyActionLogModel).filter(
-                DailyActionLogModel.id == action_id
-            ).update({"processed_for_feedback": True}, synchronize_session="fetch")
             session.commit()
+            return True
         except Exception:
             session.rollback()
             raise

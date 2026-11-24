@@ -1113,3 +1113,31 @@ def test_an_unchanged_cost_is_not_stale(app_session):
     ledger.rebuild(corporation_id=CORP)
     _set_job_cost(app_session, 70.0)
     assert _corp_stale(ledger) == set()
+
+
+def test_a_self_trade_sells_the_old_lot_whatever_its_row_order(session_provider) -> None:
+    """Audit 15 (not a bug): FIFO sells the oldest lot, so a self-trade's buy half
+    read first does not become the lot its sell half uses."""
+    app_session, sde_session = session_provider.app_session(), session_provider.sde_session()
+    app_session.add(CharacterModel(character_id=1, character_name="Test Character"))
+
+    def tx(tid, date, is_buy, price):
+        return CharacterWalletTransactionsModel(
+            character_id=1, transaction_id=tid, client_name="x", date=date, is_buy=is_buy, is_personal=True,
+            journal_ref_id=None, quantity=5, type_id=101, type_name="Widget", type_group_name="Ammo",
+            type_category_name="Charge", unit_price=price, total_price=price * 5,
+        )
+
+    app_session.add_all([
+        tx(100, "2026-01-01T00:00:00Z", True, 10.0),     # the old lot
+        tx(200, "2026-01-05T00:00:00Z", True, 50.0),     # the self-trade's buy half, stored first
+        tx(200, "2026-01-05T00:00:00Z", False, 50.0),    # and its sell half
+    ])
+    app_session.commit()
+    service = CharacterRealizedProfitLedgerService(app_session=app_session, sde_session=sde_session, market_prices=[])
+    load = service._load_wallet_transactions
+    # Today SQLite happens to return the sell half first (index order); force the other order.
+    service._load_wallet_transactions = lambda **kw: sorted(load(**kw), key=lambda t: not t.is_buy)
+    service.rebuild(character_id=1)
+    (sale,) = app_session.query(CharacterRealizedSalesLedgerModel).filter_by(character_id=1).all()
+    assert sale.allocated_cost == pytest.approx(50.0)    # 5 units x 10 from the old lot, not x 50

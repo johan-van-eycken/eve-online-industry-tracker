@@ -66,10 +66,12 @@ class CharacterModel(BaseApp):
 
 class CharacterWalletJournalModel(BaseApp):
     __tablename__ = "character_wallet_journal"
+    # Per pilot: a transfer between two own pilots is one journal id on both sides.
+    __table_args__ = (UniqueConstraint("character_id", "wallet_journal_id", name="uq_character_wallet_journal_owner_id"),)
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     character_id: Mapped[int] = mapped_column(Integer, nullable=False)
-    wallet_journal_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False)
+    wallet_journal_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     amount: Mapped[float] = mapped_column(Float, nullable=False)
     balance: Mapped[float] = mapped_column(Float, nullable=False)
     context_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
@@ -116,11 +118,14 @@ class CharacterWalletTransactionsModel(BaseApp):
 
 class CorporationWalletJournalModel(BaseApp):
     __tablename__ = "corporation_wallet_journal"
+    # Per division: both sides of a transfer between divisions may carry one journal id.
+    __table_args__ = (UniqueConstraint(
+        "corporation_id", "division", "wallet_journal_id", name="uq_corporation_wallet_journal_owner_id"),)
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     corporation_id: Mapped[int] = mapped_column(Integer, nullable=False)
     division: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    wallet_journal_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False)
+    wallet_journal_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     amount: Mapped[float] = mapped_column(Float, nullable=False)
     balance: Mapped[float] = mapped_column(Float, nullable=False)
     context_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)

@@ -582,7 +582,33 @@ class ESIClient:
         """Refresh the access token when it is missing or expired, once across threads."""
         with self._token_refresh_lock:
             if not self.access_token or (self.token_expiry and time.time() > self.token_expiry):
-                self.refresh_access_token()
+                if not self._adopt_stored_token():
+                    self.refresh_access_token()
+
+    def _adopt_stored_token(self) -> bool:
+        """Take the stored tokens when another process (a script) refreshed this
+        pilot meanwhile: its refresh rotated the refresh token, so ours would
+        get HTTP 400. True when the stored access token is still valid."""
+        db = getattr(self, "db_oauth", None)
+        if db is None:
+            return False
+        try:
+            db.session.expire_all()
+            record = db.session.query(OAuthCharacter).filter_by(character_name=self.character_name).first()
+        except SQLAlchemyError:
+            self._rollback_quietly()
+            return False
+        try:
+            expiry = float(record.token_expiry) if record is not None and record.token_expiry else 0.0
+        except (TypeError, ValueError):
+            return False
+        if not expiry or expiry <= time.time() or not isinstance(record.access_token, str) or not record.access_token:
+            return False
+        if self.token_expiry and expiry <= float(self.token_expiry):
+            return False
+        self.access_token, self.refresh_token, self.token_expiry = record.access_token, record.refresh_token, int(expiry)
+        logging.info("ESI token of %s taken from the database (refreshed by another process).", self.character_name)
+        return True
 
     def refresh_access_token(self) -> None:
         """Refresh access token using stored refresh token."""
@@ -1074,7 +1100,7 @@ class ESIClient:
             query = "?" + urlencode(sorted(params.items()), doseq=True)
         cache_key = esi_cache_key(f"{endpoint}{query}")
 
-        headers = self._esi_headers()
+        etag_header: Dict[str, str] = {}
         cached_data: Optional[Any] = None
         cache_mode = "off"
         if use_cache:
@@ -1082,10 +1108,13 @@ class ESIClient:
             # Not for a paginated request: its pages are never cached as a whole, so a 304
             # would give another request's (first page's) data.
             if cached_etag and not paginate:
-                headers = {**headers, "If-None-Match": cached_etag}
+                etag_header = {"If-None-Match": cached_etag}
             cache_mode = "enabled_with_entry" if has_entry else "enabled_no_entry"
 
         def _get(url: str, page: Optional[int]) -> Tuple[int, Any, Any]:
+            # Per page: a long paginated walk can outlive the access token.
+            self._ensure_fresh_token()
+            headers = {**self._esi_headers(), **etag_header}
             return self._send_with_retries(
                 "GET", endpoint, url,
                 lambda: self._http_session.get(url, headers=headers, timeout=float(timeout_seconds)),

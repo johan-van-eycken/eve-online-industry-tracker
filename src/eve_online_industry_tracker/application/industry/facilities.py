@@ -260,31 +260,40 @@ class FacilitiesMixin:
             raise ServiceError("Type ID is required.", status_code=400)
 
         session: Any = self._sessions.sde_session()
-        language = getattr(getattr(self._state, "db_sde", None), "language", None) or "en"
+        try:
+            language = getattr(getattr(self._state, "db_sde", None), "language", None) or "en"
 
-        row = session.execute(
-            text("SELECT id, roleBonuses, miscBonuses, types FROM typeBonus WHERE id = :id"),
-            {"id": int(type_id)},
-        ).mappings().fetchone()
+            row = session.execute(
+                text("SELECT id, roleBonuses, miscBonuses, types FROM typeBonus WHERE id = :id"),
+                {"id": int(type_id)},
+            ).mappings().fetchone()
 
-        if not row:
-            return {"type_id": int(type_id), "bonuses": {"material_reduction": 0.0, "time_reduction": 0.0, "cost_reduction": 0.0}}
+            if not row:
+                return {"type_id": int(type_id), "bonuses": {"material_reduction": 0.0, "time_reduction": 0.0, "cost_reduction": 0.0}}
 
-        bonuses = self._extract_structure_industry_bonuses_from_type_bonus(dict(row), language=language)
-        return {"type_id": int(type_id), "bonuses": bonuses}
+            bonuses = self._extract_structure_industry_bonuses_from_type_bonus(dict(row), language=language)
+            return {"type_id": int(type_id), "bonuses": bonuses}
+        finally:
+            session.close()
 
     def solar_systems(self) -> Any:
         session: Any = self._sessions.sde_session()
-        language = getattr(getattr(self._state, "db_sde", None), "language", None) or "en"
-        return get_solar_systems(session, language)
+        try:
+            language = getattr(getattr(self._state, "db_sde", None), "language", None) or "en"
+            return get_solar_systems(session, language)
+        finally:
+            session.close()
 
     def npc_stations(self, *, system_id: int) -> Any:
         if not system_id:
             raise ServiceError("System ID is required to fetch NPC stations.", status_code=400)
 
         session: Any = self._sessions.sde_session()
-        language = getattr(getattr(self._state, "db_sde", None), "language", None) or "en"
-        return get_npc_stations(session, language, system_id)
+        try:
+            language = getattr(getattr(self._state, "db_sde", None), "language", None) or "en"
+            return get_npc_stations(session, language, system_id)
+        finally:
+            session.close()
 
     def public_structures(self, *, system_id: int) -> tuple[list[dict], dict]:
         if not system_id:
@@ -309,29 +318,32 @@ class FacilitiesMixin:
         type_ids = list({s["type_id"] for s in public_structures if s.get("type_id") is not None})
         owner_ids = list({int(s["owner_id"]) for s in public_structures if s.get("owner_id") is not None})
         session = self._sessions.sde_session()
-        language = getattr(getattr(self._state, "db_sde", None), "language", None) or "en"
-        type_map = get_type_data(session, language, type_ids)
-
-        owner_name_map: dict[int, str] = {}
         try:
-            if owner_ids and self._state.esi_service is not None:
-                resolved = self._state.esi_service.get_universe_names(owner_ids)
-                owner_name_map = {int(k): ((v or {}).get("name") or "") for k, v in resolved.items()}
-        except _ESI_ERRORS as exc:
-            logger.warning("Public structures: owner names cannot be resolved (%s); the structures keep their "
-                           "owner IDs", exc)
-            owner_name_map = {}
+            language = getattr(getattr(self._state, "db_sde", None), "language", None) or "en"
+            type_map = get_type_data(session, language, type_ids)
 
-        enriched_structures = []
-        for s in public_structures:
-            type_id = s.get("type_id")
-            extra = type_map.get(int(type_id), {}) if type_id is not None else {}
-            owner_id = s.get("owner_id")
-            owner_name = owner_name_map.get(int(owner_id)) if owner_id is not None else None
-            enriched_structures.append({**s, **extra, "owner_name": owner_name})
+            owner_name_map: dict[int, str] = {}
+            try:
+                if owner_ids and self._state.esi_service is not None:
+                    resolved = self._state.esi_service.get_universe_names(owner_ids)
+                    owner_name_map = {int(k): ((v or {}).get("name") or "") for k, v in resolved.items()}
+            except _ESI_ERRORS as exc:
+                logger.warning("Public structures: owner names cannot be resolved (%s); the structures keep their "
+                               "owner IDs", exc)
+                owner_name_map = {}
 
-        meta = {"refreshing": refreshing, "cache_fresh": is_fresh}
-        return enriched_structures, meta
+            enriched_structures = []
+            for s in public_structures:
+                type_id = s.get("type_id")
+                extra = type_map.get(int(type_id), {}) if type_id is not None else {}
+                owner_id = s.get("owner_id")
+                owner_name = owner_name_map.get(int(owner_id)) if owner_id is not None else None
+                enriched_structures.append({**s, **extra, "owner_name": owner_name})
+
+            meta = {"refreshing": refreshing, "cache_fresh": is_fresh}
+            return enriched_structures, meta
+        finally:
+            session.close()
 
     def corporation_structures(self, *, character_id: int) -> list[dict]:
         if not character_id:
@@ -361,12 +373,15 @@ class FacilitiesMixin:
             type_ids = sorted(set(type_ids))
             if type_ids:
                 sde_session: Any = self._sessions.sde_session()
-                language = getattr(getattr(self._state, "db_sde", None), "language", None) or "en"
-                type_map = get_type_data(sde_session, language, type_ids)
-                for s in out:
-                    tid = s.get("type_id")
-                    extra = type_map.get(int(tid), {}) if tid is not None else {}
-                    s.update(extra)
+                try:
+                    language = getattr(getattr(self._state, "db_sde", None), "language", None) or "en"
+                    type_map = get_type_data(sde_session, language, type_ids)
+                    for s in out:
+                        tid = s.get("type_id")
+                        extra = type_map.get(int(tid), {}) if tid is not None else {}
+                        s.update(extra)
+                finally:
+                    sde_session.close()
         except SQLAlchemyError as exc:
             logger.warning("Corporation structures: type data cannot be read (%s); the structures keep their type IDs",
                            exc)
@@ -398,8 +413,11 @@ class FacilitiesMixin:
 
     def industry_profiles(self, *, character_id: int) -> list[dict]:
         session: Any = self._sessions.app_session()
-        profiles = industry_profile_list_by_character_id(session, character_id)
-        return [p.to_dict() for p in profiles]
+        try:
+            profiles = industry_profile_list_by_character_id(session, character_id)
+            return [p.to_dict() for p in profiles]
+        finally:
+            session.close()
 
     def industry_profile_context(self, profile_id: int) -> dict[str, Any] | None:
         """The industry profile as the producer resolves it: the profile plus
@@ -512,35 +530,38 @@ class FacilitiesMixin:
         selected_rig_type_ids = [int(type_id) for type_id in rig_slot_type_ids if type_id is not None and int(type_id) > 0]
         if selected_rig_type_ids:
             sde_session: Any = self._sessions.sde_session()
-            language = getattr(getattr(self._state, "db_sde", None), "language", None) or "en"
-            rig_type_map = get_type_data(sde_session, language, selected_rig_type_ids)
-            rig_effects_by_type_id = {
-                int(entry.get("type_id") or 0): entry
-                for entry in get_rig_effects_for_type_ids(sde_session, selected_rig_type_ids)
-                if isinstance(entry, dict) and int(entry.get("type_id") or 0) > 0
-            }
-            structure_rigs: list[dict[str, Any]] = []
-            for slot_index, raw_type_id in enumerate(rig_slot_type_ids):
-                if raw_type_id is None:
-                    continue
-                rig_type_id = int(raw_type_id)
-                if rig_type_id <= 0:
-                    continue
-                rig_type_payload = rig_type_map.get(rig_type_id) or {}
-                rig_effect_payload = rig_effects_by_type_id.get(rig_type_id) or {}
-                structure_rigs.append(
-                    {
-                        "slot_index": slot_index,
-                        "type_id": rig_type_id,
-                        "type_name": rig_type_payload.get("type_name") or str(rig_type_id),
-                        "material_reduction": rig_effect_payload.get("material_reduction"),
-                        "time_reduction": rig_effect_payload.get("time_reduction"),
-                        "cost_reduction": rig_effect_payload.get("cost_reduction"),
-                        "security_multipliers": rig_effect_payload.get("security_multipliers"),
-                        "effects": rig_effect_payload.get("effects") or [],
-                    }
-                )
-            profile_payload["structure_rigs"] = structure_rigs
+            try:
+                language = getattr(getattr(self._state, "db_sde", None), "language", None) or "en"
+                rig_type_map = get_type_data(sde_session, language, selected_rig_type_ids)
+                rig_effects_by_type_id = {
+                    int(entry.get("type_id") or 0): entry
+                    for entry in get_rig_effects_for_type_ids(sde_session, selected_rig_type_ids)
+                    if isinstance(entry, dict) and int(entry.get("type_id") or 0) > 0
+                }
+                structure_rigs: list[dict[str, Any]] = []
+                for slot_index, raw_type_id in enumerate(rig_slot_type_ids):
+                    if raw_type_id is None:
+                        continue
+                    rig_type_id = int(raw_type_id)
+                    if rig_type_id <= 0:
+                        continue
+                    rig_type_payload = rig_type_map.get(rig_type_id) or {}
+                    rig_effect_payload = rig_effects_by_type_id.get(rig_type_id) or {}
+                    structure_rigs.append(
+                        {
+                            "slot_index": slot_index,
+                            "type_id": rig_type_id,
+                            "type_name": rig_type_payload.get("type_name") or str(rig_type_id),
+                            "material_reduction": rig_effect_payload.get("material_reduction"),
+                            "time_reduction": rig_effect_payload.get("time_reduction"),
+                            "cost_reduction": rig_effect_payload.get("cost_reduction"),
+                            "security_multipliers": rig_effect_payload.get("security_multipliers"),
+                            "effects": rig_effect_payload.get("effects") or [],
+                        }
+                    )
+                profile_payload["structure_rigs"] = structure_rigs
+            finally:
+                sde_session.close()
 
         return profile_payload
 
@@ -551,13 +572,16 @@ class FacilitiesMixin:
         if structure_type_id in cache:
             return cache[structure_type_id]
         session: Any = self._sessions.sde_session()
-        module_ids = [t for ids in _industry_facility.SERVICE_MODULE_TYPE_IDS.values() for t in ids]
-        fits = _industry_facility.structure_service_fits(
-            structure_type_id, get_type_group_id(session, structure_type_id),
-            get_service_module_fits(session, module_ids),
-        )
-        cache[structure_type_id] = fits
-        return fits
+        try:
+            module_ids = [t for ids in _industry_facility.SERVICE_MODULE_TYPE_IDS.values() for t in ids]
+            fits = _industry_facility.structure_service_fits(
+                structure_type_id, get_type_group_id(session, structure_type_id),
+                get_service_module_fits(session, module_ids),
+            )
+            cache[structure_type_id] = fits
+            return fits
+        finally:
+            session.close()
 
     @classmethod
     def _profile_base_reduction(
@@ -849,45 +873,48 @@ class FacilitiesMixin:
             return cache[2]
 
         session: Any = self._sessions.sde_session()
-        language = getattr(getattr(self._state, "db_sde", None), "language", None) or "en"
+        try:
+            language = getattr(getattr(self._state, "db_sde", None), "language", None) or "en"
 
-        # Every published engineering and reactor rig, by SDE group (category
-        # 66 Structure Module): the industry rigs a profile can fit.
-        rows = session.execute(
-            text(
-                """
-                SELECT t.id, t.name
-                FROM types t JOIN groups g ON g.id = t.groupID
-                WHERE t.published = 1
-                  AND g.categoryID = 66
-                  AND (
-                        json_extract(g.name, '$.en') LIKE 'Structure Engineering Rig%'
-                     OR json_extract(g.name, '$.en') LIKE 'Structure %Reactor Rig%'
-                  )
-                ORDER BY t.id ASC
-                """
-            )
-        ).fetchall()
+            # Every published engineering and reactor rig, by SDE group (category
+            # 66 Structure Module): the industry rigs a profile can fit.
+            rows = session.execute(
+                text(
+                    """
+                    SELECT t.id, t.name
+                    FROM types t JOIN groups g ON g.id = t.groupID
+                    WHERE t.published = 1
+                      AND g.categoryID = 66
+                      AND (
+                            json_extract(g.name, '$.en') LIKE 'Structure Engineering Rig%'
+                         OR json_extract(g.name, '$.en') LIKE 'Structure %Reactor Rig%'
+                      )
+                    ORDER BY t.id ASC
+                    """
+                )
+            ).fetchall()
 
-        name_by_type_id: dict[int, str] = {}
-        for type_id, name_json in rows:
-            try:
-                name_obj = json.loads(name_json) if isinstance(name_json, str) else {}
-            except ValueError:
-                name_obj = {}  # cosmetic: the rig is named by its type ID
-            if not isinstance(name_obj, dict):
-                name_obj = {}
-            name_by_type_id[int(type_id)] = name_obj.get(language) or name_obj.get("en") or str(type_id)
+            name_by_type_id: dict[int, str] = {}
+            for type_id, name_json in rows:
+                try:
+                    name_obj = json.loads(name_json) if isinstance(name_json, str) else {}
+                except ValueError:
+                    name_obj = {}  # cosmetic: the rig is named by its type ID
+                if not isinstance(name_obj, dict):
+                    name_obj = {}
+                name_by_type_id[int(type_id)] = name_obj.get(language) or name_obj.get("en") or str(type_id)
 
-        rigs_out: list[dict] = [
-            {**rig, "name": name_by_type_id.get(int(rig["type_id"]), str(rig["type_id"]))}
-            for rig in get_rig_effects_for_type_ids(session, list(name_by_type_id))
-            if rig.get("effects")
-        ]
+            rigs_out: list[dict] = [
+                {**rig, "name": name_by_type_id.get(int(rig["type_id"]), str(rig["type_id"]))}
+                for rig in get_rig_effects_for_type_ids(session, list(name_by_type_id))
+                if rig.get("effects")
+            ]
 
-        rigs_out.sort(key=lambda r: r["name"])
-        self._state._structure_rigs_cache = (now, self._STRUCTURE_RIGS_CACHE_VERSION, rigs_out)
-        return rigs_out
+            rigs_out.sort(key=lambda r: r["name"])
+            self._state._structure_rigs_cache = (now, self._STRUCTURE_RIGS_CACHE_VERSION, rigs_out)
+            return rigs_out
+        finally:
+            session.close()
 
     def create_industry_profile(self, *, data: dict) -> int:
         character_id = data.get("character_id")
@@ -895,12 +922,21 @@ class FacilitiesMixin:
             raise ServiceError("Character ID is required to create an industry profile.", status_code=400)
 
         session: Any = self._sessions.app_session()
-        return industry_profile_create(session, data)
+        try:
+            return industry_profile_create(session, data)
+        finally:
+            session.close()
 
     def update_industry_profile(self, *, profile_id: int, data: dict) -> None:
         session: Any = self._sessions.app_session()
-        industry_profile_update(session, profile_id, data)
+        try:
+            industry_profile_update(session, profile_id, data)
+        finally:
+            session.close()
 
     def delete_industry_profile(self, *, profile_id: int) -> None:
         session: Any = self._sessions.app_session()
-        industry_profile_delete(session, profile_id)
+        try:
+            industry_profile_delete(session, profile_id)
+        finally:
+            session.close()

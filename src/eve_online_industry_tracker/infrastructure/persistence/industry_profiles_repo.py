@@ -57,6 +57,11 @@ def create(session, data: dict[str, Any]) -> int:
         rig_slot1_type_id=data.get("rig_slot1_type_id"),
         rig_slot2_type_id=data.get("rig_slot2_type_id"),
     )
+    if profile.is_default:
+        # One default per character, as update() keeps it.
+        session.query(IndustryProfilesModel).filter(
+            IndustryProfilesModel.character_id == profile.character_id,
+        ).update({"is_default": False})
     session.add(profile)
     session.commit()
     return int(profile.id)

@@ -517,14 +517,6 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
                 "help": "The hour (this machine's time zone) you deliver and start jobs each day; "
                         "BPO batches are sized to end before it.",
             },
-            "planner_min_isk_per_hour": {
-                "type": "int",
-                "default": 2_000_000,
-                "min": 100_000,
-                "max": 100_000_000,
-                "label": "Minimum ISK/hour for build decision",
-                "help": "No longer used by the daily planner.",
-            },
             "planner_price_drift_threshold_pct": {
                 "type": "float",
                 "default": 5.0,
@@ -687,14 +679,6 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
                 "max": 168,
                 "label": "Max plan age before expired mode (hours)",
                 "help": "Plan age above which the UI switches to expired mode and hides Tab 1 actions.",
-            },
-            "planner_min_profit_per_batch": {
-                "type": "int",
-                "default": 10_000_000,
-                "min": 1_000_000,
-                "max": 500_000_000,
-                "label": "Minimum profit per batch (ISK)",
-                "help": "No longer used by the daily planner.",
             },
             "planner_price_outlier_sigma": {
                 "type": "float",
@@ -1034,10 +1018,13 @@ class AdminSettingsManager:
         spec = self._spec(category, key)
         coerced = self._coerce_named(category, key, value, spec)
         with self._lock:
-            self._data.setdefault(category, {})[key] = coerced
+            # Written first, applied after: a failed save leaves the running values as stored.
+            data = {c: dict(v) for c, v in self._data.items()}
+            data.setdefault(category, {})[key] = coerced
+            self._persist(data)
+            self._data = data
             self._invalid.pop((category, key), None)
             self._notices = []   # the migrated values are in the file now
-            self._persist()
 
     def set_bulk(self, updates: dict[str, dict[str, Any]]) -> None:
         """Update multiple settings at once and persist. Every value is
@@ -1050,19 +1037,22 @@ class AdminSettingsManager:
                 spec = self._spec(category, key)
                 checked.append((category, key, self._coerce_named(category, key, value, spec)))
         with self._lock:
+            data = {c: dict(v) for c, v in self._data.items()}
             for category, key, coerced in checked:
-                self._data.setdefault(category, {})[key] = coerced
+                data.setdefault(category, {})[key] = coerced
+            self._persist(data)
+            self._data = data
+            for category, key, _coerced in checked:
                 self._invalid.pop((category, key), None)
             self._notices = []   # the migrated values are in the file now
-            self._persist()
 
     def reset_to_defaults(self) -> None:
         """Reset all settings to schema defaults and persist."""
         with self._lock:
+            self._persist({})
             self._data = {}
             self._invalid = {}
             self._notices = []
-            self._persist()
 
     # -- internals ----------------------------------------------------------
 
@@ -1183,8 +1173,8 @@ class AdminSettingsManager:
                 data.setdefault(category, {})[key] = coerced
         return data, invalid
 
-    def _persist(self) -> None:
-        """Write the settings (under self._lock). While the stored file
+    def _persist(self, data: dict[str, Any]) -> None:
+        """Write `data` as the settings (under self._lock). While the stored file
         could not be read (whole or a category), it is first copied to a
         timestamped .bak next to it, so the save does not silently destroy
         what was in it; a failed backup raises and nothing is written."""
@@ -1198,7 +1188,7 @@ class AdminSettingsManager:
                 logging.warning("Admin settings: %s", self._backed_up[0])
         self._path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self._path.with_suffix(self._path.suffix + ".tmp")
-        tmp.write_text(json.dumps(self._data, indent=2, sort_keys=True), encoding="utf-8")
+        tmp.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
         tmp.replace(self._path)
 
 

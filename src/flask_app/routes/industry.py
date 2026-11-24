@@ -161,21 +161,6 @@ def industry_profiles(character_id: int):
     return ok(data=svc.industry_profiles(character_id=character_id))
 
 
-@industry_bp.get("/industry_products/<int:character_id>")
-def industry_products(character_id: int):
-    require_ready(get_state())
-    require_sde_ready(get_state())
-    svc = IndustryService(state=get_state())
-    payload = svc.industry_manufacturing_product_overview_payload(
-        force_refresh=_flag(request.args, "refresh", False),
-        **_overview_params(request.args, character_id),
-    )
-    return ok(
-        data=payload.get("rows") or [],
-        meta={"pricing_batch": payload.get("pricing_batch") or {}},
-    )
-
-
 @industry_bp.post("/industry_products/<int:character_id>/refresh")
 def industry_products_refresh(character_id: int):
     require_ready(get_state())
