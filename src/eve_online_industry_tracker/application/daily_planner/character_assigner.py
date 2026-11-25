@@ -869,7 +869,7 @@ class CharacterAssigner:
         for gap in _stock.rank_gaps(gaps, ranking):
             if not any(int(s.get("free_research", 0)) > 0 for s in char_slots.values()):
                 break
-            note = f"stock: {gap.have:g} of {gap.want} BPCs"
+            note = f"stock: {round(gap.have, 2):g} of {gap.want} BPCs"
             bp = gap.blueprint_type_id
             if gap.kind == "copy":
                 row, fee, fee_why = _copy_fee(bp, gap.product_type_id)

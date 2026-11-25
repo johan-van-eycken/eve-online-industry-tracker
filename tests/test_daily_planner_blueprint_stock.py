@@ -227,3 +227,14 @@ def test_service_passes_the_stock_inputs():
         "bpo_assets_by_type_id": {998: ["bpo"]}, "bpc_assets_by_type_id": {998: ["bpc"]},
         "busy_blueprint_item_ids": {7}, "min_bpc": 3, "min_invented": 3,
     }
+
+
+def test_stock_note_rounds_expected_bpcs_to_two_decimals(monkeypatch):
+    """Jobs in flight count as chance-weighted BPCs (1.85867); the note shows 1.86."""
+    import eve_online_industry_tracker.application.daily_planner.blueprint_stock as stock
+    monkeypatch.setattr(stock, "count_in_progress", lambda jobs, probability: {998: 0.85867})
+    _assigner, actions = _stock_pass(
+        [_t2_skip_row()], [A._copier()], {998: [L._bpc(701, 998, 10)]}, min_invented=0,
+    )
+    (action,) = actions
+    assert action.notes.startswith("stock: 1.86 of 3 BPCs")

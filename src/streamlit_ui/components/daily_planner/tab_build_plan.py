@@ -49,12 +49,20 @@ def _fmt_pct(v: Any) -> str:
     if v is None:
         return "—"
     try:
-        return f"{float(v):.1f}%"
+        return f"{float(v):.2f}%"
     except (TypeError, ValueError):
         return "—"
 
 
-def _fmt_num(v: Any, decimals: int = 1) -> str:
+def _round2(v: Any) -> float | None:
+    """A numeric table cell at 2 decimals; stays a number so the grid sorts it."""
+    try:
+        return None if v is None else round(float(v), 2)
+    except (TypeError, ValueError):
+        return None
+
+
+def _fmt_num(v: Any, decimals: int = 2) -> str:
     if v is None:
         return "—"
     try:
@@ -136,7 +144,7 @@ def _render_all_watch_fallback(items: list[dict[str, Any]]) -> None:
         name = str(item.get("type_name") or item.get("type_id") or "Unknown")
         score = float(item.get("priority_score") or 0.0)
         reason = str(item.get("decision_reason") or "")
-        label = f"**{name}** — score {score:.1f}"
+        label = f"**{name}** — score {score:.2f}"
         if reason:
             label += f" ({reason})"
         st.markdown(f"- {label}")
@@ -248,17 +256,17 @@ def render_tab_build_plan(page_state: DailyPlannerPageState) -> None:
         # Competition index — Phase A: show "—" since MIJ not running
         comp_index = item.get("competition_index")  # None in Phase A
         competitor_supply_days = (
-            round(float(comp_index) * 30, 1) if comp_index is not None else None
+            round(float(comp_index) * 30, 2) if comp_index is not None else None
         )
 
         display_rows.append({
             "Item": name,
             "Decision": decision_display,
             "_decision_raw": decision,
-            "Priority Score": round(float(item.get("priority_score") or 0.0), 1),
+            "Priority Score": round(float(item.get("priority_score") or 0.0), 2),
             "ISK/hour": item.get("isk_per_hour"),
-            "Margin %": item.get("margin_pct"),
-            "Days of Supply": item.get("days_of_supply_current"),
+            "Margin %": _round2(item.get("margin_pct")),
+            "Days of Supply": _round2(item.get("days_of_supply_current")),
             "Comp. Index": _fmt_num(comp_index) if comp_index is not None else "—",
             "Comp. Supply Days": _fmt_num(competitor_supply_days) if competitor_supply_days is not None else "—",
             "Momentum": _fmt_num(item.get("momentum_signal")),
@@ -300,7 +308,7 @@ def render_tab_build_plan(page_state: DailyPlannerPageState) -> None:
             gb.configure_column("Item", minWidth=200)
             gb.configure_column("Decision", cellStyle=decision_cell_style, maxWidth=130)
             gb.configure_column("Priority Score", type=["numericColumn"], maxWidth=120)
-            gb.configure_column("ISK/hour", type=["numericColumn"], maxWidth=120, valueFormatter="value ? (value / 1e6).toFixed(1) + 'M' : '—'")
+            gb.configure_column("ISK/hour", type=["numericColumn"], maxWidth=120, valueFormatter="value ? (value / 1e6).toFixed(2) + 'M' : '—'")
             gb.configure_column("Margin %", maxWidth=100)
             gb.configure_column("Days of Supply", maxWidth=120)
             gb.configure_column("Comp. Index", maxWidth=110)

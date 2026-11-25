@@ -107,18 +107,18 @@ def render_tab_analytics(page_state: DailyPlannerPageState) -> None:
             for i in items:
                 ema = float(i.get("accuracy_ema") or 1.0)
                 if ema >= 1.05:
-                    ema_display = f"{ema:.3f} ▲"
+                    ema_display = f"{ema:.2f} ▲"
                 elif ema < 0.95:
-                    ema_display = f"{ema:.3f} ▼"
+                    ema_display = f"{ema:.2f} ▼"
                 else:
-                    ema_display = f"{ema:.3f}"
+                    ema_display = f"{ema:.2f}"
                 rows.append({
                     "Item": str(i.get("type_name") or i.get("type_id") or ""),
                     "Samples": int(i.get("sample_count") or 0),
                     "Confidence": str(i.get("confidence_tier") or "low"),
                     "Accuracy EMA": ema_display,
-                    "Velocity ×": f"{float(i.get('velocity_multiplier') or 1.0):.3f}",
-                    "Cost ×": f"{float(i.get('cost_multiplier') or 1.0):.3f}",
+                    "Velocity ×": f"{float(i.get('velocity_multiplier') or 1.0):.2f}",
+                    "Cost ×": f"{float(i.get('cost_multiplier') or 1.0):.2f}",
                     "Decision": str(i.get("decision") or ""),
                 })
             st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
@@ -159,7 +159,7 @@ def render_tab_analytics(page_state: DailyPlannerPageState) -> None:
                 squeeze = bool(i.get("is_squeeze_sensitive"))
                 squeeze_display = "⚠ Yes" if squeeze else "No"
                 pearson = i.get("pearson_correlation")
-                pearson_display = f"{float(pearson):.3f}" if pearson is not None else "—"
+                pearson_display = f"{float(pearson):.2f}" if pearson is not None else "—"
                 rows.append({
                     "Item": str(i.get("type_name") or i.get("type_id") or ""),
                     "Pearson r": pearson_display,
@@ -191,8 +191,8 @@ def render_tab_analytics(page_state: DailyPlannerPageState) -> None:
                     status = "OK"
                 rows.append({
                     "Item": str(i.get("type_name") or i.get("type_id") or ""),
-                    "Theoretical %": f"{theoretical * 100:.1f}%",
-                    "Actual %": f"{actual * 100:.1f}%",
+                    "Theoretical %": f"{theoretical * 100:.2f}%",
+                    "Actual %": f"{actual * 100:.2f}%",
                     "Attempts": attempts,
                     "Status": status,
                 })
