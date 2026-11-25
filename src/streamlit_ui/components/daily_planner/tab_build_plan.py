@@ -10,17 +10,7 @@ from streamlit.errors import StreamlitAPIException
 from streamlit_ui.state.daily_planner_page import DailyPlannerPageState
 from streamlit_ui.components.aggrid_import import import_aggrid
 from streamlit_ui.components.daily_planner.status_bar import _fmt_isk
-
-# ---------------------------------------------------------------------------
-# Decision colour mapping (for AG-Grid cellStyle)
-# ---------------------------------------------------------------------------
-
-_DECISION_COLORS: dict[str, str] = {
-    "build": "#27ae60",   # green
-    "watch": "#e67e22",   # amber
-    "skip":  "#c0392b",   # red
-    "pause": "#7f8c8d",   # grey
-}
+from streamlit_ui.components.stat_tiles import render_stat_tiles
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -95,34 +85,28 @@ def bpo_analysis_caption(item: dict[str, Any]) -> str | None:
 
 
 def _render_score_breakdown(item: dict[str, Any]) -> None:
-    """Render the scoring component breakdown for a single build plan item."""
-    st.markdown("**Score Breakdown**")
-
-    isk_per_hour = item.get("isk_per_hour")
-    margin_pct = item.get("margin_pct")
-    days_of_supply = item.get("days_of_supply_current")
-    momentum = item.get("momentum_signal")
-    competition_idx = item.get("competition_index")
-
-    cols = st.columns(2)
-    with cols[0]:
-        st.caption(f"ISK/hour: {_fmt_isk(isk_per_hour)}")
-        st.caption(f"Margin: {_fmt_pct(margin_pct)}")
-        st.caption(f"Days of supply: {_fmt_num(days_of_supply)} days")
-        st.caption(f"Momentum signal: {_fmt_num(momentum)}")
-    with cols[1]:
-        st.caption(f"Competition index: {_fmt_num(competition_idx) if competition_idx is not None else '— (Phase A)'}")
-        st.caption(f"Priority score: {_fmt_num(item.get('priority_score'))}")
-        st.caption(f"Confidence tier: {_confidence_label(item.get('confidence_tier'))}")
-        st.caption(f"Sample count: {item.get('sample_count') or 0}")
-
-    decision_reason = item.get("decision_reason")
-    if decision_reason:
-        st.caption(f"Reason: {decision_reason}")
-
-    bpo_caption = bpo_analysis_caption(item)
-    if bpo_caption:
-        st.caption(bpo_caption)
+    """The selected item's "why the planner chose this" panel."""
+    with st.container(border=True):
+        name = str(item.get("type_name") or item.get("type_id") or "Unknown")
+        st.markdown(f"#### {name} · {_decision_label(str(item.get('decision') or ''))}")
+        decision_reason = item.get("decision_reason")
+        if decision_reason:
+            st.caption(str(decision_reason))
+        cols = st.columns(4)
+        cols[0].metric("Margin", _fmt_pct(item.get("margin_pct")))
+        cols[1].metric("Days of supply", _fmt_num(item.get("days_of_supply_current")))
+        cols[2].metric("ISK/hour", _fmt_isk(item.get("isk_per_hour")))
+        cols[3].metric("Momentum", _fmt_num(item.get("momentum_signal")))
+        competition_idx = item.get("competition_index")
+        st.caption(
+            f"Priority score {_fmt_num(item.get('priority_score'))} · "
+            f"competition index {_fmt_num(competition_idx) if competition_idx is not None else '— (Phase A)'} · "
+            f"confidence {_confidence_label(item.get('confidence_tier'))} · "
+            f"{item.get('sample_count') or 0} sample(s)"
+        )
+        bpo_caption = bpo_analysis_caption(item)
+        if bpo_caption:
+            st.caption(bpo_caption)
 
 
 # ---------------------------------------------------------------------------
@@ -171,15 +155,20 @@ def render_tab_build_plan(page_state: DailyPlannerPageState) -> None:
         _render_all_watch_fallback(items)
 
     # ------------------------------------------------------------------
-    # Decision filter
+    # Decision tiles and filters
     # ------------------------------------------------------------------
-    all_decisions = sorted({str(i.get("decision") or "unknown") for i in items})
-    selected_decisions = st.multiselect(
-        "Filter by decision",
-        options=all_decisions,
-        default=all_decisions,
-        key="build_plan_decision_filter",
-    )
+    counts = decision_counts(items)
+    render_stat_tiles([(_decision_label(d), f"{n:,}", None) for d, n in counts.items()])
+
+    all_decisions = list(counts)
+    pill_col, search_col = st.columns([3, 2], vertical_alignment="bottom")
+    with pill_col:
+        selected_decisions = st.pills(
+            "Decision", options=all_decisions, default=all_decisions, selection_mode="multi",
+            format_func=_decision_label, key="build_plan_decision_filter",
+        ) or []
+    with search_col:
+        search = st.text_input("Search", placeholder="item name or reason", key="build_plan_search")
 
     # ------------------------------------------------------------------
     # Force include / exclude (session-only)
@@ -231,19 +220,14 @@ def render_tab_build_plan(page_state: DailyPlannerPageState) -> None:
     # ------------------------------------------------------------------
     filtered_items = [
         i for i in items
-        if str(i.get("decision") or "unknown") in selected_decisions
+        if str(i.get("decision") or "unknown") in selected_decisions and matches_search(i, search)
     ]
 
     display_rows = []
     for item in filtered_items:
         type_id = int(item.get("type_id") or 0)
         decision = str(item.get("decision") or "")
-        name = str(item.get("type_name") or str(type_id) or "Unknown")
-
-        # Squeeze sensitive flag
-        is_squeeze = bool(item.get("is_squeeze_sensitive"))
-        if is_squeeze:
-            name = name + " ⚠"
+        name = _display_name(item)
 
         # Force overrides
         if type_id in page_state.force_include:
@@ -276,14 +260,23 @@ def render_tab_build_plan(page_state: DailyPlannerPageState) -> None:
         })
 
     df = pd.DataFrame(display_rows)
+    if df.empty:
+        st.info("No items match this filter.")
+        return
+    # Phase A: the competition columns stay "—" until the Market Intelligence Job runs.
+    for column in ("Comp. Index", "Comp. Supply Days"):
+        if (df[column] == "—").all():
+            df = df.drop(columns=[column])
 
     # ------------------------------------------------------------------
-    # Render grid
+    # Render grid (a click on a row opens its breakdown below)
     # ------------------------------------------------------------------
+    selected_name: str | None = None
     ag = import_aggrid()
     AgGrid = ag.AgGrid if ag else None
     GridOptionsBuilder = ag.GridOptionsBuilder if ag else None
     JsCode = ag.JsCode if ag else None
+    grid_df = df.drop(columns=["_decision_raw"])
 
     if AgGrid is not None and GridOptionsBuilder is not None and JsCode is not None:
         try:
@@ -291,10 +284,10 @@ def render_tab_build_plan(page_state: DailyPlannerPageState) -> None:
                 """
                 function(params) {
                     var colors = {
-                        'Build': '#27ae60',
-                        'Watch': '#e67e22',
-                        'Skip':  '#c0392b',
-                        'Pause': '#7f8c8d'
+                        'Build': '#34d399',
+                        'Watch': '#fbbf24',
+                        'Skip':  '#f87171',
+                        'Pause': '#a1a1aa'
                     };
                     var dec = params.value ? params.value.replace(/[★✗]/g, '').trim() : '';
                     var color = colors[dec] || null;
@@ -303,62 +296,95 @@ def render_tab_build_plan(page_state: DailyPlannerPageState) -> None:
                 }
                 """
             )
-            gb = GridOptionsBuilder.from_dataframe(df.drop(columns=["_decision_raw"]))
+            two_decimals = "value == null ? '—' : value.toFixed(2)"
+            gb = GridOptionsBuilder.from_dataframe(grid_df)
             gb.configure_default_column(resizable=True, sortable=True, filter=True)
-            gb.configure_column("Item", minWidth=200)
-            gb.configure_column("Decision", cellStyle=decision_cell_style, maxWidth=130)
-            gb.configure_column("Priority Score", type=["numericColumn"], maxWidth=120)
-            gb.configure_column("ISK/hour", type=["numericColumn"], maxWidth=120, valueFormatter="value ? (value / 1e6).toFixed(2) + 'M' : '—'")
-            gb.configure_column("Margin %", maxWidth=100)
-            gb.configure_column("Days of Supply", maxWidth=120)
-            gb.configure_column("Comp. Index", maxWidth=110)
-            gb.configure_column("Comp. Supply Days", maxWidth=130)
-            gb.configure_column("Momentum", maxWidth=100)
-            gb.configure_column("Samples", maxWidth=90)
+            gb.configure_column("Item", minWidth=220, pinned="left")
+            gb.configure_column("Decision", cellStyle=decision_cell_style, maxWidth=120)
+            gb.configure_column("Priority Score", type=["numericColumn"], maxWidth=120, valueFormatter=two_decimals)
+            gb.configure_column("ISK/hour", type=["numericColumn"], maxWidth=120,
+                                valueFormatter="value == null ? '—' : (value / 1e6).toFixed(2) + 'M'")
+            gb.configure_column("Margin %", type=["numericColumn"], maxWidth=110,
+                                valueFormatter="value == null ? '—' : value.toFixed(2) + '%'")
+            gb.configure_column("Days of Supply", type=["numericColumn"], maxWidth=130, valueFormatter=two_decimals)
+            gb.configure_column("Momentum", type=["numericColumn"], maxWidth=110)
+            gb.configure_column("Samples", type=["numericColumn"], maxWidth=90)
+            gb.configure_column("Reason", minWidth=320)
             gb.configure_selection("single", use_checkbox=False)
-            go = gb.build()
-            AgGrid(
-                df.drop(columns=["_decision_raw"]),
-                gridOptions=go,
-                height=min(38 * len(display_rows) + 60, 500),
+            response = AgGrid(
+                grid_df,
+                gridOptions=gb.build(),
+                height=min(38 * len(display_rows) + 60, 560),
                 fit_columns_on_grid_load=False,
                 allow_unsafe_jscode=True,
+                theme="streamlit",
                 key="build_plan_grid",
             )
+            selected_name = _selected_item_name(getattr(response, "selected_rows", None)
+                                                if not isinstance(response, dict) else response.get("selected_rows"))
         except (TypeError, ValueError, KeyError, AttributeError, StreamlitAPIException) as exc:
             # Cosmetic: the plain table shows the same rows.
             logging.warning("Build plan grid failed, showing a plain table: %s", exc)
-            st.dataframe(
-                df.drop(columns=["_decision_raw"]),
-                hide_index=True,
-                width="stretch",
-            )
+            selected_name = _plain_table(grid_df)
     else:
-        st.dataframe(
-            df.drop(columns=["_decision_raw"]),
-            hide_index=True,
-            width="stretch",
-        )
+        selected_name = _plain_table(grid_df)
 
-    st.caption(
-        "Phase A: Competition Index and Competitor Supply Days show '—' until Market Intelligence Job runs. "
-        "⚠ badge = margin historically sensitive to mineral price rises."
+    st.caption("⚠ after a name = margin historically sensitive to mineral price rises. "
+               "Click a row for why the planner chose it.")
+
+    if selected_name:
+        for item in filtered_items:
+            if _display_name(item) == selected_name:
+                _render_score_breakdown(item)
+                break
+
+
+def _display_name(item: dict[str, Any]) -> str:
+    name = str(item.get("type_name") or str(int(item.get("type_id") or 0)) or "Unknown")
+    return name + " ⚠" if item.get("is_squeeze_sensitive") else name
+
+
+def _selected_item_name(selected: Any) -> str | None:
+    """The Item of AgGrid's selected row; it comes back as a DataFrame or a
+    list of dicts depending on the st_aggrid version, or None."""
+    if selected is None:
+        return None
+    if isinstance(selected, pd.DataFrame):
+        return None if selected.empty else str(selected.iloc[0]["Item"])
+    if isinstance(selected, list) and selected and isinstance(selected[0], dict):
+        return str(selected[0].get("Item"))
+    return None
+
+
+def _plain_table(df: pd.DataFrame) -> str | None:
+    """The table without AgGrid; returns the clicked row's Item."""
+    event = st.dataframe(
+        df, hide_index=True, width="stretch", on_select="rerun", selection_mode="single-row",
+        key="build_plan_table",
+        column_config={
+            "Priority Score": st.column_config.NumberColumn(format="%.2f"),
+            "ISK/hour": st.column_config.NumberColumn(format="%.2f"),
+            "Margin %": st.column_config.NumberColumn(format="%.2f%%"),
+            "Days of Supply": st.column_config.NumberColumn(format="%.2f"),
+        },
     )
+    rows = event.selection.rows if event is not None else []
+    return str(df.iloc[rows[0]]["Item"]) if rows else None
 
-    # ------------------------------------------------------------------
-    # Score breakdown drill-down (per item expanders)
-    # ------------------------------------------------------------------
-    if filtered_items:
-        st.markdown("---")
-        st.markdown("**Score Breakdown** — select an item to expand:")
-        selected_name = st.selectbox(
-            "Item",
-            options=["(select)"] + [str(i.get("type_name") or i.get("type_id") or "Unknown") for i in filtered_items],
-            key="build_plan_breakdown_select",
-            label_visibility="collapsed",
-        )
-        if selected_name and selected_name != "(select)":
-            for item in filtered_items:
-                if str(item.get("type_name") or item.get("type_id") or "Unknown") == selected_name:
-                    _render_score_breakdown(item)
-                    break
+
+def decision_counts(items: list[dict[str, Any]]) -> dict[str, int]:
+    """{decision: count}, build/watch/skip/pause first, any other after."""
+    order = ("build", "watch", "skip", "pause")
+    counts: dict[str, int] = {}
+    for item in items:
+        d = str(item.get("decision") or "unknown")
+        counts[d] = counts.get(d, 0) + 1
+    return dict(sorted(counts.items(), key=lambda kv: (order.index(kv[0]) if kv[0] in order else len(order), kv[0])))
+
+
+def matches_search(item: dict[str, Any], search: str | None) -> bool:
+    """Case-insensitive match on the item name or its decision reason."""
+    needle = (search or "").strip().lower()
+    if not needle:
+        return True
+    return needle in str(item.get("type_name") or "").lower() or needle in str(item.get("decision_reason") or "").lower()

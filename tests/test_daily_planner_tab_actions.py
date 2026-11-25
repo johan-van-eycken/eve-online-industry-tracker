@@ -42,8 +42,8 @@ def test_the_sections_follow_the_given_action_types_order():
     """_ACTION_ORDER is derived from CHARACTER_ACTION_TYPES, so the
     order and the set live in one place; only the labels are local."""
     assert tab_actions._action_sections(("manufacture", "deliver")) == [
-        ("manufacture", "MANUFACTURE", "🟢"),
-        ("deliver", "DELIVER", "🔴"),
+        ("manufacture", "MANUFACTURE", "green"),
+        ("deliver", "DELIVER", "red"),
     ]
     assert tab_actions._ACTION_ORDER == tab_actions._action_sections(CHARACTER_ACTION_TYPES)
 
@@ -186,3 +186,31 @@ def test_the_pending_count_uses_the_jobs_too():
     me, te = _queued_pair("2026-01-01T12:00:00Z", me_status="done")
     assert pending_character_action_count([me, te], now) == 1
     assert pending_character_action_count([me, te], now, jobs=[_me_job("2026-01-03T00:00:00Z")]) == 0
+
+
+def test_short_notes_cuts_after_three_parts_and_keeps_the_full_text():
+    assert tab_actions.short_notes("a; b") == ("a · b", None)
+    assert tab_actions.short_notes("a; b; c; d") == ("a · b · c …", "a · b · c · d")
+    assert tab_actions.short_notes("") == ("", None)
+
+
+def test_the_filter_splits_ready_rows_from_rows_that_wait_on_purchases():
+    deliver, build = {"action_type": "deliver"}, {"action_type": "manufacture"}
+    ready, buy = tab_actions.FILTER_READY, tab_actions.FILTER_BUY
+    assert [tab_actions.matches_filter(a, ready, False) for a in (deliver, build)] == [True, False]
+    assert [tab_actions.matches_filter(a, buy, False) for a in (deliver, build)] == [False, True]
+    assert tab_actions.matches_filter(build, ready, True)
+    assert tab_actions.matches_filter(build, tab_actions.FILTER_ALL, False)
+
+
+def test_the_steps_count_what_is_left():
+    chars = [{"action_type": "deliver", "status": "done", "character_id": 1},
+             {"action_type": "manufacture", "status": "pending", "character_id": 1},
+             {"action_type": "invent", "status": "pending", "character_id": 2}]
+    buys = [{"action_type": "buy_materials", "shopping_category": "current_job", "status": "pending",
+             "estimated_cost_isk": 3_000_000.0}]
+    assert tab_actions.step_summaries(chars, chars + buys) == [
+        ("Deliver", "nothing to deliver", True),
+        ("Buy materials", "1 item(s) · 3.00M ISK → Shopping List", False),
+        ("Start jobs", "2 job(s) on 2 pilot(s)", False),
+    ]
