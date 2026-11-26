@@ -1,6 +1,6 @@
 from typing import Optional, Any
 from datetime import datetime
-from sqlalchemy.orm import Mapped, declarative_base, mapped_column # pyright: ignore[reportMissingImports]
+from sqlalchemy.orm import Mapped, declarative_base, mapped_column, synonym # pyright: ignore[reportMissingImports]
 from sqlalchemy.sql import func # pyright: ignore[reportMissingImports]
 from sqlalchemy import BigInteger, DateTime, Integer, String, Text, Float, Boolean, JSON, UniqueConstraint # pyright: ignore[reportMissingImports]
 
@@ -996,7 +996,8 @@ class Blueprints(BaseSde):
     __tablename__ = "blueprints"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    blueprintTypeID: Mapped[int] = mapped_column(Integer, nullable=False)
+    # SDE build 3749835 dropped the blueprintTypeID column: it always equalled id.
+    blueprintTypeID = synonym("id")
     maxProductionLimit: Mapped[int] = mapped_column(Integer, nullable=False)
     activities: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
 

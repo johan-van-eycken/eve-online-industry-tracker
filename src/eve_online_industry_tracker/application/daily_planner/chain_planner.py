@@ -51,7 +51,7 @@ def _lowest_blueprint_by_activity_product(
     """{product type_id of `activity`: lowest blueprint type_id with that product}.
 
     The lowest id wins whatever the dict order, matching
-    blueprints.get_invention_source_blueprint_ids (ORDER BY blueprintTypeID).
+    blueprints.get_invention_source_blueprint_ids (ORDER BY id).
     """
     index: dict[int, int] = {}
     for blueprint_type_id, entry in (blueprint_data or {}).items():

@@ -93,7 +93,7 @@ def sde(sde_engine):
         ):
             session.add(Types(id=type_id, name={"en": name}, groupID=270, published=True))
         session.add(Blueprints(
-            id=1, blueprintTypeID=_SOURCE_BP, maxProductionLimit=300,
+            blueprintTypeID=_SOURCE_BP, maxProductionLimit=300,
             activities={"invention": {
                 "time": 1000,
                 "materials": [{"typeID": _DATACORE_A, "quantity": 2}, {"typeID": _DATACORE_B, "quantity": 3}],
@@ -105,7 +105,7 @@ def sde(sde_engine):
             }},
         ))
         session.add(Blueprints(
-            id=2, blueprintTypeID=_TARGET_BP, maxProductionLimit=10,
+            blueprintTypeID=_TARGET_BP, maxProductionLimit=10,
             activities={"manufacturing": {
                 "time": 600,
                 "materials": [{"typeID": _MINERAL, "quantity": 10}],
