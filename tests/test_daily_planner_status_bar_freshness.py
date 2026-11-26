@@ -111,13 +111,15 @@ def _render(monkeypatch, plan):
     monkeypatch.setattr(status_bar, "get_status", lambda: {"status": "idle"})
     monkeypatch.setattr(status_bar, "get_plan", lambda: plan)
     monkeypatch.setattr(status_bar, "get_market_intel_status", lambda: {})
+    monkeypatch.setattr(status_bar, "_render_tiles",
+                        lambda tiles: fake.metrics.update({label: value for label, value, _ in tiles}))
     status_bar.render_status_bar(DailyPlannerPageState(plan=plan))
     return fake
 
 
 def test_render_shows_the_live_drift_and_warns(monkeypatch):
     fake = _render(monkeypatch, _plan(0.0, comparable=5, total=5, stored=1.0))
-    assert fake.metrics["Freshness"] == "0% (stale) · 5/5 items"
+    assert fake.metrics["Freshness"] == "0% (stale)"
     assert any("drifted significantly" in w for w in fake.warnings)
     assert fake.buttons["_recompute_plan_btn"] == "primary"
 
@@ -126,4 +128,4 @@ def test_render_shows_unknown_without_a_drift_warning(monkeypatch):
     fake = _render(monkeypatch, _plan(None, comparable=0, total=0))
     assert fake.metrics["Freshness"] == "unknown"
     assert fake.warnings == []
-    assert fake.captions == []
+    assert not any("drifted" in c for c in fake.captions)

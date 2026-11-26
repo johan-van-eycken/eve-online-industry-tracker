@@ -49,6 +49,10 @@ class ShoppingListBuilder:
         meta_resolver: TypeMetadataResolver, used to tell blueprints apart from
             material stock in corp_assets
         """
+        # The materials each job is short of; reset, so a rebuild does not add twice.
+        for action in assigned_actions:
+            action.short_type_ids = ()
+
         # Build corp stock map: type_id → available quantity
         corp_stock: dict[int, int] = build_corp_stock_map(corp_assets, meta_resolver)
 
@@ -107,6 +111,7 @@ class ShoppingListBuilder:
 
                 if net_required <= 0:
                     continue
+                action.short_type_ids = (*action.short_type_ids, mat_type_id)
 
                 shopping.append(_priced_line(
                     mat_type_id, mat_name, net_required, "current_job", market_depth_cache, self._get_price,
@@ -156,6 +161,7 @@ class ShoppingListBuilder:
                 )
                 if net_required <= 0:
                     continue
+                action.short_type_ids = (*action.short_type_ids, mat_type_id)
 
                 shopping.append(_priced_line(
                     mat_type_id, str(mat.get("type_name") or f"type_{mat_type_id}"), net_required,

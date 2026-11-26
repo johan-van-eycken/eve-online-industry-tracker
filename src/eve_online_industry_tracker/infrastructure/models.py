@@ -1119,6 +1119,8 @@ class BuildPlanItemModel(BaseApp):
     # isk_per_hour is an upper bound (job fees unknown):
     # FeedbackProcessor learns no accuracy from it. NULL on older rows.
     isk_per_hour_is_upper_bound: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    # price_trend_7d - price_trend_30d/4 (PipelineAnalyzer). NULL on older rows.
+    momentum_signal: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
 
 class DailyActionLogModel(BaseApp):
@@ -1161,6 +1163,9 @@ class DailyActionLogModel(BaseApp):
     # te_research only: queued behind the ME research
     # on the same BPO; the actions tab shows it as queued, not startable today.
     queued_after_me: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # Job actions: comma-separated type_ids of the buy lines this job waits on
+    # ("" = none). NULL = a plan from before the link (the UI then waits on all lines).
+    short_type_ids: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
 
 class PlanItemOutcomeModel(BaseApp):

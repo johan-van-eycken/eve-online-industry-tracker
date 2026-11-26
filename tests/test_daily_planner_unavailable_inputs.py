@@ -390,3 +390,28 @@ def test_an_empty_decision_reason_gets_no_leading_separator(session_provider, mo
     monkeypatch.setattr(svc._decision_engine, "decide", decide)
     _, decision = _score_and_decide(svc, {}, None, {"margin_correlation": MARGIN_NOTE})
     assert decision.decision_reason == MARGIN_NOTE
+
+
+def test_the_plan_items_carry_momentum_and_the_live_learning_confidence(planner_repo, session_provider):
+    from datetime import datetime
+
+    from eve_online_industry_tracker.application.daily_planner.models import ItemDecision
+    from eve_online_industry_tracker.infrastructure.models import PlanLearningWeightsModel
+
+    svc = _service(session_provider, repo=planner_repo)
+    decision = ItemDecision(
+        type_id=TYPE_ID, type_name="Thing", decision="build", decision_reason="", adjusted_score=1.0,
+        absolute_profit_per_batch=1.0, isk_per_hour=1.0, margin_pct=12.0, days_of_supply_current=1.0,
+        effective_velocity=1.0, meta_group_id=1, pipeline_stage="manufacturing", momentum_signal=-2.5,
+    )
+    svc._phase_9_persist(
+        phase1_data={"market_depth_cache": {}, "overview_rows": [], "corp_wallet": None, "unavailable_inputs": {}},
+        chain_plan=SimpleNamespace(decisions=[decision]),
+        action_log_rows=[],
+    )
+    planner_repo.upsert_weights(PlanLearningWeightsModel(
+        type_id=TYPE_ID, accuracy_ema=1.0, velocity_multiplier=1.0, cost_multiplier=1.0,
+        sample_count=6, last_updated=datetime(2026, 1, 1), confidence_tier="medium",
+    ))
+    (item,) = svc.get_active_plan()["items"]
+    assert (item["momentum_signal"], item["confidence_tier"], item["sample_count"]) == (-2.5, "medium", 6)

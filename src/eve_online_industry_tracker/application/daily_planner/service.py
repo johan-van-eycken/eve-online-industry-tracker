@@ -396,10 +396,16 @@ class DailyPlannerService:
         actions = self._repo.get_actions(int(plan.id))
 
         freshness, comparable_items, total_items = self._compute_freshness_score(plan, items)
+        # Confidence and samples are live: they grow as batches sell, after the plan was made.
+        try:
+            weights = self._repo.get_weights([int(i.type_id) for i in items])
+        except SQLAlchemyError as exc:
+            _warn_read_failed("get_active_plan/weights", exc)
+            weights = {}
 
         return {
             "plan": _model_to_dict(plan),
-            "items": [_model_to_dict(i) for i in items],
+            "items": [_with_weights(_model_to_dict(i), weights.get(int(i.type_id))) for i in items],
             "actions": [_model_to_dict(a) for a in actions],
             "freshness_score": freshness,
             # A 1.0 freshness_score alone can't distinguish "checked and
@@ -1629,6 +1635,7 @@ class DailyPlannerService:
                 ),
                 snapshot_sell_price=_spot_sell_price(market_depth_cache.get(d.type_id)),
                 isk_per_hour_is_upper_bound=bool(getattr(d, "profit_is_upper_bound", False)),
+                momentum_signal=d.momentum_signal,
             ))
         return items
 
@@ -1702,6 +1709,13 @@ def _contract_violation_message(exc: PlannerInputError) -> str:
         "The planner cannot build a plan from incomplete market data — "
         "refresh the product overview and recompute."
     )
+
+
+def _with_weights(item: dict[str, Any], w: Any) -> dict[str, Any]:
+    """The plan item with its learning confidence tier and sample count (low / 0 without history)."""
+    item["confidence_tier"] = str(w.confidence_tier) if w is not None else "low"
+    item["sample_count"] = int(w.sample_count) if w is not None else 0
+    return item
 
 
 def _model_to_dict(model: Any) -> dict[str, Any]:

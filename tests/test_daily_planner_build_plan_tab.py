@@ -20,3 +20,24 @@ def test_a_completed_analysis_shows_its_result():
 
 def test_no_analysis_and_no_reason_shows_nothing():
     assert bpo_analysis_caption({"bpo_market_price": None}) is None
+
+
+def test_decision_counts_put_build_first():
+    from streamlit_ui.components.daily_planner.tab_build_plan import decision_counts
+    items = [{"decision": "skip"}, {"decision": "build"}, {"decision": "skip"}, {"decision": "odd"}]
+    assert list(decision_counts(items).items()) == [("build", 1), ("skip", 2), ("odd", 1)]
+
+
+def test_search_matches_name_or_reason():
+    from streamlit_ui.components.daily_planner.tab_build_plan import matches_search
+    item = {"type_name": "Large Armor Pump II", "decision_reason": "Watch: declining market"}
+    assert matches_search(item, "armor") and matches_search(item, "DECLINING") and matches_search(item, " ")
+    assert not matches_search(item, "shield")
+
+
+def test_profitable_needs_positive_isk_per_hour_and_margin():
+    from streamlit_ui.components.daily_planner.tab_build_plan import is_profitable
+    assert is_profitable({"isk_per_hour": 10.0, "margin_pct": 1.5})
+    assert not is_profitable({"isk_per_hour": 10.0, "margin_pct": -1.0})
+    assert not is_profitable({"isk_per_hour": -5.0, "margin_pct": 12.0})
+    assert not is_profitable({"isk_per_hour": None, "margin_pct": 12.0})

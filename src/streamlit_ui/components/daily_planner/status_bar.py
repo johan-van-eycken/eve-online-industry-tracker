@@ -14,6 +14,7 @@ from eve_online_industry_tracker.application.corporations.wallet_age import wall
 from eve_online_industry_tracker.config.admin_settings import ADMIN_SETTINGS_SCHEMA
 from streamlit_ui.api.admin_settings import planner_page_defaults
 from streamlit_ui.api.daily_planner import compute_plan, get_market_intel_status, get_plan, get_status
+from streamlit_ui.components.stat_tiles import render_stat_tiles
 from streamlit_ui.state.daily_planner_page import DailyPlannerPageState
 
 logger = logging.getLogger(__name__)
@@ -304,24 +305,11 @@ def plan_summary(plan_meta: dict[str, Any]) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
-def wallet_caption(summary_wallet: dict[str, Any] | None, now: datetime | None = None) -> str | None:
-    """Wallet age (at display time) and plan budget; None for an old plan without the wallet block."""
-    if not summary_wallet:
-        return None
-    age = wallet_age_hours(summary_wallet.get("refreshed_at"), now or datetime.now(timezone.utc))
-    if age is None:
-        age = summary_wallet.get("age_hours")
-    age_text = f"{age:.1f} h ago" if age is not None else "never"
-    text = (f"read {age_text} · budget {float(summary_wallet.get('budget') or 0):,.0f} ISK "
-            f"after {float(summary_wallet.get('reserve_pct') or 0):g}% reserve")
-    blocked = summary_wallet.get("blocked_reason")
-    return f"⚠ {blocked} · {text}" if blocked else text
-
-
-def free_slots_lines(summary_free_slots: dict[str, Any] | None) -> list[str]:
-    """One line per character with free slots, each count with its own reason,
-    e.g. "Duke X1: 3 mfg free (wallet), 2 science free (no eligible job)"."""
-    lines = []
+def free_slots_by_character(summary_free_slots: dict[str, Any] | None) -> dict[str, str]:
+    """{character name: its free slots}, each count with its own reason, e.g.
+    {"Duke X1": "3 mfg free (wallet), 2 science free (no eligible job)"};
+    a pilot without free slots is left out."""
+    out: dict[str, str] = {}
     for name, slot in (summary_free_slots or {}).items():
         parts = []
         for key, label in (("manufacturing", "mfg"), ("science", "science")):
@@ -330,8 +318,8 @@ def free_slots_lines(summary_free_slots: dict[str, Any] | None) -> list[str]:
                 reason = slot.get(f"{key}_reason", slot.get("reason") if key == "science" else None)
                 parts.append(f"{slot[key]} {label} free" + (f" ({reason})" if reason else ""))
         if parts:
-            lines.append(f"{slot.get('character_name') or name}: {', '.join(parts)}")
-    return lines
+            out[str(slot.get("character_name") or name)] = ", ".join(parts)
+    return out
 
 
 def _fmt_age(hours: float) -> str:
@@ -416,42 +404,42 @@ def compute_failure_banner(status_data: dict[str, Any], *, has_plan: bool) -> st
 # Plan diff summary
 # ---------------------------------------------------------------------------
 
-def _render_plan_diff(
-    prior_decisions: dict[str, str],
-    new_items: list[dict[str, Any]],
-) -> None:
-    """Show a one-line summary of items that changed decision vs prior plan."""
-    newly_build: list[str] = []
-    moved_watch: list[str] = []
-    moved_skip: list[str] = []
-
+def plan_diff(prior_decisions: dict[str, str], new_items: list[dict[str, Any]]) -> dict[str, list[str]]:
+    """Items whose decision changed vs the prior plan: {"build"|"watch"|"skip":
+    ["name" or "name: reason"]}; a group with no item is left out."""
+    groups: dict[str, list[str]] = {}
     for item in new_items:
         tid = str(item.get("type_id") or "")
         name = str(item.get("type_name") or tid)
         new_dec = str(item.get("decision") or "")
         old_dec = prior_decisions.get(tid)
-        if old_dec is None or old_dec == new_dec:
+        if old_dec is None or old_dec == new_dec or new_dec not in ("build", "watch", "skip"):
             continue
         reason = item.get("decision_reason") or ""
-        if new_dec == "build" and old_dec != "build":
-            newly_build.append(name)
-        elif new_dec == "watch":
-            moved_watch.append(f"{name}: {reason}" if reason else name)
-        elif new_dec == "skip":
-            moved_skip.append(f"{name}: {reason}" if reason else name)
+        groups.setdefault(new_dec, []).append(name if new_dec == "build" or not reason else f"{name}: {reason}")
+    return groups
 
-    parts: list[str] = []
-    if newly_build:
-        parts.append(f"{len(newly_build)} newly on build ({', '.join(newly_build[:3])}{'...' if len(newly_build) > 3 else ''})")
-    if moved_watch:
-        parts.append(f"{len(moved_watch)} moved to watch ({', '.join(moved_watch[:2])}{'...' if len(moved_watch) > 2 else ''})")
-    if moved_skip:
-        parts.append(f"{len(moved_skip)} moved to skip ({', '.join(moved_skip[:2])}{'...' if len(moved_skip) > 2 else ''})")
 
-    if parts:
-        st.success(f"Plan updated — {'; '.join(parts)}.")
-    else:
-        st.success("Plan updated — no decision changes vs prior plan.")
+#: (chip label, Streamlit colour) per changed decision, in display order.
+_DIFF_CHIPS: tuple[tuple[str, str, str], ...] = (
+    ("build", "to build", "green"), ("watch", "to watch", "orange"), ("skip", "to skip", "red"),
+)
+
+
+def _render_plan_diff(prior_decisions: dict[str, str], new_items: list[dict[str, Any]]) -> None:
+    """"Since last plan" chips; each opens the list of items with their reasons."""
+    groups = plan_diff(prior_decisions, new_items)
+    if not groups:
+        st.caption("Since last plan: no decision changes.")
+        return
+    shown = [c for c in _DIFF_CHIPS if c[0] in groups]
+    cols = st.columns([1.2] + [1] * len(shown) + [max(1, 6 - len(shown))])
+    cols[0].caption("Since last plan")
+    for col, (key, label, color) in zip(cols[1:], shown):
+        names = groups[key]
+        with col.popover(f":{color}[{'+' if key == 'build' else ''}{len(names)} {label}]"):
+            for line in names:
+                st.markdown(f"- {line}")
 
 
 def market_intel_warning(market_status: dict) -> str | None:
@@ -547,32 +535,7 @@ def render_status_bar(page_state: DailyPlannerPageState, planner_settings: dict[
         return
 
     # ------------------------------------------------------------------
-    # 5. Onboarding / warmup banner
-    # ------------------------------------------------------------------
-    if page_state.plan is not None:
-        items = page_state.plan.get("items") or []
-        if items:
-            max_sample = max((int(i.get("sample_count") or 0) for i in items), default=0)
-            if max_sample < 5:
-                st.info(
-                    "The planner is in warmup mode — all items start with default weights. "
-                    "Scores improve as manufacturing batches complete and sell. "
-                    "Expect meaningful learning after 5+ completed batches per item."
-                )
-
-    # ------------------------------------------------------------------
-    # 6. Plan diff banner (after recompute)
-    # ------------------------------------------------------------------
-    if st.session_state.get("_dp_show_diff") and page_state.plan is not None:
-        prior = st.session_state.get("_dp_prior_decisions") or {}
-        new_items = page_state.plan.get("items") or []
-        _render_plan_diff(prior, new_items)
-        if st.button("Dismiss", key="_dp_dismiss_diff"):
-            st.session_state["_dp_show_diff"] = False
-            st.rerun()
-
-    # ------------------------------------------------------------------
-    # 7. Plan metrics
+    # 5. Plan facts
     # ------------------------------------------------------------------
     plan_meta: dict[str, Any] = {}
     if page_state.plan:
@@ -599,7 +562,28 @@ def render_status_bar(page_state: DailyPlannerPageState, planner_settings: dict[
             plan_age_hours = (now_utc - created_dt).total_seconds() / 3600
             plan_expired = plan_age_hours > planner_settings["planner_max_plan_age_hours"]
 
-    # Expired banner
+    actions = (page_state.plan or {}).get("actions") or []
+    pending_char_actions = pending_character_action_count(
+        actions, jobs=load_active_jobs() if actions else None,
+    )
+    stale = freshness_score is not None and freshness_score < 0.75
+
+    # ------------------------------------------------------------------
+    # 6. Header: plan age on the left, Recompute on the right
+    # ------------------------------------------------------------------
+    info_col, button_col = st.columns([7, 2])
+    with info_col:
+        age_str = _fmt_age(plan_age_hours) if plan_age_hours is not None else "never"
+        line = f"Plan computed {age_str}"
+        items = (page_state.plan or {}).get("items") or []
+        if items and max((int(i.get("sample_count") or 0) for i in items), default=0) < 5:
+            line += " · warmup: default weights until 5+ batches per item have sold"
+        st.caption(line)
+    with button_col:
+        _render_recompute(page_state, pending_char_actions,
+                          primary=plan_expired or stale or page_state.plan is None,
+                          plan_expired=plan_expired)
+
     if plan_expired and plan_age_hours is not None:
         days = plan_age_hours / 24
         st.error(
@@ -609,7 +593,7 @@ def render_status_bar(page_state: DailyPlannerPageState, planner_settings: dict[
             "Recomputing will plan from your current slot availability, stock, and market state."
         )
 
-    # The market intelligence job's status: the Market Data metric and its last_error warning
+    # The market intelligence job's status: the Market Data tile and its last_error warning
     # (shown with or without a plan).
     try:
         market_status = get_market_intel_status() or {}
@@ -620,45 +604,31 @@ def render_status_bar(page_state: DailyPlannerPageState, planner_settings: dict[
             "are current is unknown."
         )
 
-    # Metrics row
+    # ------------------------------------------------------------------
+    # 7. Tiles
+    # ------------------------------------------------------------------
     if plan_meta:
-        c1, c2, c3, c4, c5 = st.columns(5)
+        _render_tiles(status_tiles(
+            summary=summary, corp_wallet=corp_wallet, actions=actions,
+            freshness_display=freshness_display, market_status=market_status,
+            market_refresh_hours=planner_settings["planner_market_refresh_interval_hours"],
+        ))
+        blocked = (summary.get("wallet") or {}).get("blocked_reason")
+        if blocked:
+            st.warning(blocked)
 
-        with c1:
-            st.metric("Freshness", freshness_display)
-        with c2:
-            age_str = _fmt_age(plan_age_hours) if plan_age_hours is not None else "—"
-            st.metric("Last Computed", age_str)
-        with c3:
-            st.metric("Corp Wallet", _fmt_isk(corp_wallet))
-            wallet_text = wallet_caption(summary.get("wallet"))
-            if wallet_text:
-                st.caption(wallet_text)
-        with c4:
-            actions = (page_state.plan or {}).get("actions") or []
-            value, caption = capital_reserved_display(compute_capital_reserved(actions))
-            st.metric("Capital Reserved", value, help=CAPITAL_RESERVED_HELP)
-            if caption:
-                st.caption(caption)
-        with c5:
-            last_completed = market_status.get("last_completed_at")
-            market_dt = _parse_dt(last_completed)
-            if market_dt is None:
-                market_label = "—"
-            else:
-                now_utc = datetime.now(tz=timezone.utc)
-                market_age_hours = (now_utc - market_dt).total_seconds() / 3600
-                age_text = _fmt_age(market_age_hours)
-                if market_age_hours < planner_settings["planner_market_refresh_interval_hours"]:
-                    market_label = f"{age_text} ✓"
-                elif market_age_hours < 6.0:
-                    market_label = f"{age_text} ⚠"
-                else:
-                    market_label = f"{age_text} 🔴"
-            st.metric("Market Data", market_label)
-
-    for line in free_slots_lines(summary.get("free_slots")):
-        st.caption(f"Free slots: {line}")
+    # ------------------------------------------------------------------
+    # 8. Since last plan (after a recompute)
+    # ------------------------------------------------------------------
+    if st.session_state.get("_dp_show_diff") and page_state.plan is not None:
+        diff_col, dismiss_col = st.columns([9, 1])
+        with diff_col:
+            _render_plan_diff(st.session_state.get("_dp_prior_decisions") or {},
+                              page_state.plan.get("items") or [])
+        with dismiss_col:
+            if st.button("Dismiss", key="_dp_dismiss_diff"):
+                st.session_state["_dp_show_diff"] = False
+                st.rerun()
 
     market_warning = market_intel_warning(market_status)
     if market_warning:
@@ -669,26 +639,63 @@ def render_status_bar(page_state: DailyPlannerPageState, planner_settings: dict[
         # The plan was scored without these inputs: a warning, not a footnote.
         st.warning(unavailable_caption)
 
-    # Freshness warning
-    if page_state.plan and freshness_score is not None and freshness_score < 0.75:
+    if page_state.plan and stale:
         st.warning("Market prices have drifted significantly — consider recomputing.")
     elif (page_state.plan and freshness_score is not None
           and freshness_score < planner_settings["planner_freshness_warning_level"]):
         st.caption("Some prices have drifted slightly — recomputing is recommended.")
 
-    # ------------------------------------------------------------------
-    # 8. Recompute button (with confirmation when pending actions exist)
-    # ------------------------------------------------------------------
-    actions = (page_state.plan or {}).get("actions") or []
-    pending_char_actions = pending_character_action_count(
-        actions, jobs=load_active_jobs() if actions else None,
-    )
 
-    stale = freshness_score is not None and freshness_score < 0.75
-    button_type = "primary" if (plan_expired or stale or page_state.plan is None) else "secondary"
+def _render_tiles(tiles: list[tuple[str, str, str | None]]) -> None:
+    render_stat_tiles(tiles)
 
+
+def status_tiles(
+    *, summary: dict[str, Any], corp_wallet: float | None, actions: list[dict[str, Any]],
+    freshness_display: str, market_status: dict[str, Any], market_refresh_hours: float,
+    now: datetime | None = None,
+) -> list[tuple[str, str, str | None]]:
+    """(label, value, grey line) per status tile: budget, to buy today,
+    freshness, market data."""
+    now = now or datetime.now(tz=timezone.utc)
+    wallet = summary.get("wallet") or {}
+    if wallet:
+        age = wallet_age_hours(wallet.get("refreshed_at"), now)
+        if age is None:
+            age = wallet.get("age_hours")
+        budget_value = _fmt_isk(float(wallet.get("budget") or 0))
+        budget_sub = (f"wallet {_fmt_isk(corp_wallet)} · {float(wallet.get('reserve_pct') or 0):g}% reserve · "
+                      f"read {f'{age:.1f} h ago' if age is not None else 'never'}")
+    else:
+        budget_value, budget_sub = _fmt_isk(corp_wallet), "corp wallet (no budget in this plan)"
+
+    reserved_value, reserved_caption = capital_reserved_display(compute_capital_reserved(actions))
+    buys = sum(1 for a in actions if str(a.get("action_type") or "") in _CAPITAL_ACTION_TYPES
+               and str(a.get("status") or "pending") == "pending")
+    reserved_sub = reserved_caption or f"{buys} purchase(s) plus job install fees"
+
+    fresh_value, _, fresh_sub = freshness_display.partition(" · ")
+
+    market_dt = _parse_dt(market_status.get("last_completed_at"))
+    if market_dt is None:
+        market_value, market_sub = "—", "no completed run"
+    else:
+        hours = (now - market_dt).total_seconds() / 3600
+        market_value = _fmt_age(hours)
+        market_sub = ("fresh" if hours < market_refresh_hours
+                      else "due for a refresh" if hours < 6.0 else "stale: older than 6 h")
+    return [
+        ("Budget", budget_value, budget_sub),
+        ("To buy today", reserved_value, reserved_sub),
+        ("Freshness", fresh_value, fresh_sub or None),
+        ("Market data", market_value, market_sub),
+    ]
+
+
+def _render_recompute(page_state: DailyPlannerPageState, pending_char_actions: int, *,
+                      primary: bool, plan_expired: bool) -> None:
+    """Recompute Plan, with a confirmation while pilot actions are still pending."""
     if st.session_state.get("_dp_confirm_recompute") and pending_char_actions > 0:
-        # Confirmation dialog
         st.warning(
             f"You have {pending_char_actions} action(s) not yet marked done. "
             "Recomputing will replace today's action list. Continue?"
@@ -702,15 +709,14 @@ def render_status_bar(page_state: DailyPlannerPageState, planner_settings: dict[
             if st.button("Recompute", type="primary", key="_recompute_confirmed"):
                 st.session_state["_dp_confirm_recompute"] = False
                 _trigger_compute(page_state)
-    else:
-        if st.button("Recompute Plan", type=button_type, key="_recompute_plan_btn"):
-            if pending_char_actions > 0 and not plan_expired:
-                st.session_state["_dp_confirm_recompute"] = True
-                st.rerun()
-            else:
-                _trigger_compute(page_state)
-
-    st.markdown("---")
+        return
+    if st.button("Recompute Plan", type="primary" if primary else "secondary",
+                 key="_recompute_plan_btn", width="stretch"):
+        if pending_char_actions > 0 and not plan_expired:
+            st.session_state["_dp_confirm_recompute"] = True
+            st.rerun()
+        else:
+            _trigger_compute(page_state)
 
 
 def _trigger_compute(page_state: DailyPlannerPageState) -> None:

@@ -234,6 +234,7 @@ class ActionPlanBuilder:
                 estimated_job_fee_isk=action.estimated_job_fee_isk,
                 estimated_job_fee_unknown_reason=action.estimated_job_fee_unknown_reason,
                 queued_after_me=action.queued_after_me,
+                short_type_ids=",".join(str(t) for t in action.short_type_ids),
             ))
         return rows
 

@@ -93,6 +93,9 @@ class ItemDecision:
     # The runs the market absorbs within max days, not capped at one batch:
     # room for parallel jobs of the same product (CharacterAssigner).
     market_room_runs: int | None = None
+    # PipelineState.momentum_signal, persisted for the Build Plan table.
+    # None: not analysed (a sub-component).
+    momentum_signal: float | None = None
     # Chain context flag — True for sub-components added in Phase 5 Pass 2
     is_sub_component: bool = False
     # overview row snapshot for downstream phases
@@ -156,6 +159,9 @@ class AssignedAction:
     # invent only: the T1 BPC this invention job runs on (one job
     # per BPC, at most its runs); None when the row does not name it.
     blueprint_item_id: int | None = None
+    # Job actions: the materials this job is short of after corp stock
+    # (ShoppingListBuilder), i.e. the buy lines it waits on. () = none.
+    short_type_ids: tuple[int, ...] = ()
 
 
 @dataclass

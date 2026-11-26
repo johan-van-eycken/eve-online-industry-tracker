@@ -848,7 +848,8 @@ def ensure_app_schema(db_app: DatabaseManager) -> None:
             "effective_velocity REAL NULL,"
             "snapshot_sell_price REAL NULL,"
             "bpo_analysis_skip_reason TEXT NULL,"
-            "isk_per_hour_is_upper_bound INTEGER NULL"
+            "isk_per_hour_is_upper_bound INTEGER NULL,"
+            "momentum_signal REAL NULL"
             ")"
         ),
     )
@@ -883,7 +884,8 @@ def ensure_app_schema(db_app: DatabaseManager) -> None:
             "decryptor_type_name TEXT NULL,"
             "estimated_job_fee_isk REAL NULL,"
             "estimated_job_fee_unknown_reason TEXT NULL,"
-            "queued_after_me INTEGER NOT NULL DEFAULT 0"
+            "queued_after_me INTEGER NOT NULL DEFAULT 0,"
+            "short_type_ids TEXT NULL"
             ")"
         ),
     )
@@ -1059,6 +1061,9 @@ def ensure_app_schema(db_app: DatabaseManager) -> None:
     _ensure_column(db_app, table="daily_action_log", column="estimated_job_fee_unknown_reason", ddl_type="TEXT")
     # A TE research queued behind the ME job on its BPO.
     _ensure_column(db_app, table="daily_action_log", column="queued_after_me", ddl_type="INTEGER NOT NULL DEFAULT 0")
+    # The buy lines a job waits on; an item's momentum signal.
+    _ensure_column(db_app, table="daily_action_log", column="short_type_ids", ddl_type="TEXT")
+    _ensure_column(db_app, table="build_plan_item", column="momentum_signal", ddl_type="REAL")
     _ensure_column(db_app, table="build_plan_item", column="snapshot_sell_price", ddl_type="REAL")
     _ensure_column(db_app, table="build_plan_item", column="bpo_analysis_skip_reason", ddl_type="TEXT")
     _ensure_column(db_app, table="corporations", column="wallets_refreshed_at", ddl_type="DATETIME")

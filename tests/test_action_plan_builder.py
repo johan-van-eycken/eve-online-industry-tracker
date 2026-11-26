@@ -331,3 +331,16 @@ def test_a_job_with_an_unknown_activity_is_skipped_with_a_warning(caplog):
         assert _deliver_rows(_job(activity_id=7, job_id=124)) == []
     assert any("124" in r.getMessage() and "7" in r.getMessage() for r in caplog.records
                if r.levelno == logging.WARNING)
+
+
+def test_a_job_action_persists_the_buy_lines_it_waits_on():
+    from eve_online_industry_tracker.application.daily_planner.action_plan_builder import ActionPlanBuilder
+    from eve_online_industry_tracker.application.daily_planner.models import AssignedAction
+    action = AssignedAction(
+        type_id=12345, type_name="Thing", action_type="manufacture", character_id=1,
+        character_name="Pilot", quantity=200, runs=20, estimated_cost_isk=None,
+        estimated_profit_isk=None, estimated_completion=None, notes=None, short_type_ids=(34, 35),
+    )
+    covered = AssignedAction(**{**action.__dict__, "short_type_ids": ()})
+    rows = ActionPlanBuilder()._build_job_actions(0, [action, covered], datetime(2026, 1, 1))
+    assert [r.short_type_ids for r in rows] == ["34,35", ""]

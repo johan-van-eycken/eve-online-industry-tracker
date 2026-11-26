@@ -42,8 +42,8 @@ def test_the_sections_follow_the_given_action_types_order():
     """_ACTION_ORDER is derived from CHARACTER_ACTION_TYPES, so the
     order and the set live in one place; only the labels are local."""
     assert tab_actions._action_sections(("manufacture", "deliver")) == [
-        ("manufacture", "MANUFACTURE", "🟢"),
-        ("deliver", "DELIVER", "🔴"),
+        ("manufacture", "MANUFACTURE", "green"),
+        ("deliver", "DELIVER", "red"),
     ]
     assert tab_actions._ACTION_ORDER == tab_actions._action_sections(CHARACTER_ACTION_TYPES)
 
@@ -186,3 +186,57 @@ def test_the_pending_count_uses_the_jobs_too():
     me, te = _queued_pair("2026-01-01T12:00:00Z", me_status="done")
     assert pending_character_action_count([me, te], now) == 1
     assert pending_character_action_count([me, te], now, jobs=[_me_job("2026-01-03T00:00:00Z")]) == 0
+
+
+def test_short_notes_cuts_after_three_parts_and_keeps_the_full_text():
+    assert tab_actions.short_notes("a; b") == ("a · b", None)
+    assert tab_actions.short_notes("a; b; c; d") == ("a · b · c …", "a · b · c · d")
+    assert tab_actions.short_notes("") == ("", None)
+
+
+def test_the_filter_splits_ready_rows_from_rows_that_wait_on_purchases():
+    deliver, build = {"action_type": "deliver"}, {"action_type": "manufacture", "short_type_ids": "34"}
+    ready, buy = tab_actions.FILTER_READY, tab_actions.FILTER_BUY
+    waiting = {"current_job": {34: "Tritanium"}}
+    assert [tab_actions.matches_filter(a, ready, waiting) for a in (deliver, build)] == [True, False]
+    assert [tab_actions.matches_filter(a, buy, waiting) for a in (deliver, build)] == [False, True]
+    assert tab_actions.matches_filter(build, ready, {})
+    assert tab_actions.matches_filter(build, tab_actions.FILTER_ALL, waiting)
+
+
+def test_todo_filter_hides_done_and_skipped_rows():
+    rows = [{"action_type": "invent", "status": s} for s in ("pending", "done", "skipped")]
+    assert [tab_actions.matches_filter(a, tab_actions.FILTER_TODO, {}) for a in rows] == [True, False, False]
+
+
+def test_a_job_waits_only_on_its_own_pending_buy_lines():
+    actions = [
+        {"action_type": "buy_materials", "shopping_category": "current_job", "status": "pending",
+         "type_id": 34, "type_name": "Tritanium"},
+        {"action_type": "buy_materials", "shopping_category": "current_job", "status": "done",
+         "type_id": 35, "type_name": "Pyerite"},
+        {"action_type": "buy_materials", "shopping_category": "invention_input", "status": "pending",
+         "type_id": 20410, "type_name": "Datacore"},
+    ]
+    pending = tab_actions.pending_buy_lines(actions)
+    wait = tab_actions.waiting_on
+    assert wait({"action_type": "manufacture", "short_type_ids": "34,35"}, pending) == ["Tritanium"]
+    assert wait({"action_type": "manufacture", "short_type_ids": "35"}, pending) == []   # its line is bought
+    assert wait({"action_type": "manufacture", "short_type_ids": ""}, pending) == []     # all from stock
+    assert wait({"action_type": "invent", "short_type_ids": "20410"}, pending) == ["Datacore"]
+    assert wait({"action_type": "copy", "short_type_ids": None}, pending) == []
+    # A plan from before the link waits on every open line of its kind.
+    assert wait({"action_type": "manufacture"}, pending) == ["Tritanium"]
+
+
+def test_the_steps_count_what_is_left():
+    chars = [{"action_type": "deliver", "status": "done", "character_id": 1},
+             {"action_type": "manufacture", "status": "pending", "character_id": 1},
+             {"action_type": "invent", "status": "pending", "character_id": 2}]
+    buys = [{"action_type": "buy_materials", "shopping_category": "current_job", "status": "pending",
+             "estimated_cost_isk": 3_000_000.0}]
+    assert tab_actions.step_summaries(chars, chars + buys) == [
+        ("Deliver", "nothing to deliver", True),
+        ("Buy materials", "1 item(s) · 3.00M ISK → Shopping List", False),
+        ("Start jobs", "2 job(s) on 2 pilot(s)", False),
+    ]

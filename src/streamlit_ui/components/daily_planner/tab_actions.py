@@ -14,8 +14,9 @@ from streamlit_ui.components.daily_planner.status_bar import (
     CORP_LEVEL_ACTION_TYPES,
     _fmt_isk,
     _parse_dt,
+    free_slots_by_character,
     is_waiting,
-    load_active_jobs,
+    plan_summary,
     queued_te_status,
 )
 
@@ -31,19 +32,20 @@ _WARNED_UNKNOWN_ACTION_TYPES: set[str] = set()
 
 # Section label and marker per action type. The order and the set of types
 # come from status_bar.CHARACTER_ACTION_TYPES, the single source.
+# The colour is a Streamlit markdown colour (:red[...]).
 _SECTION_DISPLAY: dict[str, tuple[str, str]] = {
-    "deliver":         ("DELIVER",         "🔴"),
-    "invent":          ("INVENT",          "🟡"),
-    "copy":            ("COPY",            "🟣"),
-    "me_research":     ("ME RESEARCH",     "🔧"),
-    "te_research":     ("TE RESEARCH",     "🔧"),
-    "sub_manufacture": ("SUB-MANUFACTURE", "🔧"),
-    "manufacture":     ("MANUFACTURE",     "🟢"),
+    "deliver":         ("DELIVER",         "red"),
+    "invent":          ("INVENT",          "orange"),
+    "copy":            ("COPY",            "violet"),
+    "me_research":     ("ME RESEARCH",     "blue"),
+    "te_research":     ("TE RESEARCH",     "blue"),
+    "sub_manufacture": ("SUB-MANUFACTURE", "gray"),
+    "manufacture":     ("MANUFACTURE",     "green"),
 }
 
 
 def _action_sections(action_types: tuple[str, ...]) -> list[tuple[str, str, str]]:
-    """(action type, label, marker) per type, in the given order. A type with
+    """(action type, label, colour) per type, in the given order. A type with
     no display entry raises KeyError at import, not a silently missing section."""
     return [(t, *_SECTION_DISPLAY[t]) for t in action_types]
 
@@ -124,15 +126,39 @@ def _todays(
     return [a for a in actions if not is_waiting(a, actions, now, jobs=jobs)]
 
 
-def _has_pending_buys(plan: dict[str, Any]) -> bool:
-    """True if any current_job buy_materials actions are still pending."""
-    actions = plan.get("actions") or []
-    return any(
-        str(a.get("action_type") or "") == "buy_materials"
-        and str(a.get("shopping_category") or "") == "current_job"
-        and str(a.get("status") or "pending") == "pending"
-        for a in actions
-    )
+# The shopping list category each start action waits on; copies and research use no materials.
+_BUY_CATEGORY: dict[str, str] = {
+    "manufacture": "current_job", "sub_manufacture": "current_job", "invent": "invention_input",
+}
+
+
+PendingBuys = dict[str, dict[int, str]]
+
+
+def pending_buy_lines(actions: list[dict[str, Any]]) -> PendingBuys:
+    """{shopping category: {type_id: item name}} of the buy lines still pending."""
+    lines: PendingBuys = {}
+    for a in actions:
+        if str(a.get("action_type") or "") == "buy_materials" and str(a.get("status") or "pending") == "pending":
+            lines.setdefault(str(a.get("shopping_category") or ""), {})[int(a.get("type_id") or 0)] = str(
+                a.get("type_name") or "Unknown")
+    return lines
+
+
+def waiting_on(action: dict[str, Any], pending_buys: PendingBuys) -> list[str]:
+    """The pending buy lines (item names) this job waits on: the materials it
+    was short of at plan time that are not bought yet. A plan from before the
+    link (no short_type_ids) waits on every pending line of its kind."""
+    pending = pending_buys.get(_BUY_CATEGORY.get(str(action.get("action_type") or ""), ""), {})
+    short = action.get("short_type_ids")
+    if short is None:
+        return list(pending.values())
+    ids = [int(t) for t in str(short).split(",") if t.strip()]
+    return [pending[t] for t in ids if t in pending]
+
+
+def needs_purchase(action: dict[str, Any], pending_buys: PendingBuys) -> bool:
+    return bool(waiting_on(action, pending_buys))
 
 
 def _reload_plan(page_state: DailyPlannerPageState) -> None:
@@ -168,150 +194,133 @@ def action_quantity_label(action: dict[str, Any]) -> str:
     return ""
 
 
+#: Today's Actions filter choices.
+FILTER_TODO, FILTER_ALL, FILTER_READY, FILTER_BUY = "Todo's", "All", "Ready now", "Needs purchase"
+
+
+def short_notes(notes: str, keep: int = 3) -> tuple[str, str | None]:
+    """(one line, full text or None): the planner's "; "-joined reason parts
+    as "a · b · c", cut after `keep` parts; the full text comes back only
+    when something was cut (it goes in the tooltip)."""
+    parts = [p.strip() for p in notes.split(";") if p.strip()]
+    if len(parts) <= keep:
+        return " · ".join(parts), None
+    return " · ".join(parts[:keep]) + " …", " · ".join(parts)
+
+
+def matches_filter(action: dict[str, Any], mode: str, pending_buys: PendingBuys) -> bool:
+    """Whether the row shows under the filter: "Todo's" is what is neither
+    done nor skipped, "Ready now" what can be done without buying, "Needs
+    purchase" the jobs still waiting on the shopping list."""
+    if mode == FILTER_ALL:
+        return True
+    if mode == FILTER_TODO:
+        return str(action.get("status") or "pending") == "pending"
+    needs_buy = needs_purchase(action, pending_buys)
+    return needs_buy if mode == FILTER_BUY else not needs_buy
+
+
+def step_summaries(
+    char_actions: list[dict[str, Any]], all_actions: list[dict[str, Any]], *,
+    jobs: list[dict[str, Any]] | None = None,
+) -> list[tuple[str, str, bool]]:
+    """(title, grey line, done) for the three daily steps."""
+    def _pending(rows):
+        return [a for a in rows if str(a.get("status") or "pending") == "pending"]
+
+    delivers = [a for a in char_actions if str(a.get("action_type") or "") == "deliver"]
+    buys = [a for a in all_actions if str(a.get("action_type") or "") == "buy_materials"]
+    starts = [a for a in _todays(char_actions, jobs=jobs) if str(a.get("action_type") or "") in _START_ACTIONS]
+    pending_buys = _pending(buys)
+    buy_isk = sum(float(a.get("estimated_cost_isk") or 0.0) for a in pending_buys)
+    pilots = {a.get("character_id") for a in _pending(starts)}
+    return [
+        ("Deliver", f"{len(_pending(delivers))} job(s) ready" if _pending(delivers) else "nothing to deliver",
+         not _pending(delivers)),
+        ("Buy materials", f"{len(pending_buys)} item(s) · {_fmt_isk(buy_isk)} → Shopping List" if pending_buys
+         else "everything bought", not pending_buys),
+        ("Start jobs", f"{len(_pending(starts))} job(s) on {len(pilots)} pilot(s)" if _pending(starts)
+         else "all started", bool(starts) and not _pending(starts)),
+    ]
+
+
+def _status_button(action_id: int, page_state: DailyPlannerPageState, *, label: str, key: str,
+                   help_text: str, skip: bool = False) -> None:
+    if st.button(label, key=key, help=help_text):
+        try:
+            if skip:
+                set_action_status(action_id, "skipped")
+            else:
+                mark_action_done(action_id)
+            _reload_plan(page_state)
+            st.rerun()
+        except Exception as exc:
+            st.error(f"Failed: {exc}")
+
+
 def _render_action_row(
     action: dict[str, Any],
     page_state: DailyPlannerPageState,
-    readiness_ok: bool,
+    pending_buys: PendingBuys,
     siblings: list[dict[str, Any]] | None = None,
     *,
     jobs: list[dict[str, Any]] | None = None,
+    show_reasons: bool = True,
 ) -> None:
     action_id = int(action.get("id") or 0)
     status = str(action.get("status") or "pending")
     action_type = str(action.get("action_type") or "")
     type_name = str(action.get("type_name") or "Unknown")
     cost = action.get("estimated_cost_isk")
-    completion = action.get("estimated_completion")
     notes = str(action.get("notes") or "")
-    is_override = bool(action.get("is_force_override"))
-
     qty_label = action_quantity_label(action)
-
     cost_label = _fmt_isk(float(cost)) if cost is not None else ""
-    completion_label = _fmt_completion(completion)
+    completion_label = _fmt_completion(action.get("estimated_completion"))
 
-    # Row layout
-    if status == "done":
-        st.markdown(f"~~{type_name} {qty_label}~~ ✅")
-        return
-    if status == "skipped":
-        st.markdown(f"~~{type_name} {qty_label}~~ *(skipped)*")
+    if status in ("done", "skipped"):
+        st.markdown(f":gray[~~{type_name} {qty_label}~~ · {'done' if status == 'done' else 'skipped'}]")
         return
 
+    detail_parts: list[str] = []
+    badge: tuple[str, str] | None = None
+    done_label, done_help = ":material/check:", "Mark as done"
     if _is_queued(action):
         startable, queue_note = queued_te_status(action, siblings or [action], jobs=jobs)
         if not startable:
             # Not startable yet: no done/skip buttons.
-            st.markdown(f"⏳ {type_name} — *queued: start when the ME research on this BPO ends*")
-            if completion_label:
-                st.caption(completion_label)
-            if queue_note:
-                st.caption(f"  ↳ {queue_note}")
+            st.markdown(f"**{type_name}** :gray[{qty_label}]")
+            st.caption(" · ".join(p for p in ("queued behind the ME research on this BPO", completion_label,
+                                              queue_note) if p))
             return
-        # The ME research has ended: start it in EVE, then record it.
-        cols = st.columns([1.2, 0.6, 5])
-        with cols[0]:
-            if st.button("Mark started", key=f"started_{action_id}",
-                         help="The ME research on this BPO has ended: mark this TE research as started"):
-                try:
-                    mark_action_done(action_id)
-                    _reload_plan(page_state)
-                    st.rerun()
-                except Exception as exc:
-                    st.error(f"Failed: {exc}")
-        with cols[1]:
-            if st.button("Skip", key=f"skip_{action_id}", help="Skip this action"):
-                try:
-                    set_action_status(action_id, "skipped")
-                    _reload_plan(page_state)
-                    st.rerun()
-                except Exception as exc:
-                    st.error(f"Failed: {exc}")
-        with cols[2]:
-            st.markdown(f"{type_name} — *the ME research on this BPO has ended: start it now*")
-            if completion_label:
-                st.caption(completion_label)
-            if queue_note:
-                st.caption(f"  ↳ {queue_note}")
-        if notes:
-            st.caption(f"  ↳ {notes}")
-        return
+        badge = ("Start now", "blue")
+        done_label, done_help = ":material/play_arrow:", "The ME research on this BPO has ended: mark this TE research as started"
+        detail_parts.append(queue_note or "")
+    elif action_type in _START_ACTIONS:
+        missing = waiting_on(action, pending_buys)
+        badge = ("Buy first", "orange") if missing else ("Ready", "green")
+        if missing:
+            detail_parts.append("buy: " + ", ".join(missing[:3]) + (f" +{len(missing) - 3}" if len(missing) > 3 else ""))
+    else:
+        badge = ("Ready", "green")
 
-    # Pending action
-    cols = st.columns([0.5, 0.6, 4, 1.5, 1.5, 1.5, 1])
+    cols = st.columns([0.7, 0.7, 5, 2.2], vertical_alignment="top")
     with cols[0]:
-        if st.button("✅", key=f"done_{action_id}", help="Mark as done"):
-            try:
-                mark_action_done(action_id)
-                _reload_plan(page_state)
-                st.rerun()
-            except Exception as exc:
-                st.error(f"Failed: {exc}")
-
+        _status_button(action_id, page_state, label=done_label, key=f"done_{action_id}", help_text=done_help)
     with cols[1]:
-        if st.button("Skip", key=f"skip_{action_id}", help="Skip this action"):
-            try:
-                set_action_status(action_id, "skipped")
-                _reload_plan(page_state)
-                st.rerun()
-            except Exception as exc:
-                st.error(f"Failed: {exc}")
-
+        _status_button(action_id, page_state, label=":material/skip_next:", key=f"skip_{action_id}",
+                       help_text="Skip this action", skip=True)
     with cols[2]:
-        label = type_name
-        if qty_label:
-            label += f" {qty_label}"
-        if is_override:
-            label += " ★ manual override"
-        st.markdown(label)
-
+        st.markdown(f"**{type_name}** :gray[{qty_label}]")
+        if show_reasons:
+            short, full = short_notes(notes)
+            line = " · ".join(p for p in (short, completion_label, *detail_parts) if p)
+            if line:
+                st.caption(line, help=full)
     with cols[3]:
         if cost_label:
-            st.caption(cost_label)
-
-    with cols[4]:
-        if completion_label:
-            st.caption(completion_label)
-
-    with cols[5]:
-        if action_type in _START_ACTIONS:
-            if readiness_ok:
-                st.caption("✅ Ready")
-            else:
-                st.caption("🛒 Buy first")
-
-    with cols[6]:
-        pass  # spacer
-
-    if notes:
-        st.caption(f"  ↳ {notes}")
-
-
-# ---------------------------------------------------------------------------
-# Workflow progress header
-# ---------------------------------------------------------------------------
-
-def _render_workflow_header(actions: list[dict[str, Any]], *, jobs: list[dict[str, Any]] | None = None) -> None:
-    deliver_done = all(
-        str(a.get("status") or "pending") in ("done", "skipped")
-        for a in actions
-        if str(a.get("action_type") or "") == "deliver"
-    ) and any(str(a.get("action_type") or "") == "deliver" for a in actions)
-
-    start_done = all(
-        str(a.get("status") or "pending") in ("done", "skipped")
-        for a in _todays(actions, jobs=jobs)
-        if str(a.get("action_type") or "") in _START_ACTIONS
-    ) and any(str(a.get("action_type") or "") in _START_ACTIONS for a in actions)
-
-    step1 = "Step 1: Deliver ✓" if deliver_done else "Step 1: Deliver"
-    step2 = "Step 2: Buy materials → [Shopping List]"
-    step3 = "Step 3: Start jobs ✓" if start_done else "Step 3: Start jobs"
-
-    st.markdown(
-        f"**{step1}** &nbsp;→&nbsp; {step2} &nbsp;→&nbsp; **{step3}**"
-    )
-    st.markdown("---")
+            st.markdown(f"`{cost_label}`")
+        if badge:
+            st.badge(badge[0], color=badge[1])
 
 
 # ---------------------------------------------------------------------------
@@ -322,43 +331,39 @@ def _render_character_section(
     char_name: str,
     char_actions: list[dict[str, Any]],
     page_state: DailyPlannerPageState,
-    readiness_ok: bool,
+    pending_buys: PendingBuys,
     *,
     jobs: list[dict[str, Any]] | None = None,
+    free_slots: str | None = None,
+    mode: str = FILTER_ALL,
+    show_reasons: bool = True,
 ) -> None:
-    # Group by action type
     by_type: dict[str, list[dict[str, Any]]] = {}
     for a in char_actions:
-        at = str(a.get("action_type") or "")
-        by_type.setdefault(at, []).append(a)
+        by_type.setdefault(str(a.get("action_type") or ""), []).append(a)
 
-    pending_count = sum(
-        1 for a in _todays(char_actions, jobs=jobs)
-        if str(a.get("status") or "pending") == "pending"
-    )
-    label = f"{char_name} — {pending_count} pending"
+    todays_pending = [a for a in _todays(char_actions, jobs=jobs) if str(a.get("status") or "pending") == "pending"]
+    pending_isk = sum(float(a.get("estimated_cost_isk") or 0.0) for a in todays_pending)
 
-    with st.expander(label, expanded=pending_count > 0):
-        for action_type, section_label, section_emoji in _ACTION_ORDER:
-            section_actions = by_type.get(action_type, [])
+    with st.container(border=True):
+        st.markdown(f"#### {char_name}")
+        st.caption(f"{len(todays_pending)} pending · {_fmt_isk(pending_isk)}"
+                   + (f" · free slots: {free_slots}" if free_slots else ""))
+        shown_any = False
+        for action_type, section_label, color in _ACTION_ORDER:
+            section_actions = [a for a in by_type.get(action_type, []) if matches_filter(a, mode, pending_buys)]
             if not section_actions:
                 continue
+            shown_any = True
+            pending = [a for a in section_actions if str(a.get("status") or "pending") == "pending"]
+            head, button_col = st.columns([3, 2], vertical_alignment="center")
+            head.markdown(f":{color}[**{section_label}**] :gray[{len(pending)}]")
 
-            st.markdown(f"**{section_emoji} {section_label}**")
-
-            # "Mark All Delivered Done" convenience button
-            if action_type == "deliver":
-                pending_delivers = [
-                    a for a in section_actions
-                    if str(a.get("status") or "pending") == "pending"
-                ]
-                if pending_delivers:
-                    if st.button(
-                        f"Mark All Delivered Done ({len(pending_delivers)})",
-                        key=f"mark_all_deliver_{char_name}",
-                    ):
+            if action_type == "deliver" and pending:
+                with button_col:
+                    if st.button(f"All delivered ({len(pending)})", key=f"mark_all_deliver_{char_name}"):
                         errors: list[str] = []
-                        for a in pending_delivers:
+                        for a in pending:
                             try:
                                 mark_action_done(int(a.get("id") or 0))
                             except RuntimeError as exc:
@@ -369,17 +374,22 @@ def _render_character_section(
                         st.rerun()
 
             for action in section_actions:
-                _render_action_row(action, page_state, readiness_ok, char_actions, jobs=jobs)
-
-            st.markdown("")  # spacer between sections
+                _render_action_row(action, page_state, pending_buys, char_actions, jobs=jobs,
+                                   show_reasons=show_reasons)
+        if not shown_any:
+            st.caption("Nothing under this filter.")
 
 
 # ---------------------------------------------------------------------------
 # Main tab renderer
 # ---------------------------------------------------------------------------
 
-def render_tab_actions(page_state: DailyPlannerPageState, planner_settings: dict[str, float] | None = None) -> None:
-    """planner_settings: the page's one admin settings read (None: the schema defaults)."""
+def render_tab_actions(
+    page_state: DailyPlannerPageState, planner_settings: dict[str, float] | None = None, *,
+    jobs: list[dict[str, Any]] | None = None,
+) -> None:
+    """planner_settings: the page's one admin settings read (None: the schema defaults).
+    jobs: the active industry jobs the page read (None: unknown, the planner's estimate is used)."""
     if planner_settings is None:
         planner_settings = planner_page_defaults()
     if page_state.plan is None:
@@ -415,16 +425,12 @@ def render_tab_actions(page_state: DailyPlannerPageState, planner_settings: dict
     if not char_actions:
         st.info("No actions for today. The plan has no pending character-level tasks.")
         return
-    # Read once per render: a queued TE starts on its ME job's real end.
-    jobs = load_active_jobs()
-
     # Check if day is complete
     all_done = all(
         str(a.get("status") or "pending") in ("done", "skipped")
         for a in _todays(char_actions, jobs=jobs)
     )
     if all_done:
-        # Day complete banner
         jobs_started = sum(
             1 for a in char_actions
             if str(a.get("action_type") or "") in _START_ACTIONS
@@ -451,25 +457,28 @@ def render_tab_actions(page_state: DailyPlannerPageState, planner_settings: dict
         )
         return
 
-    # Workflow progress header
-    _render_workflow_header(char_actions, jobs=jobs)
+    pending_buys = pending_buy_lines(all_actions)
 
-    # Determine readiness: if any current_job buy_materials actions are pending, not ready
-    readiness_ok = not _has_pending_buys(page_state.plan)
+    filter_col, reasons_col = st.columns([3, 1], vertical_alignment="center")
+    with filter_col:
+        mode = st.segmented_control(
+            "Show", [FILTER_TODO, FILTER_ALL, FILTER_READY, FILTER_BUY], default=FILTER_TODO,
+            key="dp_actions_filter", label_visibility="collapsed",
+        ) or FILTER_TODO
+    with reasons_col:
+        show_reasons = st.toggle("Show reasons", value=True, key="dp_actions_reasons")
+    st.caption("Readiness is based on stock at plan time — re-check in-game before submitting.")
 
-    if not readiness_ok:
-        st.caption(
-            "🛒 Some materials still need to be purchased — go to **Shopping List** tab first. "
-            "Readiness based on stock at plan time — re-check in-game before submitting."
-        )
-    else:
-        st.caption("Readiness based on stock at plan time — re-check in-game before submitting.")
-
-    # Group by character
     char_groups: dict[str, list[dict[str, Any]]] = {}
     for action in char_actions:
         name = str(action.get("character_name") or action.get("character_id") or "Unknown")
         char_groups.setdefault(name, []).append(action)
 
-    for char_name, actions in sorted(char_groups.items()):
-        _render_character_section(char_name, actions, page_state, readiness_ok, jobs=jobs)
+    free = free_slots_by_character(plan_summary(plan_meta).get("free_slots"))
+    names = sorted(char_groups)
+    for start in range(0, len(names), 2):
+        for col, char_name in zip(st.columns(2), names[start:start + 2]):
+            with col:
+                _render_character_section(char_name, char_groups[char_name], page_state, pending_buys,
+                                          jobs=jobs, free_slots=free.get(char_name), mode=mode,
+                                          show_reasons=show_reasons)
