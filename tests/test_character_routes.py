@@ -67,6 +67,10 @@ def test_routes_login_conflict_and_patch_delete(client, db, monkeypatch):
 
     monkeypatch.setattr(route.login, "start", lambda *a: None)
     assert c.post("/characters/login", json={"character_name": "Alt"}).status_code == 409
+    monkeypatch.setattr(route.login, "busy", lambda: True)
+    assert c.post("/characters/login", json={"character_name": "Other"}).status_code == 409
+    names = [r[0] for r in db.session.execute(text("SELECT character_name FROM oauth_characters ORDER BY id"))]
+    assert names == ["Main", "Alt", "New"]   # no row while another login runs
 
     assert c.patch("/characters/Nobody", json={"is_main": True}).status_code == 404
     assert c.patch("/characters/Alt", json={"is_main": "yes"}).status_code == 400

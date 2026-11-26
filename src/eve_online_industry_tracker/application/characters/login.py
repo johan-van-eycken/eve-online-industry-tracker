@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import webbrowser
 from typing import Any
 
 from eve_online_industry_tracker.infrastructure.esi_client import ESIClient, WrongCharacterError
@@ -16,22 +17,32 @@ def start(cfg: Any, db_oauth: Any, character_name: str, is_corp_director: bool) 
     """The login URL, with the login waiting on a daemon thread; None while another login runs."""
     if not _lock.acquire(blocking=False):
         return None
+    previous = dict(_status)
     try:
         client = ESIClient(cfg, db_oauth, character_name, False, is_corp_director, load_tokens=False)
         url = client.authorization_url()
         _status.update(state="waiting", character_name=character_name, restarting=False,
-                       message=f"Log in as {character_name} in the browser.")
+                       message=f"Log in as {character_name} in the browser window that opened (5 min).")
         threading.Thread(target=_run, args=(client, character_name), daemon=True, name="character-login").start()
     except BaseException:
+        _status.update(previous)   # no login runs: not left at "waiting"
         _lock.release()
         raise
+    webbrowser.open(url)   # the page also shows url, for when no browser opens
     return url
+
+
+def busy() -> bool:
+    """A login is running (a racy check; start() is the real gate)."""
+    return _lock.locked()
 
 
 def _run(client: ESIClient, wanted: str) -> None:
     try:
         client.register_new_character(expected_name=wanted)
-        _status.update(state="done", message=f"{wanted} is activated.", restarting=request_restart())
+        restarting = request_restart()
+        _status.update(state="done", restarting=restarting,
+                       message=f"{wanted} is activated." + ("" if restarting else " Restart the app to load the character."))
     except WrongCharacterError as e:
         _status.update(state="wrong_character", message=f"You logged in as {e.got}. Log in as {wanted}.")
     except TimeoutError:

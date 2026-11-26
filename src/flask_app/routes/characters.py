@@ -69,6 +69,8 @@ def characters_login():
     if not name:
         return error(message="character_name is required", status_code=400)
     flags = _flags(body)
+    if login.busy():   # before adding a row; start() below still decides
+        return error(message="Another character login is in progress.", status_code=409)
     repo = OAuthCharacterRepository(state.db_oauth.session)
     row = next((r for r in repo.list_metadata() if (r.character_name or "").casefold() == name.casefold()), None)
     if row is None:

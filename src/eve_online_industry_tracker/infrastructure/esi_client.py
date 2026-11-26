@@ -918,7 +918,10 @@ class ESIClient:
             **get_requests_ssl_kwargs(),
         )
         response.raise_for_status()
-        return str(response.json().get("CharacterName") or "")
+        name = response.json().get("CharacterName")
+        if not name:
+            raise ValueError("The SSO login did not name a character")
+        return str(name)
 
     # ----------------------------
     # ESI API + Cache Helpers

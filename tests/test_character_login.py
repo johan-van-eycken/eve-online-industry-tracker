@@ -11,6 +11,7 @@ from sqlalchemy import text
 
 import flask_app.restart as restart
 from eve_online_industry_tracker.application.characters import login
+from eve_online_industry_tracker.infrastructure import esi_client as esi_client_module
 from eve_online_industry_tracker.infrastructure.database_manager import DatabaseManager
 from eve_online_industry_tracker.infrastructure.esi_client import ESIClient, WrongCharacterError
 from eve_online_industry_tracker.infrastructure.models import BaseOauth
@@ -34,6 +35,22 @@ def db(tmp_path):
     ensure_oauth_schema(d)
     OAuthCharacterRepository(d.session).add("Main")
     return d
+
+
+@pytest.fixture(autouse=True)
+def opened(monkeypatch):
+    """No real browser; a clean login state before and after each test, so one failure can't cascade."""
+    urls = []
+    monkeypatch.setattr(login.webbrowser, "open", urls.append)
+    idle = {"state": "idle", "character_name": None, "message": "", "restarting": False}
+    login._status.update(idle)
+    yield urls
+    end = time.time() + 5
+    while login._lock.locked() and time.time() < end:
+        time.sleep(0.01)
+    if login._lock.locked():
+        login._lock.release()
+    login._status.update(idle)
 
 
 def _rows(db):
@@ -79,7 +96,7 @@ def _wait_for(predicate, seconds=5.0):
         time.sleep(0.01)
 
 
-def test_login_busy_returns_none(monkeypatch):
+def test_login_busy_returns_none(monkeypatch, opened):
     release = threading.Event()
 
     class _Client:
@@ -100,9 +117,46 @@ def test_login_busy_returns_none(monkeypatch):
     assert login.start(CFG, MagicMock(), "Alt", False) is None
     release.set()
     _wait_for(lambda: login.status()["state"] == "done")
-    assert login.status() == {"state": "done", "character_name": "Main", "message": login.status()["message"],
-                              "restarting": False}
+    assert login.status() == {"state": "done", "character_name": "Main", "restarting": False,
+                              "message": "Main is activated. Restart the app to load the character."}
+    assert opened == ["https://sso.example/auth?x"]   # once, for the first login only
     _wait_for(lambda: not login._lock.locked())
+
+
+def test_done_with_restart_status(db, monkeypatch, opened):
+    _fake_sso(monkeypatch, "Main")
+    monkeypatch.setattr(login, "request_restart", lambda: True)
+    url = login.start(CFG, db, "Main", False)
+    _wait_for(lambda: login.status()["state"] == "done")
+    assert login.status()["message"] == "Main is activated." and login.status()["restarting"] is True
+    assert opened == [url]
+
+
+def test_login_without_a_character_name_fails(db, monkeypatch):
+    _fake_sso(monkeypatch, "")
+    response = MagicMock()
+    response.json.return_value = {}
+    monkeypatch.setattr(esi_client_module.requests, "get", lambda *a, **k: response)
+    before = _rows(db)
+    login.start(CFG, db, "Main", False)
+    _wait_for(lambda: login.status()["state"] == "failed")
+    assert "did not name a character" in login.status()["message"]
+    assert _rows(db) == before
+
+
+def test_thread_start_failure_restores_the_status(db, monkeypatch, opened):
+    class _Thread:
+        def __init__(self, **kw):
+            pass
+
+        def start(self):
+            raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(login.threading, "Thread", _Thread)
+    with pytest.raises(RuntimeError):
+        login.start(CFG, db, "Main", False)
+    assert login.status()["state"] == "idle"
+    assert not login._lock.locked() and opened == []
 
 
 def test_wrong_character_status(db, monkeypatch):
