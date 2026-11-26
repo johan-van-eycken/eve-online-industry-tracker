@@ -1,4 +1,4 @@
-"""The Characters page roster and the zero-character gate, with the API patched."""
+"""The Manage Characters roster (Admin) and the zero-character gate, with the API patched."""
 from __future__ import annotations
 
 from unittest.mock import patch
@@ -138,5 +138,22 @@ def test_gate_blocks_other_pages_with_zero_active():
     with patch("streamlit_ui.shell._render_module_page") as render_page:
         at = _run(_shell_script, [patch("streamlit_ui.components.character_roster.api_get", lambda p, timeout_seconds=None: health)],
                   {"app_shell_navigation": "Daily Planner"})
-    assert [i.value for i in at.info] == ["Activate a character first: open **Characters** in the navigation."]
+    assert [i.value for i in at.info] == ["Activate a character first: open **Admin → Manage Characters** in the sidebar."]
+    render_page.assert_not_called()
+
+
+def test_gate_also_covers_the_characters_page():
+    health = {"status": "OK", "characters": {"active": 0, "not_activated": ["Bravo"]}}
+    with patch("streamlit_ui.shell._render_module_page") as render_page:
+        at = _run(_shell_script, [patch("streamlit_ui.components.character_roster.api_get", lambda p, timeout_seconds=None: health)],
+                  {"app_shell_navigation": "Characters"})
+    assert [i.value for i in at.info] == ["Activate a character first: open **Admin → Manage Characters** in the sidebar."]
+    render_page.assert_not_called()
+
+
+def test_manage_characters_admin_page_renders_the_roster():
+    with patch("streamlit_ui.shell.render_character_roster") as roster, \
+         patch("streamlit_ui.shell._render_module_page") as render_page:
+        _run(_shell_script, [], {"app_shell_admin": "Manage Characters"})
+    roster.assert_called_once()
     render_page.assert_not_called()

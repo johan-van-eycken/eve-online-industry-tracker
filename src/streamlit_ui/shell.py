@@ -10,7 +10,7 @@ import requests
 import streamlit as st
 
 from streamlit_ui.api.client import api_get, api_post
-from streamlit_ui.components.character_roster import active_character_count
+from streamlit_ui.components.character_roster import active_character_count, render_character_roster
 from streamlit_ui.components.webpage_ui import render_job_status_panel
 
 
@@ -38,7 +38,7 @@ ADMIN_PAGE_MODULES = {
     "ESI Monitoring": "streamlit_ui.pages.esi_monitoring",
 }
 
-ADMIN_ACTIONS = ["", "Application Settings", "Database Maintenance", "Restart Flask App", "Restart Streamlit", "Public Structures Scan", "ESI Monitoring"]
+ADMIN_ACTIONS = ["", "Manage Characters", "Application Settings", "Database Maintenance", "Restart Flask App", "Restart Streamlit", "Public Structures Scan", "ESI Monitoring"]
 
 
 def _render_module_page(module_path: str) -> None:
@@ -162,6 +162,9 @@ def _render_public_structures_scan_page() -> None:
 
 
 def _render_admin_page(choice_admin: str) -> None:
+    if choice_admin == "Manage Characters":
+        render_character_roster()
+        return
     if choice_admin == "Restart Flask App":
         _render_restart_flask_page()
         return
@@ -192,7 +195,7 @@ def render_application() -> None:
     page_spec = next((page for page in NAVIGATION_PAGES if page.label == selected_navigation), None)
     if page_spec is None:
         return
-    if page_spec.label != "Characters" and active_character_count() == 0:
-        st.info("Activate a character first: open **Characters** in the navigation.")
+    if active_character_count() == 0:
+        st.info("Activate a character first: open **Admin → Manage Characters** in the sidebar.")
         return
     _render_module_page(page_spec.module_path)

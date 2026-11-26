@@ -1,4 +1,4 @@
-"""The roster, login and flag routes of the Characters page. tmp_path SQLite, fake names."""
+"""The roster, login and flag routes behind Admin → Manage Characters. tmp_path SQLite, fake names."""
 from __future__ import annotations
 
 from types import SimpleNamespace

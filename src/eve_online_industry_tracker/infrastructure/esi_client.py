@@ -422,7 +422,7 @@ def _esi_gate(context: str) -> None:
 
 
 class CharacterNotActivatedError(RuntimeError):
-    """The character has no stored login; it is activated on the Characters page, never at startup."""
+    """The character has no stored login; it is activated in Admin → Manage Characters, never at startup."""
 
 
 class WrongCharacterError(Exception):

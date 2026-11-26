@@ -138,7 +138,7 @@ def initialize_application(app_state: AppState | None = None, *, refresh_metadat
         )
         from eve_online_industry_tracker.application.characters import roster_seed
         state.init_warnings.extend(
-            f"{name} was not in secret.json but has a login; delete it on Characters if unwanted"
+            f"{name} was not in secret.json but has a login; delete it in Admin → Manage Characters if unwanted"
             for name in roster_seed.LAST_SEED_UNCONFIGURED
         )
         # The realized invention estimate (job cost snapshots, refreshed below)

@@ -17,7 +17,6 @@ from streamlit_ui.api.characters import build_character_options, fetch_character
 from streamlit_ui.api.client import api_get
 from streamlit_ui.api.streamlit_client import cached_api_get
 from streamlit_ui.components.batch_errors import show_batch_errors
-from streamlit_ui.components.character_roster import active_character_count, render_character_roster
 from streamlit_ui.components.aggrid_formatters import js_category_text_style, js_icon_cell_renderer
 from streamlit_ui.components.formatters import format_isk, format_date, format_date_into_age
 from streamlit_ui.state.session_state import ensure_state_defaults, ensure_valid_state_value
@@ -342,10 +341,6 @@ def render():
         }
         </style>
         """, unsafe_allow_html=True)
-
-    render_character_roster()
-    if active_character_count() == 0:
-        return
 
     st.subheader("Characters")
 
@@ -726,7 +721,7 @@ def render():
 
             if target is None:
                 st.info("No OAuth record found for this character yet.")
-                st.write("Activate this character in the roster above.")
+                st.write("Activate this character in **Admin → Manage Characters**.")
             else:
                 expires_in = target.get("expires_in_seconds")
                 if isinstance(expires_in, (int, float)):

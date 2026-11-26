@@ -1,4 +1,4 @@
-"""One EVE SSO login at a time, for one named character, started from the Characters page."""
+"""One EVE SSO login at a time, for one named character, started from Admin → Manage Characters."""
 from __future__ import annotations
 
 import logging

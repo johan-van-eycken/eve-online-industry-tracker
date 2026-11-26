@@ -122,4 +122,4 @@ def test_init_db_managers_keeps_and_logs_unconfigured_names(monkeypatch, caplog)
     monkeypatch.setattr(roster_seed, "seed_characters_once", lambda db, chars: ["X"])
     app_init.init_db_managers(cfg)
     assert roster_seed.LAST_SEED_UNCONFIGURED == ["X"]
-    assert "X was not in secret.json but has a login; delete it on Characters if unwanted" in caplog.text
+    assert "X was not in secret.json but has a login; delete it in Admin → Manage Characters if unwanted" in caplog.text

@@ -158,7 +158,7 @@ def init_db_managers(cfgManager: ConfigManager, refresh_metadata: bool = False) 
         roster_seed.LAST_SEED_UNCONFIGURED.clear()
         roster_seed.LAST_SEED_UNCONFIGURED.extend(unconfigured)
         for name in roster_seed.LAST_SEED_UNCONFIGURED:
-            logging.warning("%s was not in secret.json but has a login; delete it on Characters if unwanted", name)
+            logging.warning("%s was not in secret.json but has a login; delete it in Admin → Manage Characters if unwanted", name)
         # One-off, idempotent: drop the ESI cache rows no request reads any more (logged).
         try:
             from eve_online_industry_tracker.infrastructure.esi_client import prune_stale_esi_cache
