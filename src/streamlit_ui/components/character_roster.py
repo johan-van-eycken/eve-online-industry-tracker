@@ -52,6 +52,7 @@ def _after_change(body: dict | None, err: str | None, done: str) -> None:
     if ((body.get("data") or {}).get("restarting")) is False:
         _notify("info", "Restart the app to load the change.")
     else:
+        st.cache_data.clear()  # stale after the reload; failed responses during it aren't cached
         _notify("success", f"{done} The app reloads.")
     st.rerun()
 
@@ -86,6 +87,8 @@ def _login_progress() -> None:
     if health is not None:
         not_activated = {n.casefold() for n in (health.get("characters") or {}).get("not_activated") or []}
         if name.casefold() not in not_activated:
+            # The reloaded app has other characters, so every cached page response is stale.
+            st.cache_data.clear()
             _end_login("success", f"{name} is active.")
             return
     st.info(f"Loading {name}…")

@@ -103,8 +103,10 @@ def test_unreachable_status_after_start_shows_loading():
 
 def test_loading_ends_when_health_shows_the_character_active():
     health = {"status": "OK", "characters": {"active": 1, "not_activated": []}}
-    at = _run(_roster_script, _fake_api(status={"state": "idle"}, health=health), {"login_for": "Delta", "login_url": "u"})
+    with patch("streamlit.cache_data.clear") as clear_cache:
+        at = _run(_roster_script, _fake_api(status={"state": "idle"}, health=health), {"login_for": "Delta", "login_url": "u"})
     assert "login_for" not in at.session_state
+    clear_cache.assert_called()  # the Characters page must not show the pre-reload list
     assert not any("Loading" in i.value for i in at.info)
 
 
