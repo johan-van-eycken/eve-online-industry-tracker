@@ -18,10 +18,116 @@ A local-first EVE Online helper app for industry and market analysis. Combines a
 
 ---
 
-## Prerequisites
+## Getting started
 
-- Python 3.10–3.12 (3.13+ not yet supported due to pinned dependencies)
-- An [EVE Online developer application](https://developers.eveonline.com/applications). Put its client id in `config/config.json` (`oauth.client_id`) and its secret in `secret.json` (see [Configuration](#configuration)). Give it the scopes the app requests (`defaults.scopes` and `defaults.scopes_corp_director` in `config/config.json`):
+Five steps, about 15 minutes. Run every command from the repository root (the folder with `README.md`): the config and database paths are relative to it.
+
+### What you need
+
+- **Python 3.11 or 3.12.** 3.10 has no wheels for the pinned numpy, and 3.13+ isn't supported yet. On Windows, install it from [python.org](https://www.python.org/downloads/) with the *py launcher* option on; `py -0` lists the versions it can start.
+- **Git.**
+- **About 500 MB of free disk.** The EVE Static Data Export (SDE) download is about 100 MB, and the imported database is about 220 MB.
+- **An EVE Online account** for each character you want to track.
+
+### 1. Create an EVE developer application
+
+1. Sign in at [developers.eveonline.com/applications](https://developers.eveonline.com/applications) and create an application with *Authentication & API Access*.
+2. Set the **callback URL** to `http://localhost:8080/callback`.
+3. Give it the [scopes listed below](#eve-scopes). If none of your characters is a corporation director (see `is_corp_director` in step 3), the first list is enough.
+4. Keep the page open: you need its **Client ID** and **Secret Key** in step 3.
+
+### 2. Clone and install
+
+macOS / Linux:
+
+```bash
+git clone https://github.com/johan-van-eycken/eve-online-industry-tracker.git
+cd eve-online-industry-tracker
+
+python3.12 -m venv .venv          # or python3.11
+source .venv/bin/activate
+
+python -m pip install -U pip setuptools wheel
+python -m pip install -e . --no-build-isolation
+```
+
+Windows (PowerShell):
+
+```powershell
+git clone https://github.com/johan-van-eycken/eve-online-industry-tracker.git
+cd eve-online-industry-tracker
+
+py -3.12 -m venv .venv
+# Once per user, if PowerShell says "running scripts is disabled on this system":
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+.\.venv\Scripts\Activate.ps1
+
+python -m pip install -U pip setuptools wheel
+python -m pip install -e . --no-build-isolation
+```
+
+Don't skip the `pip install -U pip setuptools wheel` line. A new venv has no setuptools, and `--no-build-isolation` (which keeps the install working behind a corporate proxy) needs it. Without it, the install fails with `Cannot import 'setuptools.build_meta'`.
+
+### 3. Configure
+
+All your own values go in **`config/private/secret.json`**. It isn't in the repo, so create it (UTF-8). If you start the app without it, the app writes this template for you and stops:
+
+```json
+{
+    "client_id": "the Client ID from step 1",
+    "client_secret": "the Secret Key from step 1",
+    "user_agent": "eve-online-industry-tracker/1.0 (you@example.com)"
+}
+```
+
+To seed your characters as well, add an optional `characters` list (one-time import, see below):
+
+```json
+"characters": [
+    { "character_name": "Your Main", "is_main": true,  "is_corp_director": true },
+    { "character_name": "Your Alt",  "is_main": false, "is_corp_director": false }
+]
+```
+
+- `client_id` and `client_secret`: from your developer application.
+- `user_agent`: your own contact. CCP asks every ESI client to identify itself.
+- `characters` is optional. It is a one-time seed: the app imports it on the first start after you set it up (characters that already have a login get their flags from this file), and from then on **Admin → Manage Characters** owns the list and the flags. Later edits to `characters` in this file have no effect, and a character you delete in the app doesn't come back. You can leave it out and add every character on the page. A character that already has a login but isn't listed is kept, but starts with Industry off.
+- `character_name`: the exact in-game name.
+- `is_main`: the character the UI picks by default. Mark one; without one, the first in the list becomes main.
+- `is_corp_director`: this character also reads the corporation's wallets, assets, blueprints and industry jobs. It requests the corp scopes, and needs the in-game Director role. An explicit `"is_corp_director": false` on every character, or leaving `characters` out, means no director and no corp scopes (in Manage Characters nobody is director unless you tick it). Without the key on any character, the first character becomes director on import.
+- `industry_enabled` (optional, default `true`): `false` keeps a character out of the industry planning.
+
+(The owner keeps this file in a private git submodule. `git clone --recurse-submodules` only works with access to it; everyone else creates the file.)
+
+### 4. Import the EVE Static Data Export
+
+```bash
+python scripts/import_sde.py --all
+```
+
+This downloads CCP's static game data (items, blueprints, map), imports it into `database/eve_sde.db` and removes the download. It takes a few minutes. The app won't start without it.
+
+### 5. Start the app
+
+```bash
+python -m eve_online_industry_tracker
+```
+
+The app starts with no characters activated. When the log shows `Flask is ready!`, open **http://localhost:8501** and pick **Admin → Manage Characters** in the sidebar. Until a character is active, the pages say "Activate a character first".
+
+- Click **Activate** on a character from `secret.json`, or fill in **Add character** (name and flags) and click **Add and log in** for a new one.
+- Each login opens the EVE login in your browser for one named character. The page says which character, and shows the link in case the browser doesn't open. Log in as that character and authorize the scopes. You have 5 minutes.
+- The tokens are stored in `database/eve_oauth.db`, so later starts need no login.
+- After a successful login the app reloads. With `python -m eve_online_industry_tracker` this is automatic. If you run Flask alone (`python -m flask_app`), the page tells you to restart the app.
+- The first load of assets, wallets and jobs from ESI can take a few minutes.
+
+Other buttons per character: **Renew scopes** (log in again, for example after the scopes changed), **Edit** (the main, director and industry flags) and **Delete**. Edit and Delete ask you to tick a confirm box and reload the app. Delete removes only the login; the character's data in the app stays.
+
+To stop the app, press `Ctrl+C` in the terminal. Next time, activate the venv and run step 5 again.
+
+### EVE scopes
+
+The app requests these scopes (`defaults.scopes` and `defaults.scopes_corp_director` in `config/config.json`). Give your developer application all the scopes it will request:
 
 ```
 # Every character
@@ -55,81 +161,19 @@ esi-markets.read_corporation_orders.v1
 esi-wallet.read_corporation_wallets.v1
 ```
 
-Set the callback URL to `http://localhost:8080/callback`. The login listener takes its port from `app.redirect_uri` in `config/config.json`, so change both together.
-
----
-
-## Quickstart
-
-### macOS / Linux
-
-```bash
-git clone --recurse-submodules https://github.com/johan-van-eycken/eve-online-industry-tracker.git
-cd eve-online-industry-tracker
-
-python3 -m venv .venv
-source .venv/bin/activate
-
-pip install -U pip setuptools wheel
-pip install -e . --no-build-isolation
-
-# Import the EVE Static Data Export (required on first run)
-python3 scripts/import_sde.py --download --import
-
-# Start the app
-python3 -m eve_online_industry_tracker
-```
-
-### Windows
-
-```powershell
-git clone --recurse-submodules https://github.com/johan-van-eycken/eve-online-industry-tracker.git
-cd eve-online-industry-tracker
-
-py -3.12 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-
-python -m pip install -U pip setuptools wheel
-python -m pip install -e . --no-build-isolation
-
-# Import the EVE Static Data Export (required on first run)
-python scripts/import_sde.py --download --import
-
-# Start the app
-python -m eve_online_industry_tracker
-```
-
-Once running, open **http://localhost:8501** in your browser.
+The login listener takes its port from `app.redirect_uri` in `config/config.json`. If port 8080 is taken, change that and the callback URL in your developer application together.
 
 ---
 
 ## Configuration
 
-### `config/private/secret.json`
-
-Stored in a private git submodule (`eve-online-industry-tracker-config`); `--recurse-submodules` pulls it only if you have access to it. Otherwise create the file at `config/private/secret.json` yourself. On the first start, each listed character goes through the EVE login once in the browser:
-
-```json
-{
-    "client_secret": "your_eve_app_client_secret",
-    "characters": [
-        {
-            "character_name": "Your Main",
-            "is_main": true,
-            "is_corp_director": true
-        },
-        {
-            "character_name": "Your Alt",
-            "is_main": false,
-            "is_corp_director": false
-        }
-    ]
-}
-```
-
 ### `config/config.json`
 
-Tracked in the repo. Contains app settings, database paths, the OAuth client id, the requested scopes and the ESI configuration. Set `oauth.client_id` to your own application's.
+App settings, database paths, the requested scopes and the ESI configuration. The same for every user; your own values go in `secret.json`.
+
+### `config/private/secret.json`
+
+Your application's client id and secret, your ESI contact (`user_agent`) and, optionally, the characters to seed. See [step 3](#3-configure).
 
 ### `config/import_sde.json`
 
@@ -144,7 +188,7 @@ Market defaults (such as the default broker fee and order book depth), industry 
 | Variable | Default | Description |
 |---|---|---|
 | `APP_CONFIG_PATH` | `config/config.json` | Path to main config |
-| `APP_SECRET_PATH` | `config/private/secret.json` | Path to secrets file |
+| `APP_SECRET_PATH` | `config/private/secret.json` | Path to the file with your own values |
 | `ADMIN_SETTINGS_PATH` | `database/admin_settings.json` | Path to the application settings |
 | `STREAMLIT_PREFERENCES_PATH` | `database/streamlit_preferences.json` | Path to the UI preferences |
 | `LOG_LEVEL` | `DEBUG` | Logging verbosity |
@@ -209,7 +253,7 @@ Stop the app before a re-import.
 ### Tests
 
 ```bash
-pip install pytest
+python -m pip install pytest hypothesis
 python -m pytest -q
 ```
 
@@ -249,7 +293,22 @@ About 400 tests read the local SDE (`database/eve_sde.db`), and a few read a git
 ## Troubleshooting
 
 **`No module named eve_online_industry_tracker`**
-Run `pip install -e . --no-build-isolation` from the repo root with your venv active.
+Run `python -m pip install -e . --no-build-isolation` from the repo root with your venv active.
+
+**`requires a different Python: 3.x.y not in '<3.13,>=3.11'`**
+The venv was made with an unsupported Python (often a bare `python3` that is newer than 3.12). Delete `.venv` and recreate it with `python3.12 -m venv .venv` (Windows: `py -3.12 -m venv .venv`).
+
+**`SDE not imported yet (database/eve_sde.db does not exist)`**
+Run step 4 of [Getting started](#4-import-the-eve-static-data-export), then start the app again.
+
+**`secret.json created with placeholders` / `contains placeholder client_secret`**
+Fill in `config/private/secret.json` as in [step 3](#3-configure), then start the app again.
+
+**The EVE login times out, or the browser doesn't open**
+Each character's login waits 5 minutes. If no browser opens, use the login link Manage Characters shows (or the URL in the log). If the redirect to `localhost:8080` fails, another program holds port 8080: change `app.redirect_uri` and your application's callback URL together. On Windows, Hyper-V, WSL or Docker can reserve ports. `netsh interface ipv4 show excludedportrange protocol=tcp` lists them.
+
+**`Expecting value: line 1 column 1 (char 0)` when reading secret.json**
+The file isn't UTF-8. This happens on Windows with `echo ... > secret.json` in PowerShell 5, which writes UTF-16. Save it as UTF-8 from an editor.
 
 **`SDE database is missing table "races"`**
 The SDE hasn't been imported yet. Run:
@@ -273,8 +332,8 @@ You are likely behind a corporate proxy (e.g. Zscaler). The app already uses you
 **Startup shows `/health` 503 for a while**
 Normal — initialization runs in the background. Wait until the log shows `Flask is ready!` or open http://localhost:8501 and it will load once ready.
 
-**`UNIQUE constraint failed: oauth_characters.character_id`**
-A character is already registered in the OAuth database. Safe to ignore on startup.
+**"Logged in as the wrong character"**
+The login was for one named character and you authorized another, so the app refused it with a message naming both. Pick the right character on the EVE login page, then click **Activate** again.
 
 ---
 

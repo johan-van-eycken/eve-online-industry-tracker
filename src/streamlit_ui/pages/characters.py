@@ -721,9 +721,7 @@ def render():
 
             if target is None:
                 st.info("No OAuth record found for this character yet.")
-                st.write(
-                    "If this is a new character, the backend will open the EVE SSO login flow when it first needs tokens."
-                )
+                st.write("Activate this character in **Admin → Manage Characters**.")
             else:
                 expires_in = target.get("expires_in_seconds")
                 if isinstance(expires_in, (int, float)):

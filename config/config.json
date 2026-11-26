@@ -2,7 +2,6 @@
   "app": {
     "redirect_uri": "http://localhost:8080/callback",
     "streamlit_url": "http://localhost:8501",
-    "user_agent": "eve-online-industry-tracker/1.0 (jveycken@gmail.com)",
     "language": "en",
     "database_path": "database",
     "database_oauth_uri": "sqlite:///database/eve_oauth.db",
@@ -20,9 +19,6 @@
       "X-Compatibility-Date": "2025-08-26",
       "X-Tenant": "tranquility"
     }
-  },
-  "oauth": {
-    "client_id": "84f5c62c020c46559d2b8615ea1eb146"
   },
   "defaults": {
     "industry": {

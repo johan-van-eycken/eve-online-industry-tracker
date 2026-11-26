@@ -170,8 +170,11 @@ def test_a_character_init_failure_is_kept(monkeypatch):
             raise RuntimeError("token store unreadable")
 
     mgr = CharacterManager.__new__(CharacterManager)
-    mgr._cfg_characters = [{"character_name": "Alpha", "is_main": True, "is_corp_director": True}]
-    mgr._cfgManager = mgr._db_oauth = mgr._db_app = mgr._db_sde = None
+    mgr._cfgManager = mgr._db_app = mgr._db_sde = None
+    mgr._db_oauth = SimpleNamespace(session=object())
+    monkeypatch.setattr(cm, "OAuthCharacterRepository", lambda session: SimpleNamespace(list_metadata=lambda: [
+        SimpleNamespace(character_name="Alpha", has_refresh_token=True, is_main=True,
+                        is_corp_director=True, industry_enabled=True)]))
     mgr.admin_settings = None
     mgr._character_list = []
     mgr.init_errors = []

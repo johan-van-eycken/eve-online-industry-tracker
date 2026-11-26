@@ -1,4 +1,5 @@
 import logging
+import os
 from typing import Any
 
 from sqlalchemy.exc import SQLAlchemyError
@@ -20,7 +21,7 @@ def _user_friendly_error(e: Exception) -> str | None:
         return (
             "SSL certificate verification failed.\n"
             "  Likely cause: corporate proxy (e.g. Zscaler) intercepting HTTPS.\n"
-            "  Fix: pip install truststore  (uses macOS Keychain certificates)"
+            "  Fix: point EIT_SSL_CA_BUNDLE at a CA bundle file with the proxy's certificate (see README)"
         )
 
     if "no such table" in msg.lower():
@@ -31,7 +32,7 @@ def _user_friendly_error(e: Exception) -> str | None:
             return (
                 f'SDE database is missing table "{table}".\n'
                 "  The EVE Static Data Export has not been imported yet.\n"
-                "  Fix: python3 scripts/import_sde.py --download --import --force"
+                "  Fix: python scripts/import_sde.py --download --import --force"
             )
         return (
             f'App database is missing table "{table}".\n'
@@ -67,15 +68,9 @@ def _user_friendly_error(e: Exception) -> str | None:
 
     if "Invalid character configuration" in msg:
         return (
-            "Invalid character configuration in config/secret.json.\n"
+            f"Invalid character configuration in {app_secret_path()}.\n"
             "  Each character must be a dict, for example:\n"
             '    {"character_name": "Your Name", "is_main": true, "is_corp_director": false}'
-        )
-
-    if "No characters found in config" in msg:
-        return (
-            f"No characters configured in {app_secret_path()}.\n"
-            "  Add at least one character to the 'characters' list."
         )
 
     return None
@@ -92,11 +87,6 @@ def load_config() -> ConfigManager:
             schema=CONFIG_SCHEMA,
         )
         cfg = cfgManager.all()
-        if len(cfg["characters"]) == 0:
-            raise ValueError(
-                "No characters found in config. Add a 'characters' list to your secret config "
-                f"({app_secret_path()}) to avoid committing character names."
-            )
         return cfgManager
     except Exception as e:
         logging.error(f"Failed to load config: {e}")
@@ -135,6 +125,13 @@ def init_db_sde(cfgManager: ConfigManager) -> DatabaseManager:
     try:
         cfg = cfgManager.all()
         logging.debug(f"Database URI for SDE: {cfg['app']['database_sde_uri']}")
+        sde_uri = str(cfg["app"]["database_sde_uri"])
+        sde_file = sde_uri.removeprefix("sqlite:///")
+        if sde_uri.startswith("sqlite:///") and sde_file != ":memory:" and not os.path.exists(sde_file):
+            raise FileNotFoundError(
+                f"SDE not imported yet ({sde_file} does not exist). "
+                "Run from the repository root: python scripts/import_sde.py --all"
+            )
         db_sde = DatabaseManager(cfg["app"]["database_sde_uri"], cfg["app"]["language"])
         return db_sde
     except Exception as e:
@@ -146,7 +143,7 @@ def init_db_managers(cfgManager: ConfigManager, refresh_metadata: bool = False) 
     Initialize Databases and Schemas
     """
     from eve_online_industry_tracker.infrastructure.models import BaseOauth, BaseApp
-    from eve_online_industry_tracker.infrastructure.schema_migrations import ensure_app_schema
+    from eve_online_industry_tracker.infrastructure.schema_migrations import ensure_app_schema, ensure_oauth_schema
 
     try:
         cfg = cfgManager.all()
@@ -155,6 +152,13 @@ def init_db_managers(cfgManager: ConfigManager, refresh_metadata: bool = False) 
         db_oauth = init_db_oauth(cfgManager)
         if refresh_metadata:
             BaseOauth.metadata.create_all(bind=db_oauth.engine)
+        ensure_oauth_schema(db_oauth)
+        from eve_online_industry_tracker.application.characters import roster_seed
+        unconfigured = roster_seed.seed_characters_once(db_oauth, cfg.get("characters", []))
+        roster_seed.LAST_SEED_UNCONFIGURED.clear()
+        roster_seed.LAST_SEED_UNCONFIGURED.extend(unconfigured)
+        for name in roster_seed.LAST_SEED_UNCONFIGURED:
+            logging.warning("%s was not in secret.json but has a login; delete it in Admin → Manage Characters if unwanted", name)
         # One-off, idempotent: drop the ESI cache rows no request reads any more (logged).
         try:
             from eve_online_industry_tracker.infrastructure.esi_client import prune_stale_esi_cache

@@ -385,11 +385,11 @@ def get_invention_source_blueprint_ids(
     rows = session.execute(
         text(
             "SELECT CAST(json_extract(p.value, '$.typeID') AS INTEGER) AS invented, "
-            "b.blueprintTypeID AS source "
+            "b.id AS source "
             "FROM blueprints b, "
             "json_each(json_extract(b.activities, '$.invention.products')) p "
             "WHERE CAST(json_extract(p.value, '$.typeID') AS INTEGER) IN :ids "
-            "ORDER BY b.blueprintTypeID"
+            "ORDER BY b.id"
         ).bindparams(bindparam("ids", expanding=True)),
         {"ids": ids},
     ).all()

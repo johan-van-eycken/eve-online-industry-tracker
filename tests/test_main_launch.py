@@ -11,6 +11,7 @@ class _FakeFlask:
         self.terminated = False
         self.killed = False
         self._alive = True
+        self.exitcode = None
 
     def is_alive(self):
         return self._alive
@@ -31,14 +32,37 @@ def test_run_streamlit_uses_running_interpreter(monkeypatch):
     calls = []
     monkeypatch.setattr(main.subprocess, "Popen", lambda argv, **kw: calls.append(argv) or object())
     main.run_streamlit()
-    assert calls == [[sys.executable, "-m", "streamlit", "run", "streamlit_app.py"]]
+    assert calls == [[sys.executable, "-m", "streamlit", "run", "streamlit_app.py",
+                      "--server.showEmailPrompt=false"]]
+
+
+def test_wait_for_flask_ready_stops_on_failed_init(monkeypatch):
+    class _Resp:
+        status_code = 503
+        headers = {"content-type": "application/json"}
+        def json(self):
+            return {"init_state": "Initialization Failed at step: Loading Config"}
+    monkeypatch.setattr(main.requests, "get", lambda *a, **kw: _Resp())
+    monkeypatch.setattr(main.time, "sleep", lambda s: pytest.fail("kept polling after a failed init"))
+    with pytest.raises(RuntimeError, match="Loading Config"):
+        main.wait_for_flask_ready(timeout=300)
+
+
+def test_init_db_sde_names_a_missing_sde(tmp_path):
+    from utils.app_init import init_db_sde
+    missing = tmp_path / "eve_sde.db"
+    cfg = type("C", (), {"all": lambda s: {"app": {"database_sde_uri": f"sqlite:///{missing}", "language": "en"}}})()
+    with pytest.raises(FileNotFoundError, match="SDE not imported yet"):
+        init_db_sde(cfg)
+    assert not missing.exists()
 
 
 def _patch_flask(monkeypatch, fake):
     monkeypatch.setattr(main, "configure_logging", lambda **kw: None)
     monkeypatch.setattr(main.multiprocessing, "Process", lambda target: type("P", (), {
         "start": lambda s: None, "is_alive": fake.is_alive, "terminate": fake.terminate,
-        "join": fake.join, "kill": fake.kill})())
+        "join": fake.join, "kill": fake.kill,
+        "exitcode": property(lambda s: fake.exitcode)})())
     monkeypatch.setattr(main, "wait_for_flask_ready", lambda **kw: True)
 
 
@@ -146,3 +170,39 @@ def test_ctrl_c_shutdown_still_exits_normally(monkeypatch):
     monkeypatch.setattr(main.requests, "post", lambda *a, **kw: None)
     main.main([])  # returns: exit status 0
     assert fake.terminated
+
+
+def _run_one_flask_exit(monkeypatch, exitcode):
+    """Flask dies once with `exitcode`, the relaunch stays up, Ctrl+C ends the run."""
+    fake = _FakeFlask()
+    _patch_flask(monkeypatch, fake)
+    fake._alive = False
+    fake.exitcode = exitcode
+    sleeps = []
+
+    calls = []
+
+    def ready(**kw):
+        calls.append(1)
+        fake._alive = len(calls) > 1  # first call is the initial launch
+        return True
+
+    def sleep(s):
+        sleeps.append(s)
+        if len(sleeps) >= 4:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(main, "wait_for_flask_ready", ready)
+    monkeypatch.setattr(main.time, "sleep", sleep)
+    monkeypatch.setattr(main.requests, "post", lambda *a, **kw: None)
+    main.main(["--no-streamlit"])
+    return sleeps
+
+
+def test_exit_75_restarts_without_backoff(monkeypatch):
+    # Dead on the first poll, relaunched with no backoff sleep: only the 5 s polls.
+    assert _run_one_flask_exit(monkeypatch, 75) == [5, 5, 5, 5]
+
+
+def test_other_exit_still_backs_off(monkeypatch):
+    assert _run_one_flask_exit(monkeypatch, 1)[:2] == [5, 2]

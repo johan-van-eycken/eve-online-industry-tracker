@@ -1,6 +1,5 @@
 import logging
 import requests # pyright: ignore[reportMissingModuleSource]
-import webbrowser
 import time
 import random
 import json as jsonlib
@@ -422,9 +421,25 @@ def _esi_gate(context: str) -> None:
     _sleep_seconds(wait)
 
 
+class CharacterNotActivatedError(RuntimeError):
+    """The character has no stored login; it is activated in Admin → Manage Characters, never at startup."""
+
+
+class WrongCharacterError(Exception):
+    """The SSO login was for another character (`got`) than the one asked for; nothing was stored."""
+
+    def __init__(self, got: str):
+        self.got = got
+        super().__init__(got)
+
+
 class ESIClient:
-    def __init__(self, cfg: ConfigManager, db_oauth: DatabaseManager, character_name: str, is_main: bool, is_corp_director: bool, refresh_token: Optional[str] = None):
+    load_tokens = True
+
+    def __init__(self, cfg: ConfigManager, db_oauth: DatabaseManager, character_name: str, is_main: bool, is_corp_director: bool, refresh_token: Optional[str] = None, load_tokens: bool = True):
         self.cfg = cfg
+        # False: a public client (no login, no Authorization header).
+        self.load_tokens = load_tokens
         self.character_name = character_name
         self.is_main = is_main
         self.is_corp_director = is_corp_director
@@ -490,13 +505,14 @@ class ESIClient:
         self.scopes = " ".join(sorted(all_scopes))
 
         # Load tokens from DB if character exists
-        self._load_tokens_from_db()
+        if load_tokens:
+            self._load_tokens_from_db()
     
     # ----------------------------
     # Internal Helpers
     # ----------------------------
     def _load_tokens_from_db(self) -> None:
-        """Load tokens from DB if available. If missing, run registration flow."""
+        """Load the stored tokens; CharacterNotActivatedError when there are none."""
         record = (self.db_oauth.session.query(OAuthCharacter).filter_by(character_name=self.character_name).first())
         if record and record.refresh_token:
             self.refresh_token = record.refresh_token
@@ -511,15 +527,25 @@ class ESIClient:
 
             logging.debug(f"Loaded existing tokens for {self.character_name} ({self.character_id}).")
         else:
-            logging.debug(f"No token found for {self.character_name}. Registering new character.")
-            self.register_new_character()
+            raise CharacterNotActivatedError(f"{self.character_name} is not activated: no stored login")
 
     # ------------------------------------------------------------------
     # Redirect User to Get Authorization Code
     # ------------------------------------------------------------------
+    def authorization_url(self, state: str = "eve_auth") -> str:
+        """The EVE SSO login URL for this client's scopes."""
+        auth_params = {
+            "response_type": "code",
+            "client_id": self.client_id,
+            "scope": self.scopes,
+            "redirect_uri": self.redirect_uri,
+            "state": state,
+        }
+        return f"{self.auth_url}?{urlencode(auth_params)}"
+
     def _get_authorization_code(self, state: str = "eve_auth") -> str:
-        """Open browser for user login and capture authorization code."""
-        timeout_seconds = 60
+        """Wait for the SSO redirect (the page opened authorization_url) and capture the authorization code."""
+        timeout_seconds = 300  # first login may need the EVE password and 2FA
         # Where to send the user after SSO completes (best-effort).
         streamlit_url = None
         try:
@@ -528,16 +554,7 @@ class ESIClient:
             streamlit_url = None
         if not streamlit_url:
             streamlit_url = "http://localhost:8501"
-        auth_params = {
-            "response_type": "code",
-            "client_id": self.client_id,
-            "scope": self.scopes,
-            "redirect_uri": self.redirect_uri,
-            "state": state,
-        }
-        auth_url = f"{self.auth_url}?{urlencode(auth_params)}"
-        logging.debug(f"Opening URL for EVE Online login: {auth_url}")
-        webbrowser.open(auth_url)
+        logging.info(f"Waiting 5 min for the EVE login of {self.character_name}: {self.authorization_url(state)}")
 
         with OAuthServer(("localhost", urlparse(self.redirect_uri).port or 80),OAuthHandler, return_to_url=streamlit_url) as httpd:
             httpd.timeout = timeout_seconds
@@ -580,6 +597,8 @@ class ESIClient:
 
     def _ensure_fresh_token(self) -> None:
         """Refresh the access token when it is missing or expired, once across threads."""
+        if not self.load_tokens:
+            return
         with self._token_refresh_lock:
             if not self.access_token or (self.token_expiry and time.time() > self.token_expiry):
                 if not self._adopt_stored_token():
@@ -847,11 +866,17 @@ class ESIClient:
     # ------------------------------------------------------------------
     # Public Method: Register a New Character and Save Tokens
     # ------------------------------------------------------------------
-    def register_new_character(self) -> None:
-        """Register a new character and persist tokens to DB."""
+    def register_new_character(self, expected_name: Optional[str] = None) -> None:
+        """Register a new character and persist tokens to DB. WrongCharacterError, before
+        anything is stored, when the login is for another character than `expected_name`."""
         logging.debug("Starting character registration flow...")
         authorization_code = self._get_authorization_code()
         access_token, refresh_token, expires_in = self.exchange_code_for_tokens(authorization_code)
+
+        if expected_name is not None:
+            got = self._token_character_name(access_token)
+            if got.casefold() != expected_name.casefold():
+                raise WrongCharacterError(got)
 
         # Update instance attributes
         self.access_token = access_token
@@ -878,6 +903,26 @@ class ESIClient:
 
         logging.debug(f"Character {self.character_name} ({self.character_id}) registered and tokens saved.")
     
+    def _token_character_name(self, access_token: str) -> str:
+        """The character name of an access token: its JWT name claim, else /oauth/verify's CharacterName."""
+        try:
+            claims = self._validate_access_token_jwt(access_token)
+            if claims and claims.get("name"):
+                return str(claims["name"])
+        except Exception as e:   # same fallback as verify_access_token
+            logging.debug("JWT validation failed; falling back to /oauth/verify: %s", str(e))
+        response = requests.get(
+            self.verify_url,
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=10,
+            **get_requests_ssl_kwargs(),
+        )
+        response.raise_for_status()
+        name = response.json().get("CharacterName")
+        if not name:
+            raise ValueError("The SSO login did not name a character")
+        return str(name)
+
     # ----------------------------
     # ESI API + Cache Helpers
     # ----------------------------
@@ -922,14 +967,16 @@ class ESIClient:
             self._rollback_quietly()
     
     def _esi_headers(self) -> Dict[str, str]:
-        return {
+        headers = {
             "Accept": self.esi_header_accept,
             "Accept-Language": self.esi_header_acceptlanguage,
-            "Authorization": f"Bearer {self.access_token}",
             "User-Agent": self.user_agent,
             "X-Compatibility-Date": self.esi_header_xcompatibilitydate,
             "X-Tenant": self.esi_header_xtenant
         }
+        if self.load_tokens:
+            headers["Authorization"] = f"Bearer {self.access_token}"
+        return headers
 
     def _send_with_retries(
         self,

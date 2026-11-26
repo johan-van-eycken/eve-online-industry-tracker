@@ -33,27 +33,34 @@ class ConfigManager:
     def _load_config(self, path: Path) -> None:
         if not path.exists():
             raise FileNotFoundError(f"{path} not found. Please create it.")
-        self._config.update(json.loads(path.read_text()))
+        self._config.update(json.loads(path.read_text(encoding="utf-8-sig")))
 
     def _load_secret(self, path: Path) -> None:
         if not path.exists():
             # Auto-create secret.json with placeholder
             path.parent.mkdir(parents=True, exist_ok=True)
             default_secret = {
+                "client_id": "YOUR_CLIENT_ID",
                 "client_secret": "YOUR_SECRET_CLIENT_ID",
-                "characters": [],
+                "user_agent": "eve-online-industry-tracker/1.0 (you@example.com)",
             }
-            path.write_text(json.dumps(default_secret, indent=4))
+            path.write_text(json.dumps(default_secret, indent=4), encoding="utf-8")
             raise RuntimeError(
-                f"{path} created with placeholder. Please fill in your EVE client_secret."
+                f"{path} created with placeholders. Fill in your EVE app's client_id and client_secret, and your contact in user_agent, then restart."
             )
 
-        secret_data = json.loads(path.read_text())
-        if secret_data.get("client_secret") == "YOUR_SECRET_CLIENT_ID":
+        secret_data = json.loads(path.read_text(encoding="utf-8-sig"))
+        if "YOUR_SECRET_CLIENT_ID" in (secret_data.get("client_secret"), secret_data.get("client_id")) \
+                or secret_data.get("client_id") == "YOUR_CLIENT_ID":
             raise RuntimeError(
-                f"{path} contains placeholder client_secret. Please update it."
+                f"{path} contains placeholder client_id or client_secret. Please update it."
             )
 
+        # Each user's own app values live in the private secret file, not in the tracked config.json.
+        if "client_id" in secret_data:
+            self._set_config_value("oauth", "client_id", secret_data.pop("client_id"))
+        if "user_agent" in secret_data:
+            self._set_config_value("app", "user_agent", secret_data.pop("user_agent"))
         self._config.update(secret_data)
 
     def _set_config_value(self, section: str, key: str, value: Any) -> None:
@@ -85,6 +92,7 @@ class ConfigManager:
                         if default is None:
                             raise RuntimeError(
                                 f"Required config '{section}.{k}' missing and has no default."
+                                + (" Set client_id in config/private/secret.json." if section == "oauth" else "")
                             )
                         logging.warning(
                             f"Config '{section}.{k}' missing. Using default: {default}"

@@ -19,6 +19,7 @@ except ImportError:
     pass
 
 from flask_app.app import create_app
+from flask_app.restart import RESTART_EXIT_CODE
 from flask_app.bootstrap import start_background_initialization
 from flask_app.settings import (
     flask_debug,
@@ -53,7 +54,8 @@ STREAMLIT_MAX_CONSECUTIVE_FAILURES = 5
 
 def run_streamlit() -> subprocess.Popen:
     # The running interpreter's Streamlit, not whatever `streamlit` is first on PATH.
-    return subprocess.Popen([sys.executable, "-m", "streamlit", "run", "streamlit_app.py"])
+    return subprocess.Popen([sys.executable, "-m", "streamlit", "run", "streamlit_app.py",
+                             "--server.showEmailPrompt=false"])
 
 
 def wait_for_flask_ready(flask_proc: multiprocessing.Process | None = None, timeout: int = 120) -> bool:
@@ -75,10 +77,13 @@ def wait_for_flask_ready(flask_proc: multiprocessing.Process | None = None, time
                     return True
             elif r.status_code == 503:
                 try:
-                    payload = r.json()
-                    logging.info("Flask not ready yet: %s", payload.get("init_state", "unknown"))
+                    init_state = str(r.json().get("init_state", "unknown"))
                 except Exception:
-                    logging.info("Flask not ready yet (503)")
+                    init_state = "unknown (503)"
+                # A failed init never recovers: stop now, the error is logged just above.
+                if init_state.startswith("Initialization Failed"):
+                    raise RuntimeError(f"Flask {init_state}; see the error above.")
+                logging.info("Flask not ready yet: %s", init_state)
         except requests.RequestException as e:
             logging.debug("Flask not reachable yet: %s", e)
 
@@ -148,23 +153,26 @@ def main(argv: list[str] | None = None) -> None:
             time.sleep(5)
 
             if not flask_proc.is_alive():
-                consecutive_failures += 1
-                if consecutive_failures > max_consecutive_failures:
-                    logging.error(
-                        "Flask has crashed %d times consecutively. Giving up.",
-                        consecutive_failures - 1,
-                    )
-                    raise RuntimeError("Flask exceeded maximum consecutive restart attempts.")
+                if flask_proc.exitcode == RESTART_EXIT_CODE:
+                    logging.info("Flask restarting to load character changes...")
+                else:
+                    consecutive_failures += 1
+                    if consecutive_failures > max_consecutive_failures:
+                        logging.error(
+                            "Flask has crashed %d times consecutively. Giving up.",
+                            consecutive_failures - 1,
+                        )
+                        raise RuntimeError("Flask exceeded maximum consecutive restart attempts.")
 
-                flask_restart_delay = min(2 ** consecutive_failures, max_restart_delay)
-                logging.warning(
-                    "Flask process died unexpectedly (attempt %d/%d). "
-                    "Restarting in %ds...",
-                    consecutive_failures,
-                    max_consecutive_failures,
-                    flask_restart_delay,
-                )
-                time.sleep(flask_restart_delay)
+                    flask_restart_delay = min(2 ** consecutive_failures, max_restart_delay)
+                    logging.warning(
+                        "Flask process died unexpectedly (attempt %d/%d). "
+                        "Restarting in %ds...",
+                        consecutive_failures,
+                        max_consecutive_failures,
+                        flask_restart_delay,
+                    )
+                    time.sleep(flask_restart_delay)
 
                 flask_proc = multiprocessing.Process(target=run_flask)
                 flask_proc.start()
