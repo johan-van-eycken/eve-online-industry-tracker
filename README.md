@@ -86,10 +86,10 @@ All your own values go in **`config/private/secret.json`**. It isn't in the repo
 
 - `client_id` and `client_secret`: from your developer application.
 - `user_agent`: your own contact. CCP asks every ESI client to identify itself.
-- `characters` is optional. It is a one-time seed: the app imports it on the first start after you set it up, and from then on the **Characters** page owns the list and the flags. Later edits to `characters` in this file have no effect, and a character you delete in the app doesn't come back. You can leave it out and add every character on the page.
+- `characters` is optional. It is a one-time seed: the app imports it on the first start after you set it up (characters that already have a login get their flags from this file), and from then on the **Characters** page owns the list and the flags. Later edits to `characters` in this file have no effect, and a character you delete in the app doesn't come back. You can leave it out and add every character on the page.
 - `character_name`: the exact in-game name.
 - `is_main`: the character the UI picks by default. Mark one; without one, the first in the list becomes main.
-- `is_corp_director`: this character also reads the corporation's wallets, assets, blueprints and industry jobs. It requests the corp scopes, and needs the in-game Director role. Without a director, no character gets the corp scopes and the app shows no corporations.
+- `is_corp_director`: this character also reads the corporation's wallets, assets, blueprints and industry jobs. It requests the corp scopes, and needs the in-game Director role. Mark one; without one, the first in the list becomes director when the list is imported (as with `is_main`). A solo player without a corp sets `is_corp_director: false` on every character, or leaves `characters` out and adds them on the Characters page, where nobody is director unless you tick it.
 - `industry_enabled` (optional, default `true`): `false` keeps a character out of the industry planning.
 
 (The owner keeps this file in a private git submodule. `git clone --recurse-submodules` only works with access to it; everyone else creates the file.)
@@ -110,7 +110,7 @@ python -m eve_online_industry_tracker
 
 The app starts with no characters activated. When the log shows `Flask is ready!`, open **http://localhost:8501** and go to **Characters**. Until a character is active, the other pages say "Activate a character first".
 
-- Click **Activate** on a character from `secret.json`, or **Add character** (name and flags) for a new one.
+- Click **Activate** on a character from `secret.json`, or fill in **Add character** (name and flags) and click **Add and log in** for a new one.
 - Each login opens the EVE login in your browser for one named character. The page says which character, and shows the link in case the browser doesn't open. Log in as that character and authorize the scopes. You have 5 minutes.
 - The tokens are stored in `database/eve_oauth.db`, so later starts need no login.
 - After a successful login the app reloads. With `python -m eve_online_industry_tracker` this is automatic. If you run Flask alone (`python -m flask_app`), the page tells you to restart the app.
