@@ -203,7 +203,7 @@ def render_tab_build_plan(page_state: DailyPlannerPageState) -> None:
             "Days of Supply": _round2(item.get("days_of_supply_current")),
             "Comp. Index": _fmt_num(comp_index) if comp_index is not None else "—",
             "Comp. Supply Days": _fmt_num(competitor_supply_days) if competitor_supply_days is not None else "—",
-            "Momentum": _fmt_num(item.get("momentum_signal")),
+            "Momentum": _round2(item.get("momentum_signal")),
             "Confidence": _confidence_label(item.get("confidence_tier")),
             "Samples": int(item.get("sample_count") or 0),
             "Reason": str(item.get("decision_reason") or ""),
@@ -256,7 +256,7 @@ def render_tab_build_plan(page_state: DailyPlannerPageState) -> None:
             gb.configure_column("Margin %", type=["numericColumn"], maxWidth=110,
                                 valueFormatter="value == null ? '—' : value.toFixed(2) + '%'")
             gb.configure_column("Days of Supply", type=["numericColumn"], maxWidth=130, valueFormatter=two_decimals)
-            gb.configure_column("Momentum", type=["numericColumn"], maxWidth=110)
+            gb.configure_column("Momentum", type=["numericColumn"], maxWidth=110, valueFormatter=two_decimals)
             gb.configure_column("Samples", type=["numericColumn"], maxWidth=90)
             gb.configure_column("Reason", minWidth=320)
             gb.configure_selection("single", use_checkbox=False)

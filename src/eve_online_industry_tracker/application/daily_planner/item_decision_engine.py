@@ -158,6 +158,7 @@ class ItemDecisionEngine:
                 days_of_supply_current=pipeline.days_of_supply_current,
                 effective_velocity=pipeline.effective_velocity,
                 velocity_unknown_reason=pipeline.velocity_unknown_reason,
+                momentum_signal=pipeline.momentum_signal,
                 meta_group_id=meta_group_id,
                 pipeline_stage="unscoreable",
                 overview_row=overview_row,
@@ -191,6 +192,7 @@ class ItemDecisionEngine:
                 days_of_supply_current=pipeline.days_of_supply_current,
                 effective_velocity=pipeline.effective_velocity,
                 velocity_unknown_reason=pipeline.velocity_unknown_reason,
+                momentum_signal=pipeline.momentum_signal,
                 meta_group_id=meta_group_id,
                 pipeline_stage="manufacturing",
                 overview_row=overview_row,
@@ -217,6 +219,7 @@ class ItemDecisionEngine:
                 days_of_supply_current=pipeline.days_of_supply_current,
                 effective_velocity=velocity,
                 velocity_unknown_reason=pipeline.velocity_unknown_reason,
+                momentum_signal=pipeline.momentum_signal,
                 meta_group_id=meta_group_id,
                 # The overview row carries no pipeline stage or in-flight flags
                 # (no producer writes them), so a non-build is always "watching".

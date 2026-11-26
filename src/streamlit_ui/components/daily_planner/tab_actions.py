@@ -132,19 +132,33 @@ _BUY_CATEGORY: dict[str, str] = {
 }
 
 
-def pending_buy_categories(actions: list[dict[str, Any]]) -> frozenset[str]:
-    """The shopping list categories that still have a pending buy line."""
-    return frozenset(
-        str(a.get("shopping_category") or "") for a in actions
-        if str(a.get("action_type") or "") == "buy_materials" and str(a.get("status") or "pending") == "pending"
-    )
+PendingBuys = dict[str, dict[int, str]]
 
 
-def needs_purchase(action: dict[str, Any], pending_buys: frozenset[str]) -> bool:
-    """Whether the action waits on a pending buy line of its category."""
-    # shortcut: buy lines are merged per material and not linked to a job, so every job of a kind
-    # waits on all of that kind's open lines; link lines to jobs if a pilot often waits for nothing.
-    return _BUY_CATEGORY.get(str(action.get("action_type") or "")) in pending_buys
+def pending_buy_lines(actions: list[dict[str, Any]]) -> PendingBuys:
+    """{shopping category: {type_id: item name}} of the buy lines still pending."""
+    lines: PendingBuys = {}
+    for a in actions:
+        if str(a.get("action_type") or "") == "buy_materials" and str(a.get("status") or "pending") == "pending":
+            lines.setdefault(str(a.get("shopping_category") or ""), {})[int(a.get("type_id") or 0)] = str(
+                a.get("type_name") or "Unknown")
+    return lines
+
+
+def waiting_on(action: dict[str, Any], pending_buys: PendingBuys) -> list[str]:
+    """The pending buy lines (item names) this job waits on: the materials it
+    was short of at plan time that are not bought yet. A plan from before the
+    link (no short_type_ids) waits on every pending line of its kind."""
+    pending = pending_buys.get(_BUY_CATEGORY.get(str(action.get("action_type") or ""), ""), {})
+    short = action.get("short_type_ids")
+    if short is None:
+        return list(pending.values())
+    ids = [int(t) for t in str(short).split(",") if t.strip()]
+    return [pending[t] for t in ids if t in pending]
+
+
+def needs_purchase(action: dict[str, Any], pending_buys: PendingBuys) -> bool:
+    return bool(waiting_on(action, pending_buys))
 
 
 def _reload_plan(page_state: DailyPlannerPageState) -> None:
@@ -194,7 +208,7 @@ def short_notes(notes: str, keep: int = 3) -> tuple[str, str | None]:
     return " · ".join(parts[:keep]) + " …", " · ".join(parts)
 
 
-def matches_filter(action: dict[str, Any], mode: str, pending_buys: frozenset[str]) -> bool:
+def matches_filter(action: dict[str, Any], mode: str, pending_buys: PendingBuys) -> bool:
     """Whether the row shows under the filter: "Todo's" is what is neither
     done nor skipped, "Ready now" what can be done without buying, "Needs
     purchase" the jobs still waiting on the shopping list."""
@@ -247,7 +261,7 @@ def _status_button(action_id: int, page_state: DailyPlannerPageState, *, label: 
 def _render_action_row(
     action: dict[str, Any],
     page_state: DailyPlannerPageState,
-    pending_buys: frozenset[str],
+    pending_buys: PendingBuys,
     siblings: list[dict[str, Any]] | None = None,
     *,
     jobs: list[dict[str, Any]] | None = None,
@@ -282,7 +296,10 @@ def _render_action_row(
         done_label, done_help = ":material/play_arrow:", "The ME research on this BPO has ended: mark this TE research as started"
         detail_parts.append(queue_note or "")
     elif action_type in _START_ACTIONS:
-        badge = ("Buy first", "orange") if needs_purchase(action, pending_buys) else ("Ready", "green")
+        missing = waiting_on(action, pending_buys)
+        badge = ("Buy first", "orange") if missing else ("Ready", "green")
+        if missing:
+            detail_parts.append("buy: " + ", ".join(missing[:3]) + (f" +{len(missing) - 3}" if len(missing) > 3 else ""))
     else:
         badge = ("Ready", "green")
 
@@ -314,7 +331,7 @@ def _render_character_section(
     char_name: str,
     char_actions: list[dict[str, Any]],
     page_state: DailyPlannerPageState,
-    pending_buys: frozenset[str],
+    pending_buys: PendingBuys,
     *,
     jobs: list[dict[str, Any]] | None = None,
     free_slots: str | None = None,
@@ -440,7 +457,7 @@ def render_tab_actions(
         )
         return
 
-    pending_buys = pending_buy_categories(all_actions)
+    pending_buys = pending_buy_lines(all_actions)
 
     filter_col, reasons_col = st.columns([3, 1], vertical_alignment="center")
     with filter_col:

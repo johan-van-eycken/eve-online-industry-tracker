@@ -195,30 +195,38 @@ def test_short_notes_cuts_after_three_parts_and_keeps_the_full_text():
 
 
 def test_the_filter_splits_ready_rows_from_rows_that_wait_on_purchases():
-    deliver, build = {"action_type": "deliver"}, {"action_type": "manufacture"}
+    deliver, build = {"action_type": "deliver"}, {"action_type": "manufacture", "short_type_ids": "34"}
     ready, buy = tab_actions.FILTER_READY, tab_actions.FILTER_BUY
-    waiting = frozenset({"current_job"})
+    waiting = {"current_job": {34: "Tritanium"}}
     assert [tab_actions.matches_filter(a, ready, waiting) for a in (deliver, build)] == [True, False]
     assert [tab_actions.matches_filter(a, buy, waiting) for a in (deliver, build)] == [False, True]
-    assert tab_actions.matches_filter(build, ready, frozenset())
+    assert tab_actions.matches_filter(build, ready, {})
     assert tab_actions.matches_filter(build, tab_actions.FILTER_ALL, waiting)
 
 
 def test_todo_filter_hides_done_and_skipped_rows():
     rows = [{"action_type": "invent", "status": s} for s in ("pending", "done", "skipped")]
-    assert [tab_actions.matches_filter(a, tab_actions.FILTER_TODO, frozenset()) for a in rows] == [True, False, False]
+    assert [tab_actions.matches_filter(a, tab_actions.FILTER_TODO, {}) for a in rows] == [True, False, False]
 
 
-def test_only_jobs_whose_own_buy_lines_are_open_wait_on_a_purchase():
+def test_a_job_waits_only_on_its_own_pending_buy_lines():
     actions = [
-        {"action_type": "buy_materials", "shopping_category": "current_job", "status": "pending"},
-        {"action_type": "buy_materials", "shopping_category": "invention_input", "status": "done"},
+        {"action_type": "buy_materials", "shopping_category": "current_job", "status": "pending",
+         "type_id": 34, "type_name": "Tritanium"},
+        {"action_type": "buy_materials", "shopping_category": "current_job", "status": "done",
+         "type_id": 35, "type_name": "Pyerite"},
+        {"action_type": "buy_materials", "shopping_category": "invention_input", "status": "pending",
+         "type_id": 20410, "type_name": "Datacore"},
     ]
-    pending = tab_actions.pending_buy_categories(actions)
-    assert pending == frozenset({"current_job"})
-    assert [tab_actions.needs_purchase({"action_type": t}, pending)
-            for t in ("manufacture", "sub_manufacture", "invent", "copy", "me_research", "deliver")] == [
-        True, True, False, False, False, False]
+    pending = tab_actions.pending_buy_lines(actions)
+    wait = tab_actions.waiting_on
+    assert wait({"action_type": "manufacture", "short_type_ids": "34,35"}, pending) == ["Tritanium"]
+    assert wait({"action_type": "manufacture", "short_type_ids": "35"}, pending) == []   # its line is bought
+    assert wait({"action_type": "manufacture", "short_type_ids": ""}, pending) == []     # all from stock
+    assert wait({"action_type": "invent", "short_type_ids": "20410"}, pending) == ["Datacore"]
+    assert wait({"action_type": "copy", "short_type_ids": None}, pending) == []
+    # A plan from before the link waits on every open line of its kind.
+    assert wait({"action_type": "manufacture"}, pending) == ["Tritanium"]
 
 
 def test_the_steps_count_what_is_left():

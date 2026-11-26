@@ -473,3 +473,13 @@ def test_merged_lines_keep_the_spot_price_note():
     )
     assert [(i.quantity, i.estimated_total, i.notes) for i in items] == [
         (5, 20.0, "price: spot (no VWAP data)")]
+
+
+def test_each_job_names_the_materials_it_is_short_of():
+    # 1000 in stock covers the first job; the second waits on the Tritanium buy line.
+    stock = SimpleNamespace(type_id=34, quantity=1000, is_blueprint_copy=False)
+    first, second = _action(runs=10), _action(runs=10, type_id=22222)
+    _build([first, second], [stock])
+    assert (first.short_type_ids, second.short_type_ids) == ((), (34,))
+    _build([first, second], [stock])   # a rebuild does not add twice
+    assert second.short_type_ids == (34,)
