@@ -70,16 +70,13 @@ Don't skip the `pip install -U pip setuptools wheel` line. A new venv has no set
 
 ### 3. Configure
 
-**`config/config.json`** is tracked in the repo and holds the owner's values. Change two of them:
-
-- `oauth.client_id`: the Client ID from step 1.
-- `app.user_agent`: your own contact, e.g. `"eve-online-industry-tracker/1.0 (you@example.com)"`. CCP asks every ESI client to identify itself.
-
-**`config/private/secret.json`** isn't in the repo, so create it (UTF-8). If you start the app without it, the app writes this template for you and stops:
+All your own values go in **`config/private/secret.json`**. It isn't in the repo, so create it (UTF-8). If you start the app without it, the app writes this template for you and stops:
 
 ```json
 {
+    "client_id": "the Client ID from step 1",
     "client_secret": "the Secret Key from step 1",
+    "user_agent": "eve-online-industry-tracker/1.0 (you@example.com)",
     "characters": [
         { "character_name": "Your Main", "is_main": true,  "is_corp_director": true },
         { "character_name": "Your Alt",  "is_main": false, "is_corp_director": false }
@@ -87,6 +84,8 @@ Don't skip the `pip install -U pip setuptools wheel` line. A new venv has no set
 }
 ```
 
+- `client_id` and `client_secret`: from your developer application.
+- `user_agent`: your own contact. CCP asks every ESI client to identify itself.
 - `character_name`: the exact in-game name.
 - `is_main`: the character the UI picks by default. Mark one; without one, the first in the list becomes main.
 - `is_corp_director`: this character also reads the corporation's wallets, assets, blueprints and industry jobs. It requests the corp scopes, and needs the in-game Director role. Without one marked, the app uses the first character, so the developer application needs the corp scopes too.
@@ -158,11 +157,11 @@ The login listener takes its port from `app.redirect_uri` in `config/config.json
 
 ### `config/config.json`
 
-App settings, database paths, the OAuth client id, the requested scopes and the ESI configuration. See [step 3](#3-configure) for the values to change.
+App settings, database paths, the requested scopes and the ESI configuration. The same for every user; your own values go in `secret.json`.
 
 ### `config/private/secret.json`
 
-Your application's secret and your characters. See [step 3](#3-configure).
+Your application's client id and secret, your ESI contact (`user_agent`) and your characters. See [step 3](#3-configure).
 
 ### `config/import_sde.json`
 
@@ -177,7 +176,7 @@ Market defaults (such as the default broker fee and order book depth), industry 
 | Variable | Default | Description |
 |---|---|---|
 | `APP_CONFIG_PATH` | `config/config.json` | Path to main config |
-| `APP_SECRET_PATH` | `config/private/secret.json` | Path to secrets file |
+| `APP_SECRET_PATH` | `config/private/secret.json` | Path to the file with your own values |
 | `ADMIN_SETTINGS_PATH` | `database/admin_settings.json` | Path to the application settings |
 | `STREAMLIT_PREFERENCES_PATH` | `database/streamlit_preferences.json` | Path to the UI preferences |
 | `LOG_LEVEL` | `DEBUG` | Logging verbosity |
