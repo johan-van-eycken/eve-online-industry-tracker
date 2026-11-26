@@ -21,15 +21,14 @@ _VIEW_KEY = "dp_view"
 
 
 def view_tiles(plan: dict[str, Any], *, jobs: list[dict[str, Any]] | None = None) -> list[tuple[str, str, str, bool]]:
-    """(title, grey line, view it opens, done) per tile: the three daily steps, then Build Plan and Analytics."""
+    """(title, grey line, view it opens, done) per tile: one per view."""
     actions = plan.get("actions") or []
     (deliver, buy, start) = step_summaries(_character_level_actions(actions), actions, jobs=jobs)
     counts = decision_counts(plan.get("items") or [])
     build_line = " · ".join(f"{n:,} {d}" for d, n in counts.items()) or "no items"
     return [
-        (f"1 · {deliver[0]}", deliver[1], VIEW_ACTIONS, deliver[2]),
-        (f"2 · {buy[0]}", buy[1].replace(" → Shopping List", ""), VIEW_SHOPPING, buy[2]),
-        (f"3 · {start[0]}", start[1], VIEW_ACTIONS, start[2]),
+        ("Today's actions", f"deliver: {deliver[1]} · start: {start[1]}", VIEW_ACTIONS, deliver[2] and start[2]),
+        ("Buy materials", buy[1].replace(" → Shopping List", ""), VIEW_SHOPPING, buy[2]),
         ("Build Plan", build_line, VIEW_BUILD, False),
         ("Analytics", "plan vs. realized, learning", VIEW_ANALYTICS, False),
     ]

@@ -12,8 +12,9 @@ def test_view_tiles_open_the_view_their_step_belongs_to():
     }
     tiles = view_tiles(plan)
     assert [(t[0], t[2]) for t in tiles] == [
-        ("1 · Deliver", VIEW_ACTIONS), ("2 · Buy materials", VIEW_SHOPPING), ("3 · Start jobs", VIEW_ACTIONS),
+        ("Today's actions", VIEW_ACTIONS), ("Buy materials", VIEW_SHOPPING),
         ("Build Plan", VIEW_BUILD), ("Analytics", VIEW_ANALYTICS),
     ]
+    assert tiles[0][1] == "deliver: 1 job(s) ready · start: all started"
     assert tiles[1][1] == "1 item(s) · 2.00M ISK"   # invention inputs count as buys too
-    assert tiles[3][1] == "1 build · 2 skip"
+    assert tiles[2][1] == "1 build · 2 skip"
