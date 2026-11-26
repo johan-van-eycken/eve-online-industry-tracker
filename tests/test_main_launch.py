@@ -31,7 +31,29 @@ def test_run_streamlit_uses_running_interpreter(monkeypatch):
     calls = []
     monkeypatch.setattr(main.subprocess, "Popen", lambda argv, **kw: calls.append(argv) or object())
     main.run_streamlit()
-    assert calls == [[sys.executable, "-m", "streamlit", "run", "streamlit_app.py"]]
+    assert calls == [[sys.executable, "-m", "streamlit", "run", "streamlit_app.py",
+                      "--server.showEmailPrompt=false"]]
+
+
+def test_wait_for_flask_ready_stops_on_failed_init(monkeypatch):
+    class _Resp:
+        status_code = 503
+        headers = {"content-type": "application/json"}
+        def json(self):
+            return {"init_state": "Initialization Failed at step: Loading Config"}
+    monkeypatch.setattr(main.requests, "get", lambda *a, **kw: _Resp())
+    monkeypatch.setattr(main.time, "sleep", lambda s: pytest.fail("kept polling after a failed init"))
+    with pytest.raises(RuntimeError, match="Loading Config"):
+        main.wait_for_flask_ready(timeout=300)
+
+
+def test_init_db_sde_names_a_missing_sde(tmp_path):
+    from utils.app_init import init_db_sde
+    missing = tmp_path / "eve_sde.db"
+    cfg = type("C", (), {"all": lambda s: {"app": {"database_sde_uri": f"sqlite:///{missing}", "language": "en"}}})()
+    with pytest.raises(FileNotFoundError, match="SDE not imported yet"):
+        init_db_sde(cfg)
+    assert not missing.exists()
 
 
 def _patch_flask(monkeypatch, fake):

@@ -519,7 +519,7 @@ class ESIClient:
     # ------------------------------------------------------------------
     def _get_authorization_code(self, state: str = "eve_auth") -> str:
         """Open browser for user login and capture authorization code."""
-        timeout_seconds = 60
+        timeout_seconds = 300  # first login may need the EVE password and 2FA
         # Where to send the user after SSO completes (best-effort).
         streamlit_url = None
         try:
@@ -536,7 +536,7 @@ class ESIClient:
             "state": state,
         }
         auth_url = f"{self.auth_url}?{urlencode(auth_params)}"
-        logging.debug(f"Opening URL for EVE Online login: {auth_url}")
+        logging.info(f"Opening the EVE login in your browser (5 min). If no browser opens, visit: {auth_url}")
         webbrowser.open(auth_url)
 
         with OAuthServer(("localhost", urlparse(self.redirect_uri).port or 80),OAuthHandler, return_to_url=streamlit_url) as httpd:

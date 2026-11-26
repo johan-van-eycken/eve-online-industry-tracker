@@ -33,7 +33,7 @@ class ConfigManager:
     def _load_config(self, path: Path) -> None:
         if not path.exists():
             raise FileNotFoundError(f"{path} not found. Please create it.")
-        self._config.update(json.loads(path.read_text()))
+        self._config.update(json.loads(path.read_text(encoding="utf-8-sig")))
 
     def _load_secret(self, path: Path) -> None:
         if not path.exists():
@@ -41,14 +41,16 @@ class ConfigManager:
             path.parent.mkdir(parents=True, exist_ok=True)
             default_secret = {
                 "client_secret": "YOUR_SECRET_CLIENT_ID",
-                "characters": [],
+                "characters": [
+                    {"character_name": "Your Main", "is_main": True, "is_corp_director": False}
+                ],
             }
-            path.write_text(json.dumps(default_secret, indent=4))
+            path.write_text(json.dumps(default_secret, indent=4), encoding="utf-8")
             raise RuntimeError(
-                f"{path} created with placeholder. Please fill in your EVE client_secret."
+                f"{path} created with placeholders. Fill in your EVE app's client_secret and your character names, then restart."
             )
 
-        secret_data = json.loads(path.read_text())
+        secret_data = json.loads(path.read_text(encoding="utf-8-sig"))
         if secret_data.get("client_secret") == "YOUR_SECRET_CLIENT_ID":
             raise RuntimeError(
                 f"{path} contains placeholder client_secret. Please update it."

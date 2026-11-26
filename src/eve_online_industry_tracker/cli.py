@@ -53,7 +53,8 @@ STREAMLIT_MAX_CONSECUTIVE_FAILURES = 5
 
 def run_streamlit() -> subprocess.Popen:
     # The running interpreter's Streamlit, not whatever `streamlit` is first on PATH.
-    return subprocess.Popen([sys.executable, "-m", "streamlit", "run", "streamlit_app.py"])
+    return subprocess.Popen([sys.executable, "-m", "streamlit", "run", "streamlit_app.py",
+                             "--server.showEmailPrompt=false"])
 
 
 def wait_for_flask_ready(flask_proc: multiprocessing.Process | None = None, timeout: int = 120) -> bool:
@@ -75,10 +76,13 @@ def wait_for_flask_ready(flask_proc: multiprocessing.Process | None = None, time
                     return True
             elif r.status_code == 503:
                 try:
-                    payload = r.json()
-                    logging.info("Flask not ready yet: %s", payload.get("init_state", "unknown"))
+                    init_state = str(r.json().get("init_state", "unknown"))
                 except Exception:
-                    logging.info("Flask not ready yet (503)")
+                    init_state = "unknown (503)"
+                # A failed init never recovers: stop now, the error is logged just above.
+                if init_state.startswith("Initialization Failed"):
+                    raise RuntimeError(f"Flask {init_state}; see the error above.")
+                logging.info("Flask not ready yet: %s", init_state)
         except requests.RequestException as e:
             logging.debug("Flask not reachable yet: %s", e)
 

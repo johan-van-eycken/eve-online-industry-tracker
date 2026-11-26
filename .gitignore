@@ -1,7 +1,7 @@
 # project specific files
 
 # very important, contains sensitive information
-config/secret.json
+config/private/secret.json
 
 # markdown files (README.md is already tracked and unaffected)
 *.md

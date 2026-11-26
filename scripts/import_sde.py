@@ -3,6 +3,7 @@ import os
 import sys
 import zipfile
 import shutil
+from pathlib import Path
 
 try:
     import truststore
@@ -208,7 +209,7 @@ def download_sde(url: str, dest_dir: str) -> str:
 
     if not os.path.exists(zip_path):
         print("Downloading SDE...")
-        r = requests.get(url, stream=True)
+        r = requests.get(url, stream=True, timeout=(15, 120))
         r.raise_for_status()
         total_size = int(r.headers.get('content-length', 0))
         with open(zip_path, "wb") as f, tqdm(
@@ -340,6 +341,10 @@ def cleanup_temp(dest_dir: str):
 # CLI
 # ----------------------------
 def main():
+    # Paths in config/import_sde.json are relative to the repository root.
+    os.chdir(Path(__file__).resolve().parent.parent)
+    # The status marks (✓, ⚠) crash a cp1252 Windows console or pipe.
+    sys.stdout.reconfigure(errors="replace")
     default_config_path = "config/import_sde.json"
     try:
         cfg = ConfigManager(base_path=default_config_path, schema=IMPORT_SDE_SCHEMA)
@@ -390,7 +395,7 @@ def main():
         help="Show SDE version import history",
     )
     parser.add_argument(
-        "--db", default=cfg.get("DEFAULT_DB_URI"), help="SQLite database file path"
+        "--db", default=cfg.get("DEFAULT_DB_URI"), help="SQLAlchemy database URI, e.g. sqlite:///database/eve_sde.db"
     )
     parser.add_argument(
         "--tmp",
