@@ -86,5 +86,13 @@ def api_put_or_error(path, payload, timeout_seconds=None):
     return _request_or_error("PUT", path, payload=payload, timeout_seconds=timeout_seconds)
 
 
+def api_post_or_error(path, payload, timeout_seconds=None):
+    return _request_or_error("POST", path, payload=payload, timeout_seconds=timeout_seconds)
+
+
+def api_patch_or_error(path, payload, timeout_seconds=None):
+    return _request_or_error("PATCH", path, payload=payload, timeout_seconds=timeout_seconds)
+
+
 def api_delete(path):
     return _request("DELETE", path)

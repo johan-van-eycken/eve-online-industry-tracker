@@ -10,6 +10,7 @@ import requests
 import streamlit as st
 
 from streamlit_ui.api.client import api_get, api_post
+from streamlit_ui.components.character_roster import active_character_count
 from streamlit_ui.components.webpage_ui import render_job_status_panel
 
 
@@ -189,5 +190,9 @@ def render_application() -> None:
         return
 
     page_spec = next((page for page in NAVIGATION_PAGES if page.label == selected_navigation), None)
-    if page_spec is not None:
-        _render_module_page(page_spec.module_path)
+    if page_spec is None:
+        return
+    if page_spec.label != "Characters" and active_character_count() == 0:
+        st.info("Activate a character first: open **Characters** in the navigation.")
+        return
+    _render_module_page(page_spec.module_path)
