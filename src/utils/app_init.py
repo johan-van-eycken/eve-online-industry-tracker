@@ -93,11 +93,6 @@ def load_config() -> ConfigManager:
             schema=CONFIG_SCHEMA,
         )
         cfg = cfgManager.all()
-        if len(cfg["characters"]) == 0:
-            raise ValueError(
-                "No characters found in config. Add a 'characters' list to your secret config "
-                f"({app_secret_path()}) to avoid committing character names."
-            )
         return cfgManager
     except Exception as e:
         logging.error(f"Failed to load config: {e}")
@@ -164,6 +159,10 @@ def init_db_managers(cfgManager: ConfigManager, refresh_metadata: bool = False) 
         if refresh_metadata:
             BaseOauth.metadata.create_all(bind=db_oauth.engine)
         ensure_oauth_schema(db_oauth)
+        from eve_online_industry_tracker.application.characters import roster_seed
+        roster_seed.LAST_SEED_UNCONFIGURED = roster_seed.seed_characters_once(db_oauth, cfg.get("characters", []))
+        for name in roster_seed.LAST_SEED_UNCONFIGURED:
+            logging.warning("%s was not in secret.json but has a login; delete it on Characters if unwanted", name)
         # One-off, idempotent: drop the ESI cache rows no request reads any more (logged).
         try:
             from eve_online_industry_tracker.infrastructure.esi_client import prune_stale_esi_cache

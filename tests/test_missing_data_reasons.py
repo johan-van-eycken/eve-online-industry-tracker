@@ -214,6 +214,7 @@ def _init(monkeypatch, restamp):
     from eve_online_industry_tracker.application.characters import corp_transfer_costs
     from eve_online_industry_tracker.infrastructure import esi_client as esi_client_module
     from eve_online_industry_tracker.infrastructure import schema_migrations
+    from eve_online_industry_tracker.application.characters import roster_seed
     from utils import app_init
 
     session = SimpleNamespace(rollbacks=0)
@@ -226,6 +227,7 @@ def _init(monkeypatch, restamp):
     monkeypatch.setattr(app_init, "init_db_sde", lambda cfg: SimpleNamespace())
     monkeypatch.setattr(schema_migrations, "ensure_app_schema", lambda db: None)
     monkeypatch.setattr(schema_migrations, "ensure_oauth_schema", lambda db: None)
+    monkeypatch.setattr(roster_seed, "seed_characters_once", lambda db, chars: [])
     monkeypatch.setattr(esi_client_module, "prune_stale_esi_cache", lambda session: None)
     monkeypatch.setattr(corp_transfer_costs, "restamp_all_blended_corp_transfer_lots_once", restamp)
     return app_init, cfg, session
