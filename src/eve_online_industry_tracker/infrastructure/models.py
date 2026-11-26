@@ -28,12 +28,14 @@ class OAuthCharacter(BaseOauth):
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     character_name: Mapped[str] = mapped_column(String, unique=True, nullable=False)
-    character_id: Mapped[Optional[int]] = mapped_column(Integer, unique=True, nullable=False)
+    character_id: Mapped[Optional[int]] = mapped_column(Integer, unique=True, nullable=True)
     refresh_token: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     access_token: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     token_expiry: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    scopes: Mapped[str] = mapped_column(Text)  # JSON-formatted string of scopes
+    scopes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # JSON-formatted string of scopes; NULL: not activated
     is_main: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_corp_director: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0", nullable=False)
+    industry_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1", nullable=False)
 
 
 # --------------------------

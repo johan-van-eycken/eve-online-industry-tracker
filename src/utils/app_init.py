@@ -154,7 +154,7 @@ def init_db_managers(cfgManager: ConfigManager, refresh_metadata: bool = False) 
     Initialize Databases and Schemas
     """
     from eve_online_industry_tracker.infrastructure.models import BaseOauth, BaseApp
-    from eve_online_industry_tracker.infrastructure.schema_migrations import ensure_app_schema
+    from eve_online_industry_tracker.infrastructure.schema_migrations import ensure_app_schema, ensure_oauth_schema
 
     try:
         cfg = cfgManager.all()
@@ -163,6 +163,7 @@ def init_db_managers(cfgManager: ConfigManager, refresh_metadata: bool = False) 
         db_oauth = init_db_oauth(cfgManager)
         if refresh_metadata:
             BaseOauth.metadata.create_all(bind=db_oauth.engine)
+        ensure_oauth_schema(db_oauth)
         # One-off, idempotent: drop the ESI cache rows no request reads any more (logged).
         try:
             from eve_online_industry_tracker.infrastructure.esi_client import prune_stale_esi_cache

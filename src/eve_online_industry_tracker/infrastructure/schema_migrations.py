@@ -369,6 +369,44 @@ def normalize_double_encoded_json_column(db: DatabaseManager, *, table: str, col
     return fixed
 
 
+def ensure_oauth_schema(db_oauth: DatabaseManager) -> None:
+    """Forward migrations for the OAuth DB: oauth_meta, and oauth_characters with
+    nullable character_id/scopes (a not-activated character) plus the
+    is_corp_director/industry_enabled flags. SQLite cannot drop NOT NULL, so the
+    table is rebuilt in one transaction with every column value copied (live
+    tokens live here). Idempotent."""
+    _ensure_table(
+        db_oauth, table="oauth_meta",
+        ddl="CREATE TABLE IF NOT EXISTS oauth_meta (key TEXT PRIMARY KEY, value TEXT)",
+    )
+    try:
+        info = db_oauth.query("PRAGMA table_info(oauth_characters);")
+    except _SCHEMA_ERRORS as e:
+        raise SchemaMigrationError("could not read the columns of oauth_characters", e) from e
+    # PRAGMA table_info: cid, name, type, notnull, dflt_value, pk
+    if not any(r[1] in ("character_id", "scopes") and r[3] == 1 for r in info):
+        return
+
+    from sqlalchemy.dialects import sqlite  # pyright: ignore[reportMissingImports]
+    from sqlalchemy.schema import CreateTable  # pyright: ignore[reportMissingImports]
+    from eve_online_industry_tracker.infrastructure.models import OAuthCharacter
+
+    new_ddl = str(CreateTable(OAuthCharacter.__table__).compile(dialect=sqlite.dialect()))
+    new_ddl = new_ddl.replace("CREATE TABLE oauth_characters", "CREATE TABLE oauth_characters_new", 1)
+    cols = "id, character_name, character_id, refresh_token, access_token, token_expiry, scopes, is_main"
+    try:
+        with db_oauth.engine.begin() as conn:
+            conn.execute(text("DROP TABLE IF EXISTS oauth_characters_new"))
+            conn.execute(text(new_ddl))
+            conn.execute(text(f"INSERT INTO oauth_characters_new ({cols}) SELECT {cols} FROM oauth_characters"))
+            conn.execute(text("DROP TABLE oauth_characters"))
+            conn.execute(text("ALTER TABLE oauth_characters_new RENAME TO oauth_characters"))
+        logging.info("Rebuilt oauth_characters with nullable character_id/scopes and the character flags")
+    except _SCHEMA_ERRORS as e:
+        logging.error("Failed rebuilding oauth_characters: %s", str(e))
+        raise SchemaMigrationError("could not rebuild oauth_characters", e) from e
+
+
 def ensure_app_schema(db_app: DatabaseManager) -> None:
     """Forward migrations for the app DB.
 

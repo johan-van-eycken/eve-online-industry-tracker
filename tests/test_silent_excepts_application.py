@@ -342,6 +342,7 @@ def test_a_failed_prune_is_a_warning_and_a_bug_propagates(monkeypatch, caplog):
     monkeypatch.setattr(app_init, "init_db_sde", lambda cfg: SimpleNamespace())
     from eve_online_industry_tracker.infrastructure import schema_migrations
     monkeypatch.setattr(schema_migrations, "ensure_app_schema", lambda db: None)
+    monkeypatch.setattr(schema_migrations, "ensure_oauth_schema", lambda db: None)
     from eve_online_industry_tracker.application.characters import corp_transfer_costs
     monkeypatch.setattr(corp_transfer_costs, "restamp_all_blended_corp_transfer_lots_once", lambda session: None)
 

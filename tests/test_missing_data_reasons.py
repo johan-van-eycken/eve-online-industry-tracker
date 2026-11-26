@@ -225,6 +225,7 @@ def _init(monkeypatch, restamp):
     monkeypatch.setattr(app_init, "init_db_app", lambda cfg: db_app)
     monkeypatch.setattr(app_init, "init_db_sde", lambda cfg: SimpleNamespace())
     monkeypatch.setattr(schema_migrations, "ensure_app_schema", lambda db: None)
+    monkeypatch.setattr(schema_migrations, "ensure_oauth_schema", lambda db: None)
     monkeypatch.setattr(esi_client_module, "prune_stale_esi_cache", lambda session: None)
     monkeypatch.setattr(corp_transfer_costs, "restamp_all_blended_corp_transfer_lots_once", restamp)
     return app_init, cfg, session
