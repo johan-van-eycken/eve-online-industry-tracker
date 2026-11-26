@@ -22,10 +22,10 @@ def _rows(db):
     return {m.character_name: m for m in OAuthCharacterRepository(db.session).list_metadata()}
 
 
-def _activated(db, name):
+def _activated(db, name, is_main=0):
     db.execute(
         "INSERT INTO oauth_characters (character_name, character_id, refresh_token, access_token, scopes, is_main) "
-        "VALUES (:n, :i, 'rt', 'at', '[]', 0)", {"n": name, "i": abs(hash(name)) % 10**6})
+        "VALUES (:n, :i, 'rt', 'at', '[]', :m)", {"n": name, "i": abs(hash(name)) % 10**6, "m": is_main})
 
 
 def test_seed_adds_missing_names_as_not_activated(db):
@@ -87,3 +87,32 @@ def test_add_refuses_duplicate_name_ignoring_case(db):
     repo.add("Alice")
     with pytest.raises(ValueError):
         repo.add("ALICE")
+
+
+def test_seed_clears_a_stored_main_outside_cfg(db):
+    _activated(db, "Gone", is_main=1)
+    _activated(db, "Main")
+    seed_characters_once(db, [{"character_name": "Main", "is_main": True}])
+    rows = _rows(db)
+    assert rows["Main"].is_main and not rows["Gone"].is_main
+
+
+def test_init_db_managers_keeps_and_logs_unconfigured_names(monkeypatch, caplog):
+    from types import SimpleNamespace
+    from eve_online_industry_tracker.application.characters import corp_transfer_costs, roster_seed
+    from eve_online_industry_tracker.infrastructure import esi_client, schema_migrations
+    from utils import app_init
+
+    cfg = SimpleNamespace(all=lambda: {"app": {"database_oauth_uri": "x", "database_app_uri": "y",
+                                                "database_sde_uri": "z"}, "characters": []})
+    monkeypatch.setattr(app_init, "init_db_oauth", lambda c: SimpleNamespace(session=None))
+    monkeypatch.setattr(app_init, "init_db_app", lambda c: SimpleNamespace(session=None))
+    monkeypatch.setattr(app_init, "init_db_sde", lambda c: SimpleNamespace())
+    monkeypatch.setattr(schema_migrations, "ensure_app_schema", lambda db: None)
+    monkeypatch.setattr(schema_migrations, "ensure_oauth_schema", lambda db: None)
+    monkeypatch.setattr(esi_client, "prune_stale_esi_cache", lambda s: None)
+    monkeypatch.setattr(corp_transfer_costs, "restamp_all_blended_corp_transfer_lots_once", lambda s: None)
+    monkeypatch.setattr(roster_seed, "seed_characters_once", lambda db, chars: ["X"])
+    app_init.init_db_managers(cfg)
+    assert roster_seed.LAST_SEED_UNCONFIGURED == ["X"]
+    assert "X was not in secret.json but has a login; delete it on Characters if unwanted" in caplog.text

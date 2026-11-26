@@ -25,6 +25,8 @@ def seed_characters_once(db_oauth: DatabaseManager, cfg_characters: list[dict]) 
             return []
         rows = conn.execute(text("SELECT id, character_name, refresh_token FROM oauth_characters")).fetchall()
         by_name = {r[1].casefold(): r for r in rows}
+        if any(c.get("is_main") for c in chars):  # a stored main outside cfg must not stay a second main
+            conn.execute(text("UPDATE oauth_characters SET is_main = 0"))
         for c in chars:
             params = {
                 "n": c["character_name"],

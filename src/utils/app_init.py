@@ -73,12 +73,6 @@ def _user_friendly_error(e: Exception) -> str | None:
             '    {"character_name": "Your Name", "is_main": true, "is_corp_director": false}'
         )
 
-    if "No characters found in config" in msg:
-        return (
-            f"No characters configured in {app_secret_path()}.\n"
-            "  Add at least one character to the 'characters' list."
-        )
-
     return None
 
 
@@ -160,7 +154,9 @@ def init_db_managers(cfgManager: ConfigManager, refresh_metadata: bool = False) 
             BaseOauth.metadata.create_all(bind=db_oauth.engine)
         ensure_oauth_schema(db_oauth)
         from eve_online_industry_tracker.application.characters import roster_seed
-        roster_seed.LAST_SEED_UNCONFIGURED = roster_seed.seed_characters_once(db_oauth, cfg.get("characters", []))
+        unconfigured = roster_seed.seed_characters_once(db_oauth, cfg.get("characters", []))
+        roster_seed.LAST_SEED_UNCONFIGURED.clear()
+        roster_seed.LAST_SEED_UNCONFIGURED.extend(unconfigured)
         for name in roster_seed.LAST_SEED_UNCONFIGURED:
             logging.warning("%s was not in secret.json but has a login; delete it on Characters if unwanted", name)
         # One-off, idempotent: drop the ESI cache rows no request reads any more (logged).
