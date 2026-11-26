@@ -156,7 +156,18 @@ def test_thread_start_failure_restores_the_status(db, monkeypatch, opened):
     with pytest.raises(RuntimeError):
         login.start(CFG, db, "Main", False)
     assert login.status()["state"] == "idle"
-    assert not login._lock.locked() and opened == []
+    assert not login._lock.locked()
+
+
+def test_browser_failure_releases_the_lock(db, monkeypatch):
+    def boom(url):
+        raise RuntimeError("no browser")
+
+    monkeypatch.setattr(login.webbrowser, "open", boom)
+    with pytest.raises(RuntimeError):
+        login.start(CFG, db, "Main", False)
+    assert login.status()["state"] == "idle"
+    assert not login._lock.locked()
 
 
 def test_wrong_character_status(db, monkeypatch):

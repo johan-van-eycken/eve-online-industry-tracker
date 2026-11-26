@@ -46,6 +46,7 @@ def test_seed_copies_flags_onto_existing_rows(db):
     assert rows["Main"].is_corp_director and not rows["Main"].industry_enabled and rows["Main"].is_main
     assert rows["Main"].has_refresh_token and rows["Main"].has_access_token
     assert rows["Gone"].has_refresh_token and not rows["Gone"].is_main
+    assert not rows["Gone"].industry_enabled   # kept, but out of industry planning as before
 
 
 def test_seed_applies_old_fallbacks(db):
@@ -53,6 +54,12 @@ def test_seed_applies_old_fallbacks(db):
     rows = _rows(db)
     assert rows["A"].is_main and rows["A"].is_corp_director
     assert not rows["B"].is_main and not rows["B"].is_corp_director
+
+
+def test_seed_explicit_false_everywhere_means_no_director(db):
+    seed_characters_once(db, [{"character_name": "A", "is_corp_director": False},
+                              {"character_name": "B", "is_corp_director": False}])
+    assert not any(r.is_corp_director for r in _rows(db).values())
 
 
 def test_seed_runs_once(db):

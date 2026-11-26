@@ -23,12 +23,12 @@ def start(cfg: Any, db_oauth: Any, character_name: str, is_corp_director: bool) 
         url = client.authorization_url()
         _status.update(state="waiting", character_name=character_name, restarting=False,
                        message=f"Log in as {character_name} in the browser window that opened (5 min).")
+        webbrowser.open(url)   # before the thread owns the lock; the page also shows url, for when no browser opens
         threading.Thread(target=_run, args=(client, character_name), daemon=True, name="character-login").start()
     except BaseException:
         _status.update(previous)   # no login runs: not left at "waiting"
         _lock.release()
         raise
-    webbrowser.open(url)   # the page also shows url, for when no browser opens
     return url
 
 

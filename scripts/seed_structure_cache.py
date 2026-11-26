@@ -1,6 +1,8 @@
 """Seed the structure_name_cache by trying each character's ESI client.
 
 Usage: python scripts/seed_structure_cache.py
+
+After upgrading, start the app once first: it migrates eve_oauth.db, which this script reads.
 """
 import sys
 import os

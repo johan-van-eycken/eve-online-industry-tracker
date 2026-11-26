@@ -17,7 +17,7 @@ def seed_characters_once(db_oauth: DatabaseManager, cfg_characters: list[dict]) 
     # Old fallbacks: no main / no director configured -> the first character.
     if chars and not any(c.get("is_main") for c in chars):
         chars[0]["is_main"] = True
-    if chars and not any(c.get("is_corp_director") for c in chars):
+    if chars and not any("is_corp_director" in c for c in chars):  # an explicit false everywhere stays "no director"
         chars[0]["is_corp_director"] = True
 
     with db_oauth.engine.begin() as conn:
@@ -43,5 +43,8 @@ def seed_characters_once(db_oauth: DatabaseManager, cfg_characters: list[dict]) 
                     "INSERT INTO oauth_characters (character_name, is_main, is_corp_director, industry_enabled) "
                     "VALUES (:n, :m, :d, :i)"), params)
         conn.execute(text("INSERT INTO oauth_meta (key, value) VALUES (:k, '1')"), {"k": _KEY})
-    cfg_names = {c["character_name"].casefold() for c in chars}
-    return [r[1] for r in rows if r[2] and r[1].casefold() not in cfg_names]
+        cfg_names = {c["character_name"].casefold() for c in chars}
+        gone = [r for r in rows if r[2] and r[1].casefold() not in cfg_names]
+        for r in gone:   # kept with their login, but out of industry planning as before
+            conn.execute(text("UPDATE oauth_characters SET industry_enabled = 0 WHERE id = :id"), {"id": r[0]})
+    return [r[1] for r in gone]

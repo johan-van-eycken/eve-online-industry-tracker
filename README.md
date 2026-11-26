@@ -33,7 +33,7 @@ Five steps, about 15 minutes. Run every command from the repository root (the fo
 
 1. Sign in at [developers.eveonline.com/applications](https://developers.eveonline.com/applications) and create an application with *Authentication & API Access*.
 2. Set the **callback URL** to `http://localhost:8080/callback`.
-3. Give it the [scopes listed below](#eve-scopes). If none of your characters is a corporation director, the first list is enough.
+3. Give it the [scopes listed below](#eve-scopes). If none of your characters is a corporation director (see `is_corp_director` in step 3), the first list is enough.
 4. Keep the page open: you need its **Client ID** and **Secret Key** in step 3.
 
 ### 2. Clone and install
@@ -76,20 +76,25 @@ All your own values go in **`config/private/secret.json`**. It isn't in the repo
 {
     "client_id": "the Client ID from step 1",
     "client_secret": "the Secret Key from step 1",
-    "user_agent": "eve-online-industry-tracker/1.0 (you@example.com)",
-    "characters": [
-        { "character_name": "Your Main", "is_main": true,  "is_corp_director": true },
-        { "character_name": "Your Alt",  "is_main": false, "is_corp_director": false }
-    ]
+    "user_agent": "eve-online-industry-tracker/1.0 (you@example.com)"
 }
+```
+
+To seed your characters as well, add an optional `characters` list (one-time import, see below):
+
+```json
+"characters": [
+    { "character_name": "Your Main", "is_main": true,  "is_corp_director": true },
+    { "character_name": "Your Alt",  "is_main": false, "is_corp_director": false }
+]
 ```
 
 - `client_id` and `client_secret`: from your developer application.
 - `user_agent`: your own contact. CCP asks every ESI client to identify itself.
-- `characters` is optional. It is a one-time seed: the app imports it on the first start after you set it up (characters that already have a login get their flags from this file), and from then on the **Characters** page owns the list and the flags. Later edits to `characters` in this file have no effect, and a character you delete in the app doesn't come back. You can leave it out and add every character on the page.
+- `characters` is optional. It is a one-time seed: the app imports it on the first start after you set it up (characters that already have a login get their flags from this file), and from then on the **Characters** page owns the list and the flags. Later edits to `characters` in this file have no effect, and a character you delete in the app doesn't come back. You can leave it out and add every character on the page. A character that already has a login but isn't listed is kept, but starts with Industry off.
 - `character_name`: the exact in-game name.
 - `is_main`: the character the UI picks by default. Mark one; without one, the first in the list becomes main.
-- `is_corp_director`: this character also reads the corporation's wallets, assets, blueprints and industry jobs. It requests the corp scopes, and needs the in-game Director role. Mark one; without one, the first in the list becomes director when the list is imported (as with `is_main`). A solo player without a corp sets `is_corp_director: false` on every character, or leaves `characters` out and adds them on the Characters page, where nobody is director unless you tick it.
+- `is_corp_director`: this character also reads the corporation's wallets, assets, blueprints and industry jobs. It requests the corp scopes, and needs the in-game Director role. An explicit `"is_corp_director": false` on every character, or leaving `characters` out, means no director and no corp scopes (on the Characters page nobody is director unless you tick it). Without the key on any character, the first character becomes director on import.
 - `industry_enabled` (optional, default `true`): `false` keeps a character out of the industry planning.
 
 (The owner keeps this file in a private git submodule. `git clone --recurse-submodules` only works with access to it; everyone else creates the file.)

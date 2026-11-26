@@ -43,13 +43,10 @@ class ConfigManager:
                 "client_id": "YOUR_CLIENT_ID",
                 "client_secret": "YOUR_SECRET_CLIENT_ID",
                 "user_agent": "eve-online-industry-tracker/1.0 (you@example.com)",
-                "characters": [
-                    {"character_name": "Your Main", "is_main": True, "is_corp_director": False}
-                ],
             }
             path.write_text(json.dumps(default_secret, indent=4), encoding="utf-8")
             raise RuntimeError(
-                f"{path} created with placeholders. Fill in your EVE app's client_id and client_secret, your contact in user_agent and your character names, then restart."
+                f"{path} created with placeholders. Fill in your EVE app's client_id and client_secret, and your contact in user_agent, then restart."
             )
 
         secret_data = json.loads(path.read_text(encoding="utf-8-sig"))
