@@ -6,7 +6,7 @@ from urllib.parse import quote
 import pandas as pd  # pyright: ignore[reportMissingModuleSource, reportMissingImports]
 import streamlit as st  # pyright: ignore[reportMissingImports]
 
-from streamlit_ui.api.client import api_delete, api_get, api_get_or_error, api_patch_or_error, api_post_or_error
+from streamlit_ui.api.client import api_delete_or_error, api_get, api_get_or_error, api_patch_or_error, api_post_or_error
 
 # The message of the 409 of POST /characters/login (flask_app/routes/characters.py).
 _LOGIN_BUSY_MESSAGE = "Another character login is in progress."
@@ -73,18 +73,21 @@ def _login_progress() -> None:
     state = status.get("state")
     if state in ("wrong_character", "timeout", "failed"):
         _end_login("error", status.get("message") or f"Login of {name}: {state}")
+        return
     if state == "waiting":
         st.markdown(f"Log in as **{name}** in the browser window that opened (5 min).")
         st.link_button("Open the EVE login", st.session_state.get("login_url") or "")
         return
     if state == "done" and status.get("restarting") is False:
         _end_login("info", "Restart the app to load the change.")
-    # done, idle, or no answer: Flask restarts to load the character
-    health = _health()
+        return
+    # Only the restarted Flask reports idle; before that /health still shows the old startup's characters.
+    health = _health() if state == "idle" else None
     if health is not None:
         not_activated = {n.casefold() for n in (health.get("characters") or {}).get("not_activated") or []}
         if name.casefold() not in not_activated:
             _end_login("success", f"{name} is active.")
+            return
     st.info(f"Loading {name}…")
 
 
@@ -98,16 +101,16 @@ def _render_row(row: dict) -> None:
         label = "Activate" if status == "Not activated" else "Renew scopes"
         if cols[1].button(label, key=f"{key}_login", disabled=bool(st.session_state.get("login_for"))):
             _start_login({"character_name": name})
+            return
     with cols[2].expander("Edit"):
         flags = {f: st.checkbox(label, value=bool(row.get(f)), key=f"{key}_{f}") for f, label in _FLAG_LABELS.items()}
         confirm = st.checkbox("This reloads the app.", key=f"{key}_edit_confirm")
-        if st.button("Save", key=f"{key}_save", disabled=not confirm):
+        if st.button("Save", key=f"{key}_save", disabled=not confirm) and confirm:
             _after_change(*api_patch_or_error(f"/characters/{quote(name, safe='')}", flags), f"{name} saved.")
     with cols[3]:
         confirm = st.checkbox("This reloads the app.", key=f"{key}_delete_confirm")
-        if st.button("Delete", key=f"{key}_delete", disabled=not confirm):
-            body = api_delete(f"/characters/{quote(name, safe='')}")
-            _after_change(body, None, f"{name} deleted.")
+        if st.button("Delete", key=f"{key}_delete", disabled=not confirm) and confirm:
+            _after_change(*api_delete_or_error(f"/characters/{quote(name, safe='')}"), f"{name} deleted.")
 
 
 def render_character_roster() -> None:

@@ -26,7 +26,7 @@ ROWS = [
 ]
 
 
-def _fake_api(status=None, health=None, login=(None, "unused")):
+def _fake_api(status=None, health=None, login=(None, "unused"), sent=None):
     def get_or_error(path, timeout_seconds=None):
         if path == "/characters/roster":
             return {"status": "success", "data": ROWS}, None
@@ -42,6 +42,10 @@ def _fake_api(status=None, health=None, login=(None, "unused")):
         patch("streamlit_ui.components.character_roster.api_get_or_error", get_or_error),
         patch("streamlit_ui.components.character_roster.api_get", get),
         patch("streamlit_ui.components.character_roster.api_post_or_error", lambda path, payload: login),
+        patch("streamlit_ui.components.character_roster.api_patch_or_error",
+              lambda path, payload: (sent.append(("PATCH", path)), (None, "unused"))[1]),
+        patch("streamlit_ui.components.character_roster.api_delete_or_error",
+              lambda path: (sent.append(("DELETE", path)), (None, "unused"))[1]),
     ]
 
 
@@ -49,6 +53,10 @@ def _run(script, patches, session=None):
     at = AppTest.from_function(script)
     for key, value in (session or {}).items():
         at.session_state[key] = value
+    return _rerun(at, patches)
+
+
+def _rerun(at, patches):
     for p in patches:
         p.start()
     try:
@@ -98,6 +106,31 @@ def test_loading_ends_when_health_shows_the_character_active():
     at = _run(_roster_script, _fake_api(status={"state": "idle"}, health=health), {"login_for": "Delta", "login_url": "u"})
     assert "login_for" not in at.session_state
     assert not any("Loading" in i.value for i in at.info)
+
+
+def test_done_while_restarting_keeps_waiting_even_with_health_200():
+    # Flask exits ~0.5 s after done; its /health still lists the startup snapshot, without the new character.
+    health = {"status": "OK", "characters": {"active": 1, "not_activated": []}}
+    at = _run(_roster_script, _fake_api(status={"state": "done", "restarting": True}, health=health),
+              {"login_for": "Delta", "login_url": "u"})
+    assert at.session_state["login_for"] == "Delta"
+    assert any(i.value == "Loading Delta…" for i in at.info)
+
+
+def test_edit_and_delete_need_the_confirm_checkbox():
+    sent = []
+    at = _run(_roster_script, _fake_api(sent=sent))
+    for kind in ("save", "delete"):
+        button = at.button(key=f"character_roster_Alpha_{kind}")
+        assert button.disabled
+        button.click()
+    _rerun(at, _fake_api(sent=sent))
+    assert sent == []
+
+    at.checkbox(key="character_roster_Alpha_delete_confirm").check()
+    at.button(key="character_roster_Alpha_delete").click()
+    _rerun(at, _fake_api(sent=sent))
+    assert sent == [("DELETE", "/characters/Alpha")]
 
 
 def test_gate_blocks_other_pages_with_zero_active():
