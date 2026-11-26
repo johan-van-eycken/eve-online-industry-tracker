@@ -9,6 +9,7 @@ from eve_online_industry_tracker.application.batch import PartialResult
 from eve_online_industry_tracker.application.characters.character import Character
 from eve_online_industry_tracker.infrastructure.esi_client import ESI_REQUEST_ERRORS
 from eve_online_industry_tracker.infrastructure.models import OAuthCharacter
+from eve_online_industry_tracker.infrastructure.oauth_character_repository import OAuthCharacterRepository
 
 
 class CharacterDataError(Exception):
@@ -58,7 +59,6 @@ class CharacterManager:
         # Private arguments
         self._cfgManager = cfgManager
         self._cfg = cfgManager.all()
-        self._cfg_characters = self._cfg["characters"]
         self._db_oauth = db_oauth
         self._db_app = db_app
         self._db_sde = db_sde
@@ -67,9 +67,10 @@ class CharacterManager:
         self._char_by_name: Dict[str, Character] = {}
         # One line per configured character that could not be initialised (bootstrap: init_warnings).
         self.init_errors: List[str] = []
+        # Roster rows without a login: not built, listed on /health.
+        self.not_activated: List[str] = []
 
         if corporation_id is None and char_manager is None:
-            self._validate_cfg_characters()
             self._initialize_characters()
         elif corporation_id is not None and char_manager is not None:
             self._character_list = [
@@ -87,13 +88,6 @@ class CharacterManager:
                 self._char_by_id[char.character_id] = char
             self._char_by_name[char.character_name.lower()] = char
 
-    def _validate_cfg_characters(self) -> None:
-        if not isinstance(self._cfg_characters, list) or len(self._cfg_characters) == 0:
-            raise ValueError("Character configuration must be a non-empty list.")
-        for char_cfg in self._cfg_characters:
-            if not isinstance(char_cfg, dict) or "character_name" not in char_cfg:
-                raise ValueError(f"Invalid character configuration: {char_cfg}")
-
     def _get_existing_token(self, character_name: str) -> Optional[str]:
         character_row = self._db_oauth.session.query(OAuthCharacter).filter_by(character_name=character_name).first()
         if character_row and character_row.refresh_token:
@@ -105,40 +99,29 @@ class CharacterManager:
         return None
 
     def _initialize_characters(self) -> None:
-        cfg_main_char = next((c for c in self._cfg_characters if c.get("is_main", False)), None)
-        if not cfg_main_char:
-            logging.warning("No main character found in the configuration. Using the first character in the list as main.")
-            self._cfg_characters[0]["is_main"] = True
-
-        cfg_corp_director = next((c for c in self._cfg_characters if c.get("is_corp_director", False)), None)
-        if not cfg_corp_director:
-            logging.warning("No Corporation Director found in the configuration. Using the first character in the list as Corporation Director.")
-            self._cfg_characters[0]["is_corp_director"] = True
-
-        for char_cfg in self._cfg_characters:
-            character_name = char_cfg["character_name"]
-            character_is_main = char_cfg.get("is_main", False)
-            character_is_corp_director = char_cfg.get("is_corp_director", False)
-            character_industry_enabled = char_cfg.get("industry_enabled", True)
+        """A Character for each activated roster row (OAuth DB); the rest is listed in not_activated."""
+        rows = OAuthCharacterRepository(self._db_oauth.session).list_metadata()
+        self.not_activated = [r.character_name for r in rows if not r.has_refresh_token]
+        activated = [r for r in rows if r.has_refresh_token]
+        # shortcut: no main flagged -> the first activated row; no director fallback
+        main_name = next((r.character_name for r in activated if r.is_main), None) or (
+            activated[0].character_name if activated else None)
+        for row in activated:
+            character_name = row.character_name
             try:
-                existing_token = self._get_existing_token(character_name)
                 char = Character(
                     self._cfgManager,
                     self._db_oauth,
                     self._db_app,
                     self._db_sde,
                     character_name,
-                    character_is_main,
-                    character_is_corp_director,
-                    existing_token,
-                    industry_enabled=character_industry_enabled,
+                    character_name == main_name,
+                    row.is_corp_director,
+                    self._get_existing_token(character_name),
+                    industry_enabled=row.industry_enabled,
                     admin_settings=self.admin_settings,
                 )
                 self._character_list.append(char)
-            except KeyError as e:
-                message = f"Failed to initialize character {character_name}. Missing key: {e}"
-                logging.error(message)
-                self.init_errors.append(message)
             except Exception as e:   # one character's failure does not stop the others; named in init_errors
                 message = f"Error initializing character {character_name}: {e}"
                 logging.error(message)

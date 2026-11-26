@@ -30,6 +30,7 @@ from eve_online_industry_tracker.application.characters.character_manager import
 from eve_online_industry_tracker.application.corporations.corporation_manager import CorporationRefreshError
 from eve_online_industry_tracker.application.industry.job_manager import IndustryJobManager
 from eve_online_industry_tracker.application.industry.service import IndustryService
+from eve_online_industry_tracker.infrastructure.esi_client import ESIClient
 from eve_online_industry_tracker.infrastructure.esi_service import ESIService
 from eve_online_industry_tracker.config.admin_settings import AdminSettingsManager
 
@@ -135,6 +136,11 @@ def initialize_application(app_state: AppState | None = None, *, refresh_metadat
         state.init_warnings.extend(
             f"Character initialisation failed: {message}" for message in getattr(state.char_manager, "init_errors", None) or []
         )
+        from eve_online_industry_tracker.application.characters import roster_seed
+        state.init_warnings.extend(
+            f"{name} was not in secret.json but has a login; delete it on Characters if unwanted"
+            for name in roster_seed.LAST_SEED_UNCONFIGURED
+        )
         # The realized invention estimate (job cost snapshots, refreshed below)
         # sizes inventions with the producer's inputs.
         set_realized_invention_inputs_provider(lambda: IndustryService(state=state).realized_invention_inputs())
@@ -194,15 +200,19 @@ def initialize_application(app_state: AppState | None = None, *, refresh_metadat
         logging.info("Initializing data adapters...")
         state.init_state = "Initializing Data Adapters"
         main_character = state.char_manager.get_main_character()
-        state.esi_service = ESIService(main_character.esi_client, admin_settings=state.admin_settings)
+        # No main character: a public client, and no background job (they all need a login).
+        client = main_character.esi_client if main_character else ESIClient(
+            state.cfg_manager, state.db_oauth, "", False, False, load_tokens=False)
+        state.esi_service = ESIService(client, admin_settings=state.admin_settings)
 
         state.industry_job_manager = IndustryJobManager(state=state)
-        state.industry_job_manager.start()
+        if main_character is not None:
+            state.industry_job_manager.start()
         # Adapters no longer keep module-level globals; they read from state + request-scoped sessions.
 
         # Start background global scan to populate public_structures. This is best-effort and
         # bounded by conservative limits so it doesn't block readiness.
-        if public_structures_startup_scan_enabled():
+        if main_character is not None and public_structures_startup_scan_enabled():
             trigger_global_public_structures_scan(
                 state=state,
                 scan_cap=public_structures_startup_scan_scan_cap(),
@@ -238,7 +248,8 @@ def initialize_application(app_state: AppState | None = None, *, refresh_metadat
         # Start MarketIntelligenceJob daemon thread
         from eve_online_industry_tracker.application.market_intelligence.job import MarketIntelligenceJob
         _mij = MarketIntelligenceJob(state=state)
-        _mij.start()
+        if main_character is not None:
+            _mij.start()
         state._market_intelligence_job = _mij
 
         chars_initialized = len(state.char_manager._character_list)

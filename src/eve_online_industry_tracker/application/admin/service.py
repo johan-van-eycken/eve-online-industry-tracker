@@ -26,6 +26,11 @@ class AdminService:
                 payload["error"] = self._state.init_error
             return payload, 503
         payload: dict[str, Any] = {"status": "OK"}
+        char_manager = getattr(self._state, "char_manager", None)
+        payload["characters"] = {
+            "active": len(getattr(char_manager, "_character_list", None) or []),
+            "not_activated": list(getattr(char_manager, "not_activated", None) or []),
+        }
         warnings = (list(getattr(self._state, "init_warnings", None) or []) + self._sde_warnings()
                     + self._admin_settings_warnings())
         if warnings:

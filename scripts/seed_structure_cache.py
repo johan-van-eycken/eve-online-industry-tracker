@@ -49,16 +49,13 @@ def main():
         return
 
     # Build ESI clients for all characters
-    characters = cfg.all()["characters"]
+    from eve_online_industry_tracker.infrastructure.oauth_character_repository import OAuthCharacterRepository
+    characters = [m for m in OAuthCharacterRepository(db_oauth.session).list_metadata() if m.has_refresh_token]
     clients = []
-    for char_cfg in characters:
-        name = char_cfg["character_name"]
+    for meta in characters:
+        name = meta.character_name
         try:
-            client = ESIClient(
-                cfg, db_oauth, name,
-                char_cfg.get("is_main", False),
-                char_cfg.get("is_corp_director", False),
-            )
+            client = ESIClient(cfg, db_oauth, name, meta.is_main, meta.is_corp_director)
             if client.character_id:
                 clients.append((name, client))
                 print(f"  Loaded ESI client for {name} (id: {client.character_id})")

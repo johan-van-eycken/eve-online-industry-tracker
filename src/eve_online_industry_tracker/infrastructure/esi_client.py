@@ -422,9 +422,17 @@ def _esi_gate(context: str) -> None:
     _sleep_seconds(wait)
 
 
+class CharacterNotActivatedError(RuntimeError):
+    """The character has no stored login; it is activated on the Characters page, never at startup."""
+
+
 class ESIClient:
-    def __init__(self, cfg: ConfigManager, db_oauth: DatabaseManager, character_name: str, is_main: bool, is_corp_director: bool, refresh_token: Optional[str] = None):
+    load_tokens = True
+
+    def __init__(self, cfg: ConfigManager, db_oauth: DatabaseManager, character_name: str, is_main: bool, is_corp_director: bool, refresh_token: Optional[str] = None, load_tokens: bool = True):
         self.cfg = cfg
+        # False: a public client (no login, no Authorization header).
+        self.load_tokens = load_tokens
         self.character_name = character_name
         self.is_main = is_main
         self.is_corp_director = is_corp_director
@@ -490,13 +498,14 @@ class ESIClient:
         self.scopes = " ".join(sorted(all_scopes))
 
         # Load tokens from DB if character exists
-        self._load_tokens_from_db()
+        if load_tokens:
+            self._load_tokens_from_db()
     
     # ----------------------------
     # Internal Helpers
     # ----------------------------
     def _load_tokens_from_db(self) -> None:
-        """Load tokens from DB if available. If missing, run registration flow."""
+        """Load the stored tokens; CharacterNotActivatedError when there are none."""
         record = (self.db_oauth.session.query(OAuthCharacter).filter_by(character_name=self.character_name).first())
         if record and record.refresh_token:
             self.refresh_token = record.refresh_token
@@ -511,8 +520,7 @@ class ESIClient:
 
             logging.debug(f"Loaded existing tokens for {self.character_name} ({self.character_id}).")
         else:
-            logging.debug(f"No token found for {self.character_name}. Registering new character.")
-            self.register_new_character()
+            raise CharacterNotActivatedError(f"{self.character_name} is not activated: no stored login")
 
     # ------------------------------------------------------------------
     # Redirect User to Get Authorization Code
@@ -580,6 +588,8 @@ class ESIClient:
 
     def _ensure_fresh_token(self) -> None:
         """Refresh the access token when it is missing or expired, once across threads."""
+        if not self.load_tokens:
+            return
         with self._token_refresh_lock:
             if not self.access_token or (self.token_expiry and time.time() > self.token_expiry):
                 if not self._adopt_stored_token():
@@ -922,14 +932,16 @@ class ESIClient:
             self._rollback_quietly()
     
     def _esi_headers(self) -> Dict[str, str]:
-        return {
+        headers = {
             "Accept": self.esi_header_accept,
             "Accept-Language": self.esi_header_acceptlanguage,
-            "Authorization": f"Bearer {self.access_token}",
             "User-Agent": self.user_agent,
             "X-Compatibility-Date": self.esi_header_xcompatibilitydate,
             "X-Tenant": self.esi_header_xtenant
         }
+        if self.load_tokens:
+            headers["Authorization"] = f"Bearer {self.access_token}"
+        return headers
 
     def _send_with_retries(
         self,
