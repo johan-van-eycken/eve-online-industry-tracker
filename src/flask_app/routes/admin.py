@@ -17,6 +17,7 @@ from eve_online_industry_tracker.application.errors import ServiceError
 from eve_online_industry_tracker.application.admin.service import AdminService
 from flask_app.bootstrap import require_ready
 from flask_app.background_jobs import stop_background_jobs
+from flask_app.restart import request_restart
 from flask_app.settings import (
     public_structures_esi_request_timeout_seconds,
     public_structures_startup_scan_batch_size,
@@ -71,6 +72,10 @@ def shutdown():
     """Shutdown the Flask server."""
     try:
         logging.info("Shutdown request received")
+
+        # Under the launcher a shutdown is a restart (request_restart stops the jobs itself).
+        if os.name != "nt" and request_restart():
+            return ok(message="Server restarting...")
 
         # Best-effort: ask background threads to stop before process termination.
         stop_background_jobs(get_state())

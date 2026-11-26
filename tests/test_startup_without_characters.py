@@ -155,3 +155,34 @@ def test_no_background_jobs_without_a_main_character(monkeypatch, tmp_path):
     assert built["kwargs"] == {"load_tokens": False}
     assert isinstance(state.esi_service.client, _Client)
     assert calls == []
+
+
+def test_client_without_a_stored_login_never_opens_a_browser(db, monkeypatch):
+    _row(db, "B", False)
+    monkeypatch.setattr(ESIClient, "register_new_character", lambda self, *a, **k: pytest.fail("registration"))
+    monkeypatch.setattr(ESIClient, "_get_authorization_code", lambda self, *a, **k: pytest.fail("browser login"))
+    esi = {"base": "https://esi.example", "token_url": "t", "verify_url": "v", "auth_url": "a",
+           "headers": {"Accept": "x", "Accept-Language": "x", "X-Tenant": "x"}}
+    values = {"esi": esi, "app": {"redirect_uri": "r", "user_agent": "ua"}, "oauth": {"client_id": "i"},
+              "client_secret": "s", "defaults": {"scopes": [], "scopes_corp_director": []}}
+    with pytest.raises(esi_client_module.CharacterNotActivatedError):
+        ESIClient(SimpleNamespace(get=values.__getitem__), db, "B", False, False)
+
+
+def test_main_that_fails_to_build_hands_main_to_the_first_built(db, monkeypatch):
+    _row(db, "A", True)
+    _row(db, "B", True, is_main=1)
+    _row(db, "C", True)
+
+    class _FailingMain(_FakeChar):
+        def __init__(self, *args, **kw):
+            if args[4] == "B":
+                raise RuntimeError("boom")
+            super().__init__(*args, **kw)
+
+    monkeypatch.setattr(cm, "Character", _FailingMain)
+    mgr = CharacterManager(SimpleNamespace(all=lambda: {}), db, None, None)
+    assert [c.character_name for c in mgr._character_list] == ["A", "C"]
+    assert mgr.get_main_character().character_name == "A"
+    assert [c.character_name for c in mgr._character_list if c.is_main] == ["A"]
+    assert len(mgr.init_errors) == 1

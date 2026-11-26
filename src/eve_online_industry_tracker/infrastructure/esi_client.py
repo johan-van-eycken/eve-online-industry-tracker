@@ -1,6 +1,5 @@
 import logging
 import requests # pyright: ignore[reportMissingModuleSource]
-import webbrowser
 import time
 import random
 import json as jsonlib
@@ -426,6 +425,14 @@ class CharacterNotActivatedError(RuntimeError):
     """The character has no stored login; it is activated on the Characters page, never at startup."""
 
 
+class WrongCharacterError(Exception):
+    """The SSO login was for another character (`got`) than the one asked for; nothing was stored."""
+
+    def __init__(self, got: str):
+        self.got = got
+        super().__init__(got)
+
+
 class ESIClient:
     load_tokens = True
 
@@ -525,8 +532,19 @@ class ESIClient:
     # ------------------------------------------------------------------
     # Redirect User to Get Authorization Code
     # ------------------------------------------------------------------
+    def authorization_url(self, state: str = "eve_auth") -> str:
+        """The EVE SSO login URL for this client's scopes."""
+        auth_params = {
+            "response_type": "code",
+            "client_id": self.client_id,
+            "scope": self.scopes,
+            "redirect_uri": self.redirect_uri,
+            "state": state,
+        }
+        return f"{self.auth_url}?{urlencode(auth_params)}"
+
     def _get_authorization_code(self, state: str = "eve_auth") -> str:
-        """Open browser for user login and capture authorization code."""
+        """Wait for the SSO redirect (the page opened authorization_url) and capture the authorization code."""
         timeout_seconds = 300  # first login may need the EVE password and 2FA
         # Where to send the user after SSO completes (best-effort).
         streamlit_url = None
@@ -536,16 +554,7 @@ class ESIClient:
             streamlit_url = None
         if not streamlit_url:
             streamlit_url = "http://localhost:8501"
-        auth_params = {
-            "response_type": "code",
-            "client_id": self.client_id,
-            "scope": self.scopes,
-            "redirect_uri": self.redirect_uri,
-            "state": state,
-        }
-        auth_url = f"{self.auth_url}?{urlencode(auth_params)}"
-        logging.info(f"Opening the EVE login in your browser (5 min). If no browser opens, visit: {auth_url}")
-        webbrowser.open(auth_url)
+        logging.info(f"Waiting 5 min for the EVE login of {self.character_name}: {self.authorization_url(state)}")
 
         with OAuthServer(("localhost", urlparse(self.redirect_uri).port or 80),OAuthHandler, return_to_url=streamlit_url) as httpd:
             httpd.timeout = timeout_seconds
@@ -857,11 +866,17 @@ class ESIClient:
     # ------------------------------------------------------------------
     # Public Method: Register a New Character and Save Tokens
     # ------------------------------------------------------------------
-    def register_new_character(self) -> None:
-        """Register a new character and persist tokens to DB."""
+    def register_new_character(self, expected_name: Optional[str] = None) -> None:
+        """Register a new character and persist tokens to DB. WrongCharacterError, before
+        anything is stored, when the login is for another character than `expected_name`."""
         logging.debug("Starting character registration flow...")
         authorization_code = self._get_authorization_code()
         access_token, refresh_token, expires_in = self.exchange_code_for_tokens(authorization_code)
+
+        if expected_name is not None:
+            got = self._token_character_name(access_token)
+            if got.casefold() != expected_name.casefold():
+                raise WrongCharacterError(got)
 
         # Update instance attributes
         self.access_token = access_token
@@ -888,6 +903,23 @@ class ESIClient:
 
         logging.debug(f"Character {self.character_name} ({self.character_id}) registered and tokens saved.")
     
+    def _token_character_name(self, access_token: str) -> str:
+        """The character name of an access token: its JWT name claim, else /oauth/verify's CharacterName."""
+        try:
+            claims = self._validate_access_token_jwt(access_token)
+            if claims and claims.get("name"):
+                return str(claims["name"])
+        except Exception as e:   # same fallback as verify_access_token
+            logging.debug("JWT validation failed; falling back to /oauth/verify: %s", str(e))
+        response = requests.get(
+            self.verify_url,
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=10,
+            **get_requests_ssl_kwargs(),
+        )
+        response.raise_for_status()
+        return str(response.json().get("CharacterName") or "")
+
     # ----------------------------
     # ESI API + Cache Helpers
     # ----------------------------

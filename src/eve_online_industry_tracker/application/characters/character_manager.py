@@ -103,9 +103,6 @@ class CharacterManager:
         rows = OAuthCharacterRepository(self._db_oauth.session).list_metadata()
         self.not_activated = [r.character_name for r in rows if not r.has_refresh_token]
         activated = [r for r in rows if r.has_refresh_token]
-        # shortcut: no main flagged -> the first activated row; no director fallback
-        main_name = next((r.character_name for r in activated if r.is_main), None) or (
-            activated[0].character_name if activated else None)
         for row in activated:
             character_name = row.character_name
             try:
@@ -115,7 +112,7 @@ class CharacterManager:
                     self._db_app,
                     self._db_sde,
                     character_name,
-                    character_name == main_name,
+                    row.is_main,
                     row.is_corp_director,
                     self._get_existing_token(character_name),
                     industry_enabled=row.industry_enabled,
@@ -126,6 +123,9 @@ class CharacterManager:
                 message = f"Error initializing character {character_name}: {e}"
                 logging.error(message)
                 self.init_errors.append(message)
+        # shortcut: no built main (none flagged, or it failed to build) -> the first built; no director fallback
+        if self._character_list and not any(c.is_main for c in self._character_list):
+            self._character_list[0].is_main = True   # before its ESI client is built (ensure_esi)
         return None
 
     def get_main_character(self) -> Optional[Character]:

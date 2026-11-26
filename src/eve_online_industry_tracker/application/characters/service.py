@@ -48,6 +48,18 @@ class CharactersService:
         repo = OAuthCharacterRepository(self._state.db_oauth.session)
         return [asdict(x) for x in repo.list_metadata()]
 
+    def roster(self) -> list[dict[str, Any]]:
+        """The OAuth metadata of each roster row plus `missing_scopes`: the requested
+        scopes (and the director scopes for a director) that its login lacks."""
+        defaults = self._state.cfg_manager.get("defaults")
+        out = []
+        for row in self.list_oauth_metadata():
+            wanted = set(defaults["scopes"])
+            if row["is_corp_director"]:
+                wanted.update(defaults["scopes_corp_director"])
+            out.append({**row, "missing_scopes": sorted(wanted - set(row["scopes"].split()))})
+        return out
+
     def get_wallet_balances(self) -> Any:
         return self._state.char_manager.get_wallet_balances()
 
