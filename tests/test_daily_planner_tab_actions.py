@@ -197,10 +197,28 @@ def test_short_notes_cuts_after_three_parts_and_keeps_the_full_text():
 def test_the_filter_splits_ready_rows_from_rows_that_wait_on_purchases():
     deliver, build = {"action_type": "deliver"}, {"action_type": "manufacture"}
     ready, buy = tab_actions.FILTER_READY, tab_actions.FILTER_BUY
-    assert [tab_actions.matches_filter(a, ready, False) for a in (deliver, build)] == [True, False]
-    assert [tab_actions.matches_filter(a, buy, False) for a in (deliver, build)] == [False, True]
-    assert tab_actions.matches_filter(build, ready, True)
-    assert tab_actions.matches_filter(build, tab_actions.FILTER_ALL, False)
+    waiting = frozenset({"current_job"})
+    assert [tab_actions.matches_filter(a, ready, waiting) for a in (deliver, build)] == [True, False]
+    assert [tab_actions.matches_filter(a, buy, waiting) for a in (deliver, build)] == [False, True]
+    assert tab_actions.matches_filter(build, ready, frozenset())
+    assert tab_actions.matches_filter(build, tab_actions.FILTER_ALL, waiting)
+
+
+def test_todo_filter_hides_done_and_skipped_rows():
+    rows = [{"action_type": "invent", "status": s} for s in ("pending", "done", "skipped")]
+    assert [tab_actions.matches_filter(a, tab_actions.FILTER_TODO, frozenset()) for a in rows] == [True, False, False]
+
+
+def test_only_jobs_whose_own_buy_lines_are_open_wait_on_a_purchase():
+    actions = [
+        {"action_type": "buy_materials", "shopping_category": "current_job", "status": "pending"},
+        {"action_type": "buy_materials", "shopping_category": "invention_input", "status": "done"},
+    ]
+    pending = tab_actions.pending_buy_categories(actions)
+    assert pending == frozenset({"current_job"})
+    assert [tab_actions.needs_purchase({"action_type": t}, pending)
+            for t in ("manufacture", "sub_manufacture", "invent", "copy", "me_research", "deliver")] == [
+        True, True, False, False, False, False]
 
 
 def test_the_steps_count_what_is_left():

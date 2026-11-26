@@ -33,3 +33,11 @@ def test_search_matches_name_or_reason():
     item = {"type_name": "Large Armor Pump II", "decision_reason": "Watch: declining market"}
     assert matches_search(item, "armor") and matches_search(item, "DECLINING") and matches_search(item, " ")
     assert not matches_search(item, "shield")
+
+
+def test_profitable_needs_positive_isk_per_hour_and_margin():
+    from streamlit_ui.components.daily_planner.tab_build_plan import is_profitable
+    assert is_profitable({"isk_per_hour": 10.0, "margin_pct": 1.5})
+    assert not is_profitable({"isk_per_hour": 10.0, "margin_pct": -1.0})
+    assert not is_profitable({"isk_per_hour": -5.0, "margin_pct": 12.0})
+    assert not is_profitable({"isk_per_hour": None, "margin_pct": 12.0})

@@ -16,7 +16,6 @@ from streamlit_ui.components.daily_planner.status_bar import (
     _parse_dt,
     free_slots_by_character,
     is_waiting,
-    load_active_jobs,
     plan_summary,
     queued_te_status,
 )
@@ -127,15 +126,25 @@ def _todays(
     return [a for a in actions if not is_waiting(a, actions, now, jobs=jobs)]
 
 
-def _has_pending_buys(plan: dict[str, Any]) -> bool:
-    """True if any current_job buy_materials actions are still pending."""
-    actions = plan.get("actions") or []
-    return any(
-        str(a.get("action_type") or "") == "buy_materials"
-        and str(a.get("shopping_category") or "") == "current_job"
-        and str(a.get("status") or "pending") == "pending"
-        for a in actions
+# The shopping list category each start action waits on; copies and research use no materials.
+_BUY_CATEGORY: dict[str, str] = {
+    "manufacture": "current_job", "sub_manufacture": "current_job", "invent": "invention_input",
+}
+
+
+def pending_buy_categories(actions: list[dict[str, Any]]) -> frozenset[str]:
+    """The shopping list categories that still have a pending buy line."""
+    return frozenset(
+        str(a.get("shopping_category") or "") for a in actions
+        if str(a.get("action_type") or "") == "buy_materials" and str(a.get("status") or "pending") == "pending"
     )
+
+
+def needs_purchase(action: dict[str, Any], pending_buys: frozenset[str]) -> bool:
+    """Whether the action waits on a pending buy line of its category."""
+    # shortcut: buy lines are merged per material and not linked to a job, so every job of a kind
+    # waits on all of that kind's open lines; link lines to jobs if a pilot often waits for nothing.
+    return _BUY_CATEGORY.get(str(action.get("action_type") or "")) in pending_buys
 
 
 def _reload_plan(page_state: DailyPlannerPageState) -> None:
@@ -172,7 +181,7 @@ def action_quantity_label(action: dict[str, Any]) -> str:
 
 
 #: Today's Actions filter choices.
-FILTER_ALL, FILTER_READY, FILTER_BUY = "All", "Ready now", "Needs purchase"
+FILTER_TODO, FILTER_ALL, FILTER_READY, FILTER_BUY = "Todo's", "All", "Ready now", "Needs purchase"
 
 
 def short_notes(notes: str, keep: int = 3) -> tuple[str, str | None]:
@@ -185,13 +194,15 @@ def short_notes(notes: str, keep: int = 3) -> tuple[str, str | None]:
     return " · ".join(parts[:keep]) + " …", " · ".join(parts)
 
 
-def matches_filter(action: dict[str, Any], mode: str, readiness_ok: bool) -> bool:
-    """Whether the row shows under the filter: "Ready now" is what can be
-    done without buying (deliveries, and jobs once nothing is left to buy),
-    "Needs purchase" the jobs still waiting on the shopping list."""
+def matches_filter(action: dict[str, Any], mode: str, pending_buys: frozenset[str]) -> bool:
+    """Whether the row shows under the filter: "Todo's" is what is neither
+    done nor skipped, "Ready now" what can be done without buying, "Needs
+    purchase" the jobs still waiting on the shopping list."""
     if mode == FILTER_ALL:
         return True
-    needs_buy = str(action.get("action_type") or "") in _START_ACTIONS and not readiness_ok
+    if mode == FILTER_TODO:
+        return str(action.get("status") or "pending") == "pending"
+    needs_buy = needs_purchase(action, pending_buys)
     return needs_buy if mode == FILTER_BUY else not needs_buy
 
 
@@ -204,8 +215,7 @@ def step_summaries(
         return [a for a in rows if str(a.get("status") or "pending") == "pending"]
 
     delivers = [a for a in char_actions if str(a.get("action_type") or "") == "deliver"]
-    buys = [a for a in all_actions if str(a.get("action_type") or "") == "buy_materials"
-            and str(a.get("shopping_category") or "") == "current_job"]
+    buys = [a for a in all_actions if str(a.get("action_type") or "") == "buy_materials"]
     starts = [a for a in _todays(char_actions, jobs=jobs) if str(a.get("action_type") or "") in _START_ACTIONS]
     pending_buys = _pending(buys)
     buy_isk = sum(float(a.get("estimated_cost_isk") or 0.0) for a in pending_buys)
@@ -237,7 +247,7 @@ def _status_button(action_id: int, page_state: DailyPlannerPageState, *, label: 
 def _render_action_row(
     action: dict[str, Any],
     page_state: DailyPlannerPageState,
-    readiness_ok: bool,
+    pending_buys: frozenset[str],
     siblings: list[dict[str, Any]] | None = None,
     *,
     jobs: list[dict[str, Any]] | None = None,
@@ -272,7 +282,7 @@ def _render_action_row(
         done_label, done_help = ":material/play_arrow:", "The ME research on this BPO has ended: mark this TE research as started"
         detail_parts.append(queue_note or "")
     elif action_type in _START_ACTIONS:
-        badge = ("Ready", "green") if readiness_ok else ("Buy first", "orange")
+        badge = ("Buy first", "orange") if needs_purchase(action, pending_buys) else ("Ready", "green")
     else:
         badge = ("Ready", "green")
 
@@ -283,8 +293,7 @@ def _render_action_row(
         _status_button(action_id, page_state, label=":material/skip_next:", key=f"skip_{action_id}",
                        help_text="Skip this action", skip=True)
     with cols[2]:
-        override = " ★ manual override" if action.get("is_force_override") else ""
-        st.markdown(f"**{type_name}** :gray[{qty_label}]{override}")
+        st.markdown(f"**{type_name}** :gray[{qty_label}]")
         if show_reasons:
             short, full = short_notes(notes)
             line = " · ".join(p for p in (short, completion_label, *detail_parts) if p)
@@ -298,19 +307,6 @@ def _render_action_row(
 
 
 # ---------------------------------------------------------------------------
-# Workflow steps
-# ---------------------------------------------------------------------------
-
-def _render_workflow_steps(char_actions: list[dict[str, Any]], all_actions: list[dict[str, Any]], *,
-                           jobs: list[dict[str, Any]] | None = None) -> None:
-    for col, (n, (title, sub, done)) in zip(st.columns(3), enumerate(step_summaries(char_actions, all_actions,
-                                                                                     jobs=jobs), start=1)):
-        with col.container(border=True):
-            st.markdown(f"**{n} · {title}**" + (" :green[:material/check_circle:]" if done else ""))
-            st.caption(sub)
-
-
-# ---------------------------------------------------------------------------
 # Character section renderer
 # ---------------------------------------------------------------------------
 
@@ -318,7 +314,7 @@ def _render_character_section(
     char_name: str,
     char_actions: list[dict[str, Any]],
     page_state: DailyPlannerPageState,
-    readiness_ok: bool,
+    pending_buys: frozenset[str],
     *,
     jobs: list[dict[str, Any]] | None = None,
     free_slots: str | None = None,
@@ -338,7 +334,7 @@ def _render_character_section(
                    + (f" · free slots: {free_slots}" if free_slots else ""))
         shown_any = False
         for action_type, section_label, color in _ACTION_ORDER:
-            section_actions = [a for a in by_type.get(action_type, []) if matches_filter(a, mode, readiness_ok)]
+            section_actions = [a for a in by_type.get(action_type, []) if matches_filter(a, mode, pending_buys)]
             if not section_actions:
                 continue
             shown_any = True
@@ -361,7 +357,7 @@ def _render_character_section(
                         st.rerun()
 
             for action in section_actions:
-                _render_action_row(action, page_state, readiness_ok, char_actions, jobs=jobs,
+                _render_action_row(action, page_state, pending_buys, char_actions, jobs=jobs,
                                    show_reasons=show_reasons)
         if not shown_any:
             st.caption("Nothing under this filter.")
@@ -371,8 +367,12 @@ def _render_character_section(
 # Main tab renderer
 # ---------------------------------------------------------------------------
 
-def render_tab_actions(page_state: DailyPlannerPageState, planner_settings: dict[str, float] | None = None) -> None:
-    """planner_settings: the page's one admin settings read (None: the schema defaults)."""
+def render_tab_actions(
+    page_state: DailyPlannerPageState, planner_settings: dict[str, float] | None = None, *,
+    jobs: list[dict[str, Any]] | None = None,
+) -> None:
+    """planner_settings: the page's one admin settings read (None: the schema defaults).
+    jobs: the active industry jobs the page read (None: unknown, the planner's estimate is used)."""
     if planner_settings is None:
         planner_settings = planner_page_defaults()
     if page_state.plan is None:
@@ -408,9 +408,6 @@ def render_tab_actions(page_state: DailyPlannerPageState, planner_settings: dict
     if not char_actions:
         st.info("No actions for today. The plan has no pending character-level tasks.")
         return
-    # Read once per render: a queued TE starts on its ME job's real end.
-    jobs = load_active_jobs()
-
     # Check if day is complete
     all_done = all(
         str(a.get("status") or "pending") in ("done", "skipped")
@@ -443,17 +440,14 @@ def render_tab_actions(page_state: DailyPlannerPageState, planner_settings: dict
         )
         return
 
-    _render_workflow_steps(char_actions, all_actions, jobs=jobs)
-
-    # Readiness: any pending current_job buy_materials means not ready.
-    readiness_ok = not _has_pending_buys(page_state.plan)
+    pending_buys = pending_buy_categories(all_actions)
 
     filter_col, reasons_col = st.columns([3, 1], vertical_alignment="center")
     with filter_col:
         mode = st.segmented_control(
-            "Show", [FILTER_ALL, FILTER_READY, FILTER_BUY], default=FILTER_ALL,
+            "Show", [FILTER_TODO, FILTER_ALL, FILTER_READY, FILTER_BUY], default=FILTER_TODO,
             key="dp_actions_filter", label_visibility="collapsed",
-        ) or FILTER_ALL
+        ) or FILTER_TODO
     with reasons_col:
         show_reasons = st.toggle("Show reasons", value=True, key="dp_actions_reasons")
     st.caption("Readiness is based on stock at plan time — re-check in-game before submitting.")
@@ -468,6 +462,6 @@ def render_tab_actions(page_state: DailyPlannerPageState, planner_settings: dict
     for start in range(0, len(names), 2):
         for col, char_name in zip(st.columns(2), names[start:start + 2]):
             with col:
-                _render_character_section(char_name, char_groups[char_name], page_state, readiness_ok,
+                _render_character_section(char_name, char_groups[char_name], page_state, pending_buys,
                                           jobs=jobs, free_slots=free.get(char_name), mode=mode,
                                           show_reasons=show_reasons)

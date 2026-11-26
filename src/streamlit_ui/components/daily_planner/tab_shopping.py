@@ -247,6 +247,20 @@ def _build_clipboard_text(
     return "\n".join(lines)
 
 
+def multibuy_text(actions: list[dict[str, Any]]) -> str:
+    """The pending buy lines as the in-game Market Multibuy "Import from
+    clipboard" reads them: one "name<TAB>quantity" line per item, quantity
+    without separators (the shape of two copied spreadsheet columns)."""
+    totals: dict[str, int] = {}
+    for a in actions:
+        if str(a.get("action_type") or "") == "buy_materials" and _pending(a):
+            name = str(a.get("type_name") or "").strip()
+            qty = int(a.get("quantity") or 0)
+            if name and qty > 0:
+                totals[name] = totals.get(name, 0) + qty
+    return "\n".join(f"{name}\t{qty}" for name, qty in totals.items())
+
+
 # ---------------------------------------------------------------------------
 # AG-Grid section renderer
 # ---------------------------------------------------------------------------
@@ -406,6 +420,12 @@ def render_tab_shopping(page_state: DailyPlannerPageState) -> None:
     )
     with st.expander("Preview (copy-paste format)", expanded=False):
         st.code(clipboard_text, language="text")
+    multibuy = multibuy_text(actions)
+    if multibuy:
+        st.markdown("**For the in-game Multibuy window**")
+        st.caption("Copy with the icon at the top right of the box, then in EVE: Market → Multibuy → "
+                   "Import from clipboard (icon at the top left of the window).")
+        st.code(multibuy, language="text")
 
     # BPO Investment Opportunities
     bpo_rows = _build_bpo_rows(items)

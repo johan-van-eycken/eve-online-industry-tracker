@@ -161,59 +161,17 @@ def render_tab_build_plan(page_state: DailyPlannerPageState) -> None:
     render_stat_tiles([(_decision_label(d), f"{n:,}", None) for d, n in counts.items()])
 
     all_decisions = list(counts)
-    pill_col, search_col = st.columns([3, 2], vertical_alignment="bottom")
+    pill_col, profit_col, search_col = st.columns([3, 1, 2], vertical_alignment="bottom")
     with pill_col:
         selected_decisions = st.pills(
             "Decision", options=all_decisions, default=all_decisions, selection_mode="multi",
             format_func=_decision_label, key="build_plan_decision_filter",
         ) or []
+    with profit_col:
+        profitable_only = st.toggle("Profitable only", key="build_plan_profitable",
+                                    help="Positive ISK/hour and positive margin %")
     with search_col:
         search = st.text_input("Search", placeholder="item name or reason", key="build_plan_search")
-
-    # ------------------------------------------------------------------
-    # Force include / exclude (session-only)
-    # ------------------------------------------------------------------
-    all_type_names = {
-        int(i.get("type_id") or 0): str(i.get("type_name") or str(i.get("type_id") or "Unknown"))
-        for i in items
-        if i.get("type_id")
-    }
-
-    with st.expander("Force Include / Exclude (session-only, resets on recompute)", expanded=False):
-        st.caption("Session-only overrides. These do not change the persisted plan — they reset when you recompute.")
-        fi_col, fe_col = st.columns(2)
-        with fi_col:
-            st.markdown("**Force Include** (add to build regardless of score)")
-            include_names = st.multiselect(
-                "Force include",
-                options=list(all_type_names.values()),
-                default=[
-                    all_type_names[tid]
-                    for tid in page_state.force_include
-                    if tid in all_type_names
-                ],
-                key="force_include_select",
-                label_visibility="collapsed",
-            )
-            page_state.force_include = {
-                tid for tid, name in all_type_names.items() if name in include_names
-            }
-        with fe_col:
-            st.markdown("**Force Exclude** (remove from build)")
-            exclude_names = st.multiselect(
-                "Force exclude",
-                options=list(all_type_names.values()),
-                default=[
-                    all_type_names[tid]
-                    for tid in page_state.force_exclude
-                    if tid in all_type_names
-                ],
-                key="force_exclude_select",
-                label_visibility="collapsed",
-            )
-            page_state.force_exclude = {
-                tid for tid, name in all_type_names.items() if name in exclude_names
-            }
 
     # ------------------------------------------------------------------
     # Build display dataframe
@@ -221,21 +179,13 @@ def render_tab_build_plan(page_state: DailyPlannerPageState) -> None:
     filtered_items = [
         i for i in items
         if str(i.get("decision") or "unknown") in selected_decisions and matches_search(i, search)
+        and (not profitable_only or is_profitable(i))
     ]
 
     display_rows = []
     for item in filtered_items:
-        type_id = int(item.get("type_id") or 0)
         decision = str(item.get("decision") or "")
         name = _display_name(item)
-
-        # Force overrides
-        if type_id in page_state.force_include:
-            decision_display = f"{_decision_label(decision)} ★"
-        elif type_id in page_state.force_exclude:
-            decision_display = f"{_decision_label(decision)} ✗"
-        else:
-            decision_display = _decision_label(decision)
 
         # Competition index — Phase A: show "—" since MIJ not running
         comp_index = item.get("competition_index")  # None in Phase A
@@ -245,7 +195,7 @@ def render_tab_build_plan(page_state: DailyPlannerPageState) -> None:
 
         display_rows.append({
             "Item": name,
-            "Decision": decision_display,
+            "Decision": _decision_label(decision),
             "_decision_raw": decision,
             "Priority Score": round(float(item.get("priority_score") or 0.0), 2),
             "ISK/hour": item.get("isk_per_hour"),
@@ -289,8 +239,7 @@ def render_tab_build_plan(page_state: DailyPlannerPageState) -> None:
                         'Skip':  '#f87171',
                         'Pause': '#a1a1aa'
                     };
-                    var dec = params.value ? params.value.replace(/[★✗]/g, '').trim() : '';
-                    var color = colors[dec] || null;
+                    var color = colors[params.value] || null;
                     if (!color) return {};
                     return {color: color, fontWeight: '600'};
                 }
@@ -380,6 +329,11 @@ def decision_counts(items: list[dict[str, Any]]) -> dict[str, int]:
         d = str(item.get("decision") or "unknown")
         counts[d] = counts.get(d, 0) + 1
     return dict(sorted(counts.items(), key=lambda kv: (order.index(kv[0]) if kv[0] in order else len(order), kv[0])))
+
+
+def is_profitable(item: dict[str, Any]) -> bool:
+    """Positive ISK/hour and positive margin; an unknown value is not profitable."""
+    return (_round2(item.get("isk_per_hour")) or 0.0) > 0 and (_round2(item.get("margin_pct")) or 0.0) > 0
 
 
 def matches_search(item: dict[str, Any], search: str | None) -> bool:

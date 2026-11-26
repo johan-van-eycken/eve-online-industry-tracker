@@ -72,3 +72,16 @@ def test_unknown_fees_are_worded_apart_from_unpriced_lines():
     assert "1 unpriced line(s)" in caption and "2 job(s) with an unknown install fee" in caption
     _label, _value, fees_only = budget_metric(1000.0, 100.0, 0, unknown_fee_jobs=2)
     assert "unpriced" not in fees_only and "2 job(s) with an unknown install fee" in fees_only
+
+
+def test_multibuy_text_is_one_tab_separated_line_per_pending_item():
+    from streamlit_ui.components.daily_planner.tab_shopping import multibuy_text
+    actions = [
+        {"action_type": "buy_materials", "type_name": "Tritanium", "quantity": 1500, "status": "pending"},
+        {"action_type": "buy_materials", "type_name": "Datacore - Mechanical Engineering", "quantity": 8,
+         "status": "pending", "shopping_category": "invention_input"},
+        {"action_type": "buy_materials", "type_name": "Tritanium", "quantity": 500, "status": "pending"},
+        {"action_type": "buy_materials", "type_name": "Pyerite", "quantity": 10, "status": "done"},
+        {"action_type": "manufacture", "type_name": "Frigate", "quantity": 1, "status": "pending"},
+    ]
+    assert multibuy_text(actions) == "Tritanium\t2000\nDatacore - Mechanical Engineering\t8"

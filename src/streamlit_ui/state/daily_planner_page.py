@@ -1,15 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass
 class DailyPlannerPageState:
     plan: dict | None = None
     status: str = "idle"                                    # mirrors compute job status
-    active_tab: int = 0
-    force_include: set[int] = field(default_factory=set)   # type_ids; session-only
-    force_exclude: set[int] = field(default_factory=set)   # type_ids; session-only
     recompute_confirmed: bool = False                       # for the confirmation dialog
 
 
